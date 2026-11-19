@@ -182,6 +182,11 @@ fn write_sheet(w: &mut impl Write, rows: u32, cols: u32) -> std::io::Result<()> 
                         let _ = write!(line, r#"<c r="{n}{r}" s="2"><f t="shared" si="{c}"/><v>{v}</v></c>"#);
                     }
                 }
+                6 if r % 2 == 0 => {
+                    // Fórmula normal (não compartilhada) com referência relativa e absoluta.
+                    let prev = &names[c - 1];
+                    let _ = write!(line, r#"<c r="{n}{r}"><f>{prev}{r}+$A$1</f><v>{}</v></c>"#, h % 1000);
+                }
                 6 => {
                     if !h.is_multiple_of(4) {
                         let _ = write!(line, r#"<c r="{n}{r}"><v>{}</v></c>"#, h % 1000);

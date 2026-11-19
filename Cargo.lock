@@ -547,9 +547,12 @@ name = "duck-bench"
 version = "0.1.0"
 dependencies = [
  "calamine",
+ "duck-calc",
  "duck-core",
+ "duck-deflate",
  "duck-par",
  "duck-xlsx",
+ "flate2",
  "libmimalloc-sys",
  "mimalloc",
  "rayon",
@@ -558,8 +561,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "duck-calc"
+version = "0.1.0"
+dependencies = [
+ "duck-core",
+]
+
+[[package]]
 name = "duck-core"
 version = "0.1.0"
+
+[[package]]
+name = "duck-deflate"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "rayon",
+]
 
 [[package]]
 name = "duck-gfx"
@@ -601,7 +620,9 @@ dependencies = [
 name = "duck-xlsx"
 version = "0.1.0"
 dependencies = [
+ "duck-calc",
  "duck-core",
+ "duck-deflate",
  "duck-par",
  "fast-float2",
  "flate2",

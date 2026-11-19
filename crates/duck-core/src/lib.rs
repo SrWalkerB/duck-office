@@ -10,8 +10,12 @@
 //!   juntadas depois ([`Sheet::merge_part`]) em ordem fixa, então o resultado
 //!   é idêntico com qualquer número de threads (ADR-012).
 
+mod layout;
 mod styles;
 
+use std::collections::HashMap;
+
+pub use layout::{CellRange, ColSpec, Layout, Pane, RowSpec};
 pub use styles::{Alignment, CellXf, Color, Fill, Font, HAlign, Styles, VAlign};
 
 /// Linhas por bloco.
@@ -188,7 +192,9 @@ pub struct Block {
 
 impl Block {
     fn new() -> Box<Self> {
-        Box::new(Self { kind: [0; BLOCK_ROWS], style: [0; BLOCK_ROWS], payload: [0; BLOCK_ROWS] })
+        // Memória já zerada direto do alocador, sem montar 11 KB na pilha e copiar.
+        // SAFETY: `Block` só tem inteiros; todos os bits zero é um valor válido.
+        unsafe { Box::<Self>::new_zeroed().assume_init() }
     }
 
     #[inline]
@@ -197,9 +203,17 @@ impl Block {
     }
 }
 
+/// Id de fórmula de uma célula: 0 = sem fórmula; com o bit alto, membro do
+/// grupo compartilhado `si`; senão, índice + 1 em `Sheet::formula_defs`.
+const SHARED_BIT: u32 = 0x8000_0000;
+
+type FormulaBlock = Box<[u32; BLOCK_ROWS]>;
+
 #[derive(Default)]
 pub struct Column {
     blocks: Vec<Option<Box<Block>>>,
+    /// Ids de fórmula, alocados só nos blocos que têm fórmula.
+    formulas: Vec<Option<FormulaBlock>>,
 }
 
 impl Column {
@@ -212,14 +226,80 @@ impl Column {
     }
 
     #[inline]
+    fn formula_block_mut(&mut self, bi: usize) -> &mut [u32; BLOCK_ROWS] {
+        if bi >= self.formulas.len() {
+            self.formulas.resize_with(bi + 1, || None);
+        }
+        // SAFETY: um array de `u32` zerado é válido.
+        self.formulas[bi]
+            .get_or_insert_with(|| unsafe { Box::<[u32; BLOCK_ROWS]>::new_zeroed().assume_init() })
+    }
+
+    #[inline]
     fn get(&self, row: usize) -> Option<(&Block, usize)> {
         let b = self.blocks.get(row / BLOCK_ROWS)?.as_deref()?;
         Some((b, row % BLOCK_ROWS))
     }
 
+    #[inline]
+    fn formula_id(&self, row: usize) -> u32 {
+        match self.formulas.get(row / BLOCK_ROWS) {
+            Some(Some(f)) => f[row % BLOCK_ROWS],
+            _ => 0,
+        }
+    }
+
     pub fn allocated_blocks(&self) -> usize {
         self.blocks.iter().filter(|b| b.is_some()).count()
     }
+
+    fn formula_blocks(&self) -> usize {
+        self.formulas.iter().filter(|b| b.is_some()).count()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fórmulas
+// ---------------------------------------------------------------------------
+
+/// Como a fórmula foi gravada no arquivo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormulaKind {
+    Normal,
+    /// Fórmula matricial (CSE) que ocupa `range`.
+    Array(CellRange),
+    /// Célula-mestre de uma fórmula compartilhada (`si`); as outras células do
+    /// grupo reaproveitam o texto deslocando as referências relativas.
+    Shared {
+        si: u32,
+    },
+    /// Tabela de dados (Análise de Hipóteses).
+    DataTable,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FormulaDef {
+    text: u32,
+    kind: FormulaKind,
+    row: u32,
+    col: u32,
+    /// `text` é um modelo relativo, compartilhado por várias células.
+    template: bool,
+}
+
+/// Fórmula de uma célula como está no arquivo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FormulaRef<'a> {
+    /// Texto da fórmula (sem o `=`). Para membros de grupo compartilhado, é o
+    /// texto da célula-mestre: as referências relativas precisam ser
+    /// deslocadas de (`anchor_row`, `anchor_col`) até a célula
+    /// (`duck_calc::cell_formula` faz isso).
+    pub text: &'a str,
+    pub kind: FormulaKind,
+    pub anchor_row: u32,
+    pub anchor_col: u32,
+    /// `text` é um modelo relativo (`duck_calc::from_template`), não texto A1.
+    pub template: bool,
 }
 
 /// Contagem de células por tipo.
@@ -261,6 +341,12 @@ pub struct SheetPart {
     columns: Vec<Column>,
     /// Strings locais desta parte; índices rebaseados no merge.
     pub strings: StringTable,
+    formula_texts: StringTable,
+    formula_defs: Vec<FormulaDef>,
+    /// Modelo relativo → índice em `formula_defs` (deduplicação dentro da parte).
+    templates: HashMap<Box<str>, u32>,
+    /// Larguras, alturas, mesclagens... vistas neste pedaço.
+    pub layout: Layout,
     /// Maior linha/coluna + 1 vistas nesta parte.
     pub rows: u32,
     pub cols: u32,
@@ -287,6 +373,61 @@ impl SheetPart {
         self.rows = self.rows.max(row + 1);
         self.cols = self.cols.max(col + 1);
     }
+
+    #[inline]
+    fn set_formula_id(&mut self, row: u32, col: u32, id: u32) {
+        let c = col as usize;
+        if c >= self.columns.len() {
+            self.columns.resize_with(c + 1, Column::default);
+        }
+        let r = row as usize;
+        self.columns[c].formula_block_mut(r / BLOCK_ROWS)[r % BLOCK_ROWS] = id;
+    }
+
+    /// Fórmula com texto próprio (normal, matricial, tabela de dados ou mestre
+    /// de grupo compartilhado).
+    pub fn set_formula(&mut self, row: u32, col: u32, text: &str, kind: FormulaKind) {
+        let text = self.formula_texts.push(text);
+        self.formula_defs.push(FormulaDef { text, kind, row, col, template: false });
+        let id = self.formula_defs.len() as u32;
+        self.set_formula_id(row, col, id);
+    }
+
+    /// Fórmula normal guardada como modelo relativo (deduplicado): fórmulas
+    /// copiadas para baixo viram uma entrada só.
+    /// Retorna o id da fórmula, que pode ser repassado a [`Self::reuse_formula`].
+    pub fn set_formula_template(&mut self, row: u32, col: u32, template: &str) -> u32 {
+        let idx = match self.templates.get(template) {
+            Some(&i) => i,
+            None => {
+                let text = self.formula_texts.push(template);
+                let i = self.formula_defs.len() as u32;
+                self.formula_defs.push(FormulaDef {
+                    text,
+                    kind: FormulaKind::Normal,
+                    row: 0,
+                    col: 0,
+                    template: true,
+                });
+                self.templates.insert(template.into(), i);
+                i
+            }
+        };
+        self.set_formula_id(row, col, idx + 1);
+        idx + 1
+    }
+
+    /// Dá à célula a mesma fórmula (id de [`Self::set_formula_template`]) de
+    /// outra célula desta parte. Só vale para modelos sem referência, que não
+    /// dependem da posição.
+    pub fn reuse_formula(&mut self, row: u32, col: u32, id: u32) {
+        self.set_formula_id(row, col, id);
+    }
+
+    /// Célula que reaproveita a fórmula compartilhada `si`.
+    pub fn set_shared_formula(&mut self, row: u32, col: u32, si: u32) {
+        self.set_formula_id(row, col, SHARED_BIT | (si & !SHARED_BIT));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -297,8 +438,18 @@ pub struct Sheet {
     pub name: String,
     pub hidden: bool,
     columns: Vec<Column>,
-    /// Strings que não estão na tabela compartilhada (inline, resultado de fórmula).
-    pub strings: StringTable,
+    /// Strings que não estão na tabela compartilhada (inline, resultado de
+    /// fórmula): uma tabela por parte, movida sem cópia no merge. A célula
+    /// guarda `(tabela << 32) | índice`.
+    strings: Vec<StringTable>,
+    formula_texts: StringTable,
+    formula_defs: Vec<FormulaDef>,
+    /// `si` → índice da célula-mestre em `formula_defs`.
+    shared_groups: HashMap<u32, u32>,
+    /// Modelo relativo → índice em `formula_defs` (deduplicação entre partes).
+    templates: HashMap<Box<str>, u32>,
+    /// Larguras, alturas, mesclagens, painéis congelados.
+    pub layout: Layout,
     rows: u32,
     cols: u32,
 }
@@ -309,7 +460,12 @@ impl Sheet {
             name: name.into(),
             hidden: false,
             columns: Vec::new(),
-            strings: StringTable::new(),
+            strings: Vec::new(),
+            formula_texts: StringTable::new(),
+            formula_defs: Vec::new(),
+            shared_groups: HashMap::new(),
+            templates: HashMap::new(),
+            layout: Layout::default(),
             rows: 0,
             cols: 0,
         }
@@ -328,7 +484,35 @@ impl Sheet {
     /// Junta uma parte a esta aba. Partes podem se sobrepor nos blocos de
     /// fronteira; as células presentes na parte sobrescrevem as da aba.
     pub fn merge_part(&mut self, mut part: SheetPart) {
-        let base = self.strings.append(&part.strings) as u64;
+        // As strings da parte viram mais uma tabela da aba (sem copiar).
+        let table = if part.strings.is_empty() { 0 } else { self.strings.len() as u64 };
+        let tag = table << 32;
+        if !part.strings.is_empty() {
+            self.strings.push(std::mem::take(&mut part.strings));
+        }
+        // Fórmulas da parte: modelos já conhecidos reaproveitam a entrada da
+        // aba; o resto é anexado. `remap[local] = global`.
+        let mut remap = Vec::with_capacity(part.formula_defs.len());
+        for d in &part.formula_defs {
+            let text = part.formula_texts.get(d.text).unwrap_or("");
+            if d.template
+                && let Some(&g) = self.templates.get(text)
+            {
+                remap.push(g);
+                continue;
+            }
+            let g = self.formula_defs.len() as u32;
+            let t = self.formula_texts.push(text);
+            self.formula_defs.push(FormulaDef { text: t, ..*d });
+            if d.template {
+                self.templates.insert(text.into(), g);
+            }
+            if let FormulaKind::Shared { si } = d.kind {
+                self.shared_groups.insert(si, g);
+            }
+            remap.push(g);
+        }
+        let identity = remap.iter().enumerate().all(|(i, &g)| g as usize == i);
         if self.columns.len() < part.columns.len() {
             self.columns.resize_with(part.columns.len(), Column::default);
         }
@@ -339,10 +523,10 @@ impl Sheet {
             }
             for (bi, slot) in pcol.blocks.iter_mut().enumerate() {
                 let Some(mut pb) = slot.take() else { continue };
-                if base != 0 {
+                if tag != 0 {
                     for i in 0..BLOCK_ROWS {
                         if pb.kind[i] & kind::TYPE_MASK == kind::LOCAL_STR {
-                            pb.payload[i] += base;
+                            pb.payload[i] |= tag;
                         }
                     }
                 }
@@ -359,9 +543,38 @@ impl Sheet {
                     }
                 }
             }
+            if col.formulas.len() < pcol.formulas.len() {
+                col.formulas.resize_with(pcol.formulas.len(), || None);
+            }
+            for (bi, slot) in pcol.formulas.iter_mut().enumerate() {
+                let Some(mut pf) = slot.take() else { continue };
+                if !identity {
+                    for id in pf.iter_mut() {
+                        if *id != 0 && *id & SHARED_BIT == 0 {
+                            *id = remap[*id as usize - 1] + 1;
+                        }
+                    }
+                }
+                match &mut col.formulas[bi] {
+                    None => col.formulas[bi] = Some(pf),
+                    Some(existing) => {
+                        for (e, &n) in existing.iter_mut().zip(pf.iter()) {
+                            if n != 0 {
+                                *e = n;
+                            }
+                        }
+                    }
+                }
+            }
         }
+        self.layout.absorb(std::mem::take(&mut part.layout));
         self.rows = self.rows.max(part.rows);
         self.cols = self.cols.max(part.cols);
+    }
+
+    /// Termina a montagem (ordena o layout). Chamado depois do último merge.
+    pub fn finish(&mut self) {
+        self.layout.finish();
     }
 
     /// Célula em (linha, coluna), a partir de 0.
@@ -374,12 +587,64 @@ impl Sheet {
         let value = match k & kind::TYPE_MASK {
             kind::NUMBER => Value::Number(f64::from_bits(p)),
             kind::SHARED_STR => Value::Text(shared.get(p as u32).unwrap_or("")),
-            kind::LOCAL_STR => Value::Text(self.strings.get(p as u32).unwrap_or("")),
+            kind::LOCAL_STR => {
+                Value::Text(self.strings.get((p >> 32) as usize).and_then(|t| t.get(p as u32)).unwrap_or(""))
+            }
             kind::BOOL => Value::Bool(p != 0),
             kind::ERROR => Value::Error(CellError::from_code(p as u8)),
             _ => Value::Empty,
         };
         Cell { value, style: b.style[i], formula: k & kind::FORMULA != 0 }
+    }
+
+    /// Fórmula da célula como está no arquivo (ver [`FormulaRef`]).
+    pub fn formula(&self, row: u32, col: u32) -> Option<FormulaRef<'_>> {
+        let id = self.columns.get(col as usize)?.formula_id(row as usize);
+        if id == 0 {
+            return None;
+        }
+        let def = if id & SHARED_BIT != 0 {
+            let idx = *self.shared_groups.get(&(id & !SHARED_BIT))?;
+            self.formula_defs.get(idx as usize)?
+        } else {
+            self.formula_defs.get(id as usize - 1)?
+        };
+        Some(FormulaRef {
+            text: self.formula_texts.get(def.text)?,
+            kind: def.kind,
+            anchor_row: def.row,
+            anchor_col: def.col,
+            template: def.template,
+        })
+    }
+
+    /// Entradas de fórmula guardadas (modelos deduplicados, mestres de grupos
+    /// compartilhados e fórmulas guardadas como texto).
+    pub fn formula_texts_stored(&self) -> usize {
+        self.formula_defs.len()
+    }
+
+    /// Células com fórmula registrada.
+    pub fn formula_cells(&self) -> u64 {
+        self.columns
+            .iter()
+            .flat_map(|c| c.formulas.iter().flatten())
+            .map(|b| b.iter().filter(|&&id| id != 0).count() as u64)
+            .sum()
+    }
+
+    /// Posições (linha, coluna) das células com fórmula, coluna a coluna.
+    pub fn formula_positions(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.columns.iter().enumerate().flat_map(|(c, col)| {
+            col.formulas.iter().enumerate().flat_map(move |(bi, b)| {
+                b.iter().flat_map(move |b| {
+                    b.iter()
+                        .enumerate()
+                        .filter(|(_, id)| **id != 0)
+                        .map(move |(i, _)| ((bi * BLOCK_ROWS + i) as u32, c as u32))
+                })
+            })
+        })
     }
 
     /// Conta as células por tipo.
@@ -414,8 +679,12 @@ impl Sheet {
     /// Memória ocupada pelos dados desta aba.
     pub fn heap_bytes(&self) -> usize {
         self.allocated_blocks() * std::mem::size_of::<Block>()
-            + self.columns.iter().map(|c| c.blocks.capacity() * 8).sum::<usize>()
-            + self.strings.heap_bytes()
+            + self.columns.iter().map(Column::formula_blocks).sum::<usize>() * BLOCK_ROWS * 4
+            + self.columns.iter().map(|c| (c.blocks.capacity() + c.formulas.capacity()) * 8).sum::<usize>()
+            + self.strings.iter().map(StringTable::heap_bytes).sum::<usize>()
+            + self.formula_texts.heap_bytes()
+            + self.formula_defs.capacity() * std::mem::size_of::<FormulaDef>()
+            + self.layout.heap_bytes()
     }
 }
 

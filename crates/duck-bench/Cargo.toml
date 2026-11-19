@@ -8,9 +8,12 @@ rust-version.workspace = true
 
 [dependencies]
 calamine = "0.38.0"
+duck-calc = { version = "0.1.0", path = "../duck-calc" }
 duck-core = { version = "0.1.0", path = "../duck-core" }
+duck-deflate = { version = "0.1.0", path = "../duck-deflate" }
 duck-par = { version = "0.1.0", path = "../duck-par" }
 duck-xlsx = { version = "0.1.0", path = "../duck-xlsx" }
+flate2 = { version = "1.1.11", default-features = false, features = ["zlib-rs"] }
 libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
 mimalloc = "0.1.52"
 rayon = "1.12.0"

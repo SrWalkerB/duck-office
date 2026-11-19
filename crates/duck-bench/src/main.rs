@@ -27,7 +27,34 @@ use duck_core::Workbook;
 use duck_xlsx::{LoadReport, Options};
 use mem::mb;
 
+/// Opções do mimalloc (v3, a versão que o `libmimalloc-sys` compila). Medidas
+/// no arquivo de referência (ver docs/ARCHITECTURE.md, status da F2):
+/// - `arena_eager_commit = 0`: o padrão compromete a arena inteira de saída em
+///   sistemas com overcommit (Linux), inflando o RSS em ~250 MB;
+/// - `purge_delay = 1 ms`: devolve logo ao SO a memória liberada (o padrão,
+///   10 ms, deixa o pico da leitura passar de 1 GB).
+const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
+const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+
+extern "C" fn configure_allocator() {
+    // SAFETY: só ajusta opções do mimalloc; roda antes de qualquer outra thread.
+    unsafe {
+        libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0);
+        libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 1);
+    }
+}
+
+// O runtime do Rust já aloca antes do `main`, e o mimalloc lê
+// `arena_eager_commit` ao criar a primeira arena: a opção precisa ser
+// definida antes disso. No Linux, um construtor em `.init_array` roda antes do
+// runtime. (No Windows a opção não muda nada: lá não há overcommit.)
+#[cfg(target_os = "linux")]
+#[used]
+#[unsafe(link_section = ".init_array")]
+static CONFIGURE_ALLOCATOR: extern "C" fn() = configure_allocator;
+
 fn main() {
+    configure_allocator();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("help");
     let rest = &args[args.len().min(1)..];
@@ -36,6 +63,8 @@ fn main() {
         "sweep" => cmd_sweep(rest),
         "verify" => cmd_verify(rest),
         "gen" => cmd_gen(rest),
+        "formula-stats" => cmd_formula_stats(rest),
+        "inflate" => cmd_inflate(rest),
         _ => {
             eprintln!(
                 "uso: duck-bench <open|sweep|verify|gen> [ARQUIVO] [opções]\n  veja o topo de crates/duck-bench/src/main.rs"
@@ -63,7 +92,7 @@ fn positional(args: &[String]) -> Option<String> {
             continue;
         }
         if a.starts_with("--") {
-            skip = !matches!(a.as_str(), "--quiet" | "--machine");
+            skip = !matches!(a.as_str(), "--quiet" | "--machine" | "--mem-trace");
             continue;
         }
         return Some(a.clone());
@@ -93,6 +122,12 @@ fn options(args: &[String]) -> Options {
     }
     if let Some(n) = flag(args, "--in-flight").and_then(|v| v.parse::<usize>().ok()) {
         o.max_in_flight = n;
+    }
+    if let Some(n) = flag(args, "--lookahead").and_then(|v| v.parse::<usize>().ok()) {
+        o.inflate_lookahead = n;
+    }
+    if let Some(n) = flag(args, "--pieces").and_then(|v| v.parse::<usize>().ok()) {
+        o.inflate_pieces = n;
     }
     o
 }
@@ -127,7 +162,30 @@ fn cmd_open(args: &[String]) -> Res {
     let path = file_arg(args)?;
     let machine = args.iter().any(|a| a == "--machine");
     let file_size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+    // `--mem-trace`: amostra a memória do processo a cada 10 ms durante a leitura.
+    let trace = args.iter().any(|a| a == "--mem-trace");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sampler = trace.then(|| {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let t = Instant::now();
+            let mut v = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                v.push((t.elapsed().as_millis(), mem::process().current));
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            v
+        })
+    });
     let (wb, rep) = load(&path, args)?;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(h) = sampler {
+        let v = h.join().unwrap_or_default();
+        println!("memória durante a leitura (ms → MB):");
+        for (t, b) in v.iter().step_by((v.len() / 25).max(1)) {
+            println!("  {t:>5} ms  {:>6.0} MB  {}", mb(*b), "#".repeat((mb(*b) / 40.0) as usize));
+        }
+    }
     let m = mem::process();
     let cells: u64 = wb.sheets.iter().map(|s| s.counts().values()).sum();
 
@@ -194,7 +252,21 @@ fn cmd_open(args: &[String]) -> Res {
     println!("    strings locais     {:>12}", total.local_strings);
     println!("    booleanos / erros  {:>12} / {}", total.bools, total.errors);
     println!("  com fórmula          {:>12}", total.formulas);
+    let texts: usize = wb.sheets.iter().map(|s| s.formula_texts_stored()).sum();
+    println!("    entradas guardadas {:>12} (modelos deduplicados + mestres de grupos)", texts);
     println!("  só estilo            {:>12}", total.styled_empty);
+    let lay = |f: fn(&duck_core::Layout) -> usize| wb.sheets.iter().map(|s| f(&s.layout)).sum::<usize>();
+    println!(
+        "
+Layout:"
+    );
+    println!("  colunas com largura  {:>12}", lay(|l| l.cols.len()));
+    println!("  linhas com altura    {:>12}", lay(|l| l.rows.len()));
+    println!("  células mescladas    {:>12}", lay(|l| l.merges.len()));
+    println!(
+        "  abas com painel congelado {:>7}",
+        wb.sheets.iter().filter(|s| s.layout.pane.is_some()).count()
+    );
 
     println!("\nMemória:");
     println!("  dados do workbook    {:>9.1} MB", mb(wb.heap_bytes() as u64));
@@ -227,7 +299,7 @@ fn cmd_sweep(args: &[String]) -> Res {
         for _ in 0..repeat {
             let mut cmd = Command::new(&exe);
             cmd.arg("open").arg(&path).arg("--threads").arg(n.to_string()).arg("--machine");
-            for f in ["--chunk-mb", "--in-flight"] {
+            for f in ["--chunk-mb", "--in-flight", "--lookahead", "--pieces"] {
                 if let Some(v) = flag(args, f) {
                     cmd.arg(f).arg(v);
                 }
@@ -274,10 +346,12 @@ fn cmd_verify(args: &[String]) -> Res {
         out.mismatches,
         t.elapsed().as_secs_f64()
     );
+    println!("{} fórmulas comparadas, {} divergências", out.formulas_compared, out.formula_mismatches);
+    println!("{} mesclagens comparadas, {} divergências", out.merges_compared, out.merge_mismatches);
     for s in &out.samples {
         println!("  {s}");
     }
-    if out.mismatches > 0 {
+    if out.mismatches > 0 || out.formula_mismatches > 0 || out.merge_mismatches > 0 {
         return Err("o duck-xlsx leu algo diferente do calamine".into());
     }
     Ok(())
@@ -301,5 +375,174 @@ fn cmd_gen(args: &[String]) -> Res {
         mb(size),
         t.elapsed().as_secs_f64()
     );
+    Ok(())
+}
+
+/// Diagnóstico: quantas fórmulas viram modelo relativo e quão repetidos são.
+/// Mostra só a estrutura (textos literais escondidos).
+fn cmd_formula_stats(args: &[String]) -> Res {
+    use std::collections::HashMap;
+    let path = file_arg(args)?;
+    let (wb, _) = load(&path, args)?;
+    let sheet = wb.sheets.iter().max_by_key(|s| s.formula_cells()).ok_or("sem abas")?;
+    let mut by_template: HashMap<String, u64> = HashMap::new();
+    let (mut total, mut templ, mut shared, mut raw) = (0u64, 0u64, 0u64, 0u64);
+    let mut raw_samples = Vec::new();
+    for (r, c) in sheet.formula_positions() {
+        let Some(f) = sheet.formula(r, c) else { continue };
+        total += 1;
+        if f.template {
+            templ += 1;
+            *by_template.entry(f.text.to_string()).or_default() += 1;
+        } else if matches!(f.kind, duck_core::FormulaKind::Shared { .. }) {
+            shared += 1;
+        } else {
+            raw += 1;
+            if raw_samples.len() < 5 {
+                raw_samples.push(mask_strings(f.text));
+            }
+        }
+    }
+    println!("fórmulas na maior aba: {total}");
+    println!("  modelos relativos: {templ} células, {} modelos distintos", by_template.len());
+    println!("  compartilhadas:    {shared}");
+    println!("  texto cru:         {raw}");
+    let mut top: Vec<_> = by_template.into_iter().collect();
+    top.sort_by_key(|t| std::cmp::Reverse(t.1));
+    println!("modelos mais usados:");
+    for (t, n) in top.iter().take(5) {
+        println!(
+            "  {n:>9}× {}",
+            mask_strings(
+                &t.replace(['\u{F000}', '\u{F001}', '\u{F002}'], "⟨")
+                    .replace('\u{F003}', ",")
+                    .replace('\u{F004}', "⟩")
+            )
+        );
+    }
+    println!("cauda: {} modelos usados só 1 vez", top.iter().filter(|t| t.1 == 1).count());
+    for s in raw_samples {
+        println!("  cru: {s}");
+    }
+    Ok(())
+}
+
+fn mask_strings(f: &str) -> String {
+    let mut out = String::new();
+    let mut in_str = false;
+    for ch in f.chars() {
+        if ch == '"' {
+            in_str = !in_str;
+            out.push(ch);
+        } else if in_str {
+            if !out.ends_with('…') {
+                out.push('…');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out.chars().take(160).collect()
+}
+
+/// Descompacta a maior parte do zip com o zlib-rs (sequencial) e com o
+/// `duck-deflate` em paralelo, e compara bytes, CRC e tempo.
+fn cmd_inflate(args: &[String]) -> Res {
+    use std::io::Read;
+    let path = file_arg(args)?;
+    let pkg = duck_xlsx::Package::open(&path).map_err(|e| e.to_string())?;
+    let e = pkg
+        .entries()
+        .filter(|e| e.is_deflated())
+        .max_by_key(|e| e.size)
+        .ok_or("zip sem partes compactadas")?
+        .clone();
+    let data = pkg.compressed(&e);
+    println!("maior parte: {:.1} MB comprimidos → {:.1} MB", mb(data.len() as u64), mb(e.size));
+
+    let t = Instant::now();
+    let mut reference = Vec::with_capacity(e.size as usize);
+    flate2::read::DeflateDecoder::new(data).read_to_end(&mut reference).map_err(|e| e.to_string())?;
+    let t_zlib = t.elapsed();
+    println!(
+        "  zlib-rs (1 thread)          {:>7.0} ms  ({:.0} MB/s)",
+        ms(t_zlib),
+        mb(e.size) / t_zlib.as_secs_f64()
+    );
+
+    let t = Instant::now();
+    let ours = duck_deflate::inflate(data).map_err(|e| e.to_string())?;
+    let t_seq = t.elapsed();
+    println!(
+        "  duck-deflate (1 thread)     {:>7.0} ms  ({:.0} MB/s)",
+        ms(t_seq),
+        mb(e.size) / t_seq.as_secs_f64()
+    );
+    if ours != reference {
+        return Err("duck-deflate sequencial difere do zlib-rs".into());
+    }
+    drop(ours);
+
+    let part_mb: usize = flag(args, "--part-mb").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let lookahead: usize = flag(args, "--lookahead").and_then(|v| v.parse().ok()).unwrap_or(16);
+    let pool = duck_par::pool(threads(args));
+    let mut pos = 0usize;
+    let mut same = true;
+    let t = Instant::now();
+    let rep = pool
+        .install(|| {
+            duck_deflate::inflate_parallel(
+                data,
+                Some(e.crc32),
+                duck_deflate::Options { part_bytes: part_mb << 20, lookahead },
+                |b| {
+                    let piece = b.bytes();
+                    same &= reference.get(pos..pos + piece.len()) == Some(piece);
+                    pos += piece.len();
+                    Ok(())
+                },
+            )
+        })
+        .map_err(|e| e.to_string())?;
+    let t_par = t.elapsed();
+    println!(
+        "  duck-deflate paralelo ({} thr) {:>5.0} ms  ({:.0} MB/s) — {:.1}× o zlib-rs",
+        pool.current_num_threads(),
+        ms(t_par),
+        mb(e.size) / t_par.as_secs_f64(),
+        t_zlib.as_secs_f64() / t_par.as_secs_f64()
+    );
+    println!(
+        "  partes: {} ({} especuladas, {} em sequência: {} sem bloco, {} desalinhadas, {} sem janela; {} puladas)",
+        rep.parts, rep.speculative, rep.sequential, rep.no_block, rep.misaligned, rep.unresolved, rep.skipped
+    );
+    println!("  saída resolvida em série (fase de marcadores): {:.1} MB", mb(rep.head_bytes));
+    println!(
+        "  CRC32 confere e bytes {} ao zlib-rs",
+        if same && pos == reference.len() { "idênticos" } else { "DIFERENTES" }
+    );
+    if !(same && pos == reference.len()) {
+        return Err("saída paralela difere".into());
+    }
+    // Sem a comparação (que é serial): só o custo de descompactar e entregar.
+    let mut best = f64::MAX;
+    for _ in 0..3 {
+        let t = Instant::now();
+        let mut total = 0usize;
+        pool.install(|| {
+            duck_deflate::inflate_parallel(
+                data,
+                Some(e.crc32),
+                duck_deflate::Options { part_bytes: part_mb << 20, lookahead },
+                |b| {
+                    total += b.len();
+                    Ok(())
+                },
+            )
+        })
+        .map_err(|e| e.to_string())?;
+        best = best.min(ms(t.elapsed()));
+    }
+    println!("  só descompactar (melhor de 3): {best:.0} ms — {:.1}× o zlib-rs", ms(t_zlib) / best);
     Ok(())
 }

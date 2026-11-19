@@ -1,0 +1,10 @@
+[package]
+name = "duck-calc"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+duck-core = { version = "0.1.0", path = "../duck-core" }

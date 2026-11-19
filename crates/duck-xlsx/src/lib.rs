@@ -61,11 +61,24 @@ pub struct Options {
     pub max_in_flight: usize,
     /// Só estas abas (índices na ordem do workbook). `None` = todas.
     pub only_sheets: Option<Vec<usize>>,
+    /// Inflate paralelo: partes (1 MB comprimido, ~15 MB descompactados)
+    /// especuladas à frente.
+    pub inflate_lookahead: usize,
+    /// Inflate paralelo: vetores descompactados em trânsito no parse.
+    pub inflate_pieces: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { chunk_bytes: 8 * 1024 * 1024, max_in_flight: 0, only_sheets: None }
+        // Valores medidos no arquivo de referência: mais que isso quase não
+        // ganha tempo e passa de 1 GB de pico.
+        Self {
+            chunk_bytes: 8 * 1024 * 1024,
+            max_in_flight: 0,
+            only_sheets: None,
+            inflate_lookahead: 8,
+            inflate_pieces: 8,
+        }
     }
 }
 
@@ -136,10 +149,12 @@ pub fn open(path: impl AsRef<Path>, opts: &Options) -> Result<(Workbook, LoadRep
             s.spawn(move |_| {
                 let m = &meta.sheets[i];
                 let r = match pkg.entry(&m.path) {
-                    Some(e) => sheet::load_sheet(pkg, e, &m.name, chunk, limiter).map(|(mut sh, rep)| {
-                        sh.hidden = m.hidden;
-                        (sh, rep)
-                    }),
+                    Some(e) => {
+                        sheet::load_sheet(pkg, e, &m.name, chunk, limiter, opts).map(|(mut sh, rep)| {
+                            sh.hidden = m.hidden;
+                            (sh, rep)
+                        })
+                    }
                     None => Err(Error::Missing(m.path.clone())),
                 };
                 results.lock().unwrap().push((i, r));

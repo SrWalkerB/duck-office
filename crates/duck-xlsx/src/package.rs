@@ -28,7 +28,19 @@ pub struct Entry {
     compressed: usize,
     /// Tamanho descompactado declarado no zip.
     pub size: u64,
+    /// CRC32 dos dados descompactados, declarado no zip.
+    pub crc32: u32,
     method: Method,
+}
+
+impl Entry {
+    pub fn is_deflated(&self) -> bool {
+        self.method == Method::Deflated
+    }
+
+    pub fn compressed_size(&self) -> usize {
+        self.compressed
+    }
 }
 
 pub struct Package {
@@ -69,7 +81,10 @@ impl Package {
             if data_offset + compressed > mmap.len() {
                 return Err(Error::Zip(format!("parte {name} ultrapassa o fim do arquivo")));
             }
-            entries.insert(name.clone(), Entry { name, data_offset, compressed, size: f.size(), method });
+            entries.insert(
+                name.clone(),
+                Entry { name, data_offset, compressed, size: f.size(), crc32: f.crc32(), method },
+            );
         }
         Ok(Self { mmap, entries })
     }
@@ -89,6 +104,34 @@ impl Package {
         let mut inf = self.inflater(e);
         inf.read_into(&mut out, usize::MAX)?;
         Ok(out)
+    }
+
+    /// Bytes comprimidos da parte, direto do arquivo mapeado.
+    pub fn compressed(&self, e: &Entry) -> &[u8] {
+        &self.mmap[e.data_offset..e.data_offset + e.compressed]
+    }
+
+    /// Avisa o sistema que os bytes comprimidos de `e` até `upto` não serão
+    /// mais lidos. No Linux, as páginas do arquivo mapeado saem da memória do
+    /// processo (contam no RSS) e voltam do disco se forem lidas de novo; no
+    /// Windows, não faz nada.
+    pub fn release(&self, e: &Entry, upto: usize) {
+        #[cfg(unix)]
+        {
+            const PAGE: usize = 4096;
+            let start = e.data_offset.div_ceil(PAGE) * PAGE;
+            let end = ((e.data_offset + upto.min(e.compressed)) / PAGE) * PAGE;
+            if end > start {
+                // SAFETY: mapeamento só de leitura de um arquivo que não é
+                // alterado por nós: depois do MADV_DONTNEED, uma leitura traz
+                // de volta o mesmo conteúdo do arquivo.
+                let _ = unsafe {
+                    self.mmap.unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, start, end - start)
+                };
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (e, upto);
     }
 
     pub fn inflater(&self, e: &Entry) -> Inflater<'_> {

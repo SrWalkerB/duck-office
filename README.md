@@ -16,8 +16,10 @@ platform/            biblioteca nativa independente (não depende da suíte)
 crates/              a suíte office
   duck-core/         modelo do workbook: blocos colunares, strings, estilos
   duck-par/          pool de threads, limitador de memória, cortes SIMD
+  duck-deflate/      descompactação deflate em paralelo (especulativa)
   duck-xlsx/         leitura de .xlsx/.xlsm em paralelo e em streaming
-  duck-bench/        medição: open, sweep, verify, gen
+  duck-calc/         fórmulas: referências e modelos relativos
+  duck-bench/        medição: open, sweep, verify, gen, inflate
 scripts/
   check-platform-deps.sh   garante que platform/ não depende da suíte
 ```
@@ -62,10 +64,16 @@ Curva de ganho por threads (um processo por rodada):
 cargo run --release -p duck-bench -- sweep caminho/arquivo.xlsx
 ```
 
-Conferir cada célula contra o calamine (leitor independente):
+Conferir cada célula, fórmula e mesclagem contra o calamine (leitor independente):
 
 ```
 cargo run --release -p duck-bench -- verify caminho/arquivo.xlsx
+```
+
+Comparar a descompactação paralela com o zlib-rs na maior parte do zip:
+
+```
+cargo run --release -p duck-bench -- inflate caminho/arquivo.xlsx
 ```
 
 Gerar uma planilha sintética grande (600 mil linhas × 37 colunas por padrão):

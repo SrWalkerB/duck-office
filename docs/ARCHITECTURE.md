@@ -82,6 +82,19 @@ A F1 leu o arquivo inteiro em ~0,65 s, bem abaixo das hipóteses iniciais. As me
 | Pico de memória durante a leitura | ~0,9–1,1 GB | **< 1 GB** |
 | Primeira tela visível após abrir (F2) | — | **< 300 ms** (aba ativa primeiro, carga progressiva) |
 
+Situação depois de resolver as pendências da F1 (agora lendo também fórmulas e layout, o que aumentou o trabalho total em ~25%):
+
+| Meta | Windows | Linux | |
+|---|---|---|---|
+| < 1 s com 8+ núcleos | 785 ms (8 thr) | 852 ms (8 thr) | ✓ |
+| < 5 s com 1 núcleo | 4,85 s | 4,8–5,0 s | ✓ no limite |
+| < 0,4 s com 16+ núcleos | 528 ms (32 thr) | 543 ms (32 thr) | ✗ (era 650 ms) |
+| ≥ 10× com 16 threads | 8,6× (16), 9,2× (32) | 8,6× (16), 9,2× (32) | ✗ (era 6,4×) |
+| < 600 MB com o arquivo aberto | ~510 MB | ~490 MB | ✓ |
+| Pico < 1 GB | 615–936 MB | 563–746 MB | ✓ |
+
+As duas metas não cumpridas têm a mesma causa: a leitura deixou de ter um trecho serial e agora é **limitada pela CPU total** (~10 s de CPU somados, ~160 ns por célula no parse). O próximo ganho vem de deixar o laço principal do parse mais barato, não de mais paralelismo.
+
 ---
 
 ## ADR-001 · Onde está o gargalo de verdade
@@ -138,9 +151,10 @@ duck-office/
 │   └── examples/          # hello_window, million_rows, ... (provam que roda sozinha)
 ├── crates/                # a suíte office
 │   ├── duck-par           # infraestrutura de paralelismo e kernels SIMD (ADR-012)
+│   ├── duck-deflate       # descompactação deflate em paralelo (ADR-005)
 │   ├── duck-core          # modelo do workbook: células, blocos, strings, estilos
 │   ├── duck-xlsx          # leitura (v1) e escrita (v2) de xlsx/xlsm em streaming
-│   ├── duck-calc          # fórmulas: parser, AST, grafo de dependências (avaliação na v2)
+│   ├── duck-calc          # fórmulas: referências e modelos relativos (hoje); parser, AST e cálculo (F4)
 │   ├── duck-sheets        # o app: grade virtualizada, barra de fórmulas, abas
 │   └── duck-bench         # CLI de benchmark + gerador de planilhas sintéticas
 └── docs/
@@ -199,7 +213,7 @@ Futuras: `duck-vba`, `duck-docs`, `duck-slides`, todas reutilizando `duck-core` 
 
    - O inflate produz fatias do XML descompactado. Cada fatia é cortada numa fronteira `<row ` (achada com busca SIMD), então **cada pedaço é autocontido** e vai para um núcleo diferente.
    - As linhas trazem o próprio número (`r="12345"`), e as células só guardam ids de string e de estilo. Por isso cada thread monta os seus blocos sem esperar as outras, e a emenda final é só ligar ponteiros, não copiar dados.
-   - O inflate de uma parte é sequencial por natureza; ele vira o limite. Para quebrar esse limite, o **inflate paralelo especulativo** (técnica do rapidgzip) entra como otimização prioritária na F2 (ADR-012).
+   - O inflate de uma parte é sequencial por natureza. Para partes grandes (≥ 8 MB comprimidos) entra o **inflate paralelo especulativo** do `duck-deflate` (técnica do rapidgzip): decodificação de várias partes ao mesmo tempo sem conhecer a janela anterior, marcadores resolvidos em ordem, conferência pelo CRC32 do zip e volta automática ao zlib-rs se algo não bater.
 
 3. **Partes independentes em paralelo**: `sharedStrings`, `styles` e todas as abas carregam ao mesmo tempo (as células só referenciam ids, então não há dependência de ordem). **A aba ativa tem prioridade** no escalonador. A grade é pintada assim que as primeiras linhas chegam (**carga progressiva**); o resto continua em background e a barra de rolagem cresce conforme carrega.
 4. **Abas não visitadas podem ficar lazy** (carregadas ao clicar), com pré-carga em background quando a CPU estiver livre.
@@ -447,7 +461,7 @@ Tendência inicial: **container próprio com codificação de colunas inspirada 
 |---|---|---|
 | **F0** | Esqueleto do workspace; primeira versão de `platform/` (`duck-platform`, `duck-gfx`, `duck-text`) com o exemplo `million_rows`: **grade falsa de 1M linhas** com texto, sem nenhum crate de office | 60+ fps rolando em Windows e Linux; regra de dependência verificada no CI |
 | **F1** | `duck-par` + `duck-xlsx` lendo valores, strings e estilos com **parse paralelo em pedaços**; `duck-bench` medindo tempo, RAM e curva de speedup (1→16 threads); gerador sintético | Números reais do arquivo de referência; metas revisadas |
-| **F2** | **Visualizador completo** (v1): abas, estilos, merges, larguras, congelar painéis, busca paralela/SIMD, copiar, carga progressiva; inflate paralelo especulativo | Abre o arquivo de referência dentro das metas |
+| **F2** | **Visualizador completo** (v1): abas, estilos, merges, larguras, congelar painéis, busca paralela/SIMD, copiar, carga progressiva (a leitura de layout e o inflate paralelo já estão prontos) | Abre o arquivo de referência dentro das metas |
 | **F3** | Edição + escrita com round-trip (salvar em paralelo) | Teste de round-trip verde no corpus |
 | **F4** | Motor de cálculo: grafo de dependências por intervalos, recálculo incremental em níveis paralelos, fórmulas compartilhadas como kernels SIMD | Recalcula o arquivo de referência sem travar a UI |
 | **F5+** | Gráficos, pivôs interativos, slicers, VBA, formato nativo (ADR-013), `duck-docs`, `duck-slides` | — |
@@ -512,12 +526,58 @@ O que a F1 ensinou:
 - **Alocador**: o `mimalloc` deixou a leitura ~20% mais rápida que o alocador do sistema, mas segura a memória dos pedaços liberados em cada thread. Chamar `mi_collect` em todas as threads do pool ao fim da leitura traz a memória de ~850 MB de volta para ~460 MB. O pico (~1 GB) ainda vem dessa retenção durante a leitura.
 - O limite de pedaços em memória (8 a 66) quase não muda o tempo nem o pico neste arquivo.
 
-Pendências da F1:
+### Pendências da F1 resolvidas (18/11/2026)
 
-- **Inflate paralelo** (F2): é o que falta para passar de ~6× e chegar perto de 0,4 s.
-- **Pico de memória** acima da nova meta de 1 GB em algumas rodadas: reaproveitar os buffers de pedaço entre threads em vez de alocar e liberar.
-- **Fórmulas** são lidas só como "tem fórmula" (o valor em cache é usado); o texto da fórmula fica para a F3/F4.
-- **Ainda não lidos**: larguras de coluna, alturas de linha, células mescladas e painéis congelados. Entram na F2 junto com a renderização.
+As três pendências da F1 foram resolvidas:
+
+**1. Inflate paralelo** (crate novo `duck-deflate`)
+
+- Decodificador deflate próprio, porque nenhuma biblioteca decodifica a partir do meio de um stream. Numa thread ele faz ~1,7 GB/s, cerca de 80% do zlib-rs.
+- Em paralelo, a aba gigante descompacta em **~200–230 ms**, 3–3,6× o zlib-rs. A saída tem bytes idênticos aos do zlib-rs, e o CRC32 do zip é conferido sempre.
+- A curva de ganho não satura mais em ~6,4×: chega a 9,2× com 32 threads.
+- A saída é entregue por posse e lida sem cópia: cada tarefa de parse lê um intervalo de um vetor compartilhado.
+- O merge das partes acontece em fluxo, na ordem, assim que cada parte fica pronta.
+
+**2. Pico de memória abaixo de 1 GB** nos dois sistemas e com qualquer número de threads (563–936 MB). Os limites que fazem isso:
+
+- 8 partes especuladas à frente (cada uma tem 1 MB comprimido);
+- até 8 vetores descompactados em trânsito no parse;
+- buffers reciclados num pool;
+- páginas já lidas do arquivo mapeado devolvidas ao sistema no Linux (`MADV_DONTNEED`);
+- duas opções do `mimalloc` (abaixo).
+
+**3. Fórmulas e layout**
+
+- **Texto de todas as fórmulas** (crate novo `duck-calc`):
+  - As compartilhadas são remontadas deslocando as referências relativas da célula-mestre.
+  - As normais viram **modelos relativos deduplicados**: no arquivo de referência, 6,5 milhões de fórmulas viraram 11 modelos.
+  - Fórmulas que não dependem da posição (colunas calculadas de tabela, só referências absolutas) são reaproveitadas por coluna sem nem serem decodificadas.
+- **Layout**: larguras de coluna, alturas e linhas ocultas, células mescladas, painéis congelados, altura e largura padrão e `<dimension>`.
+
+**Conferência contra o calamine**, no arquivo de referência, em Windows e Linux, com o inflate paralelo e com 1 thread:
+
+| | Comparados | Divergências |
+|---|---|---|
+| Células | 24.171.714 | **0** |
+| Fórmulas (texto) | 10.111.650 | **0** |
+| Mesclagens | 29 | **0** |
+
+O que esse trabalho ensinou:
+
+- **Blocos vazios de flush**: o compressor do Office insere blocos sem compressão vazios (`00 00 FF FF`) entre os blocos dinâmicos. A especulação começava no bloco seguinte, ~80 bits depois de onde a parte anterior terminava. Pular esses blocos levou o aproveitamento de 91 para 104 das 105 partes.
+- **Colunas calculadas de tabela**: 4,75 milhões de fórmulas não tinham nenhuma referência de célula (só `[#This Row]`). Guardar o texto de cada uma levou os dados a 1,76 GB; deduplicadas, voltaram a 392 MB.
+- **`ca="1"`**: fórmulas com `TODAY()` têm esse atributo, o que desligava o cache por coluna. Generalizar o cache para "qualquer fórmula que não dependa da posição" levou o parse de 7,4 s para 3,3 s de CPU.
+- **Memória do inflate paralelo**: o limite certo é por *vetor* descompactado, não por pedaço de parse. Um pedaço pequeno segura o vetor inteiro (~15 MB) de onde saiu.
+- **`mimalloc`**:
+  - Com o padrão (`purge_delay` de 10 ms), o pico passava de 1,5 GB. Com 1 ms fica abaixo de 1 GB.
+  - No Linux, `arena_eager_commit` compromete a arena inteira de saída e inflava o RSS em ~250 MB.
+  - Essa opção precisa ser definida **antes** do runtime do Rust (construtor em `.init_array`), porque ele já aloca antes do `main`.
+
+Pendências:
+
+- **Parse mais barato** para cumprir < 0,4 s com 16+ núcleos e ≥ 10× com 16 threads (ver metas acima).
+- **Opções do alocador no app**: as opções do `mimalloc` hoje ficam no `duck-bench`. O app (`duck-sheets`) precisa aplicar as mesmas.
+- **Bordas** são só contadas (`border_count`); os detalhes entram com a renderização na F2.
 
 ---
 
