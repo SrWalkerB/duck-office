@@ -13,7 +13,8 @@
 
 mod package;
 mod parts;
-mod sheet;
+#[doc(hidden)]
+pub mod sheet;
 pub mod xml;
 
 use std::path::Path;
@@ -62,10 +63,13 @@ pub struct Options {
     /// Só estas abas (índices na ordem do workbook). `None` = todas.
     pub only_sheets: Option<Vec<usize>>,
     /// Inflate paralelo: partes (1 MB comprimido, ~15 MB descompactados)
-    /// especuladas à frente.
+    /// especuladas à frente. Cada uma também é lida (parse) na própria tarefa,
+    /// então isto é quantas tarefas de "descompactar e ler" rodam juntas.
     pub inflate_lookahead: usize,
     /// Inflate paralelo: vetores descompactados em trânsito no parse.
     pub inflate_pieces: usize,
+    /// Inflate paralelo: tamanho de cada parte, em bytes comprimidos.
+    pub inflate_part_bytes: usize,
 }
 
 impl Default for Options {
@@ -76,8 +80,9 @@ impl Default for Options {
             chunk_bytes: 8 * 1024 * 1024,
             max_in_flight: 0,
             only_sheets: None,
-            inflate_lookahead: 8,
+            inflate_lookahead: 16,
             inflate_pieces: 8,
+            inflate_part_bytes: 1 << 20,
         }
     }
 }
@@ -183,6 +188,20 @@ pub fn open(path: impl AsRef<Path>, opts: &Options) -> Result<(Workbook, LoadRep
     }
     report.total = t0.elapsed();
     Ok((wb, report))
+}
+
+/// Lê o XML de uma aba inteiro, numa thread e num pedaço só. Para medições
+/// do parse isolado (`duck-bench parse`) e testes.
+#[doc(hidden)]
+pub fn parse_sheet_xml(xml: &[u8]) -> Sheet {
+    let mut part = duck_core::SheetPart::new();
+    let mut state = sheet::RowState::default();
+    let mut scratch = sheet::Scratch::default();
+    let _ = sheet::parse_rows(xml, &mut part, &mut state, &mut scratch);
+    let mut s = Sheet::new("bench");
+    s.merge_part(part);
+    s.finish();
+    s
 }
 
 /// Nomes e tamanhos (XML descompactado) das abas, sem ler as células.

@@ -10,6 +10,7 @@
 //! número (`<row r="12345">`), então cada pedaço é montado sem depender dos
 //! outros. Se uma aba não tiver os números (raro), ela é relida em sequência.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -38,18 +39,20 @@ pub struct SheetReport {
     pub sequential: bool,
     /// A descompactação usou várias threads (`duck-deflate`).
     pub parallel_inflate: bool,
+    /// Detalhes do inflate paralelo, quando usado.
+    pub inflate_report: Option<duck_deflate::Report>,
 }
 
 /// O pedaço não pode ser lido isoladamente (linha/célula sem número).
 #[derive(Debug)]
-pub(crate) struct NeedsSequential;
+pub struct NeedsSequential;
 
 /// Atributos crus, conteúdo cru e id de uma fórmula que não depende da posição.
 type CachedFormula = (Vec<u8>, Vec<u8>, u32);
 
 /// Memória de trabalho de um leitor de pedaço.
 #[derive(Default)]
-pub(crate) struct Scratch {
+pub struct Scratch {
     text: String,
     /// Por coluna: atributos e texto crus da última fórmula que não depende da
     /// posição, e o id dela. Colunas calculadas de tabela e fórmulas só com
@@ -60,10 +63,26 @@ pub(crate) struct Scratch {
 
 /// Estado de leitura que atravessa pedaços no modo sequencial.
 #[derive(Clone, Copy, Default)]
-pub(crate) struct RowState {
+pub struct RowState {
     /// Linha atual (0-based); `None` se ainda desconhecida.
     row: Option<u32>,
     next_col: u32,
+}
+
+/// Posição do próximo `b` a partir de `from`. As distâncias no XML de uma
+/// célula são curtas (0 a ~20 bytes): um laço simples nos primeiros bytes é
+/// mais barato que preparar uma busca SIMD; o `memchr` fica para o resto.
+#[inline(always)]
+fn next_byte(buf: &[u8], from: usize, b: u8) -> Option<usize> {
+    let end = (from + 32).min(buf.len());
+    let mut j = from;
+    while j < end {
+        if buf[j] == b {
+            return Some(j);
+        }
+        j += 1;
+    }
+    memchr(b, &buf[end..]).map(|x| end + x)
 }
 
 #[inline]
@@ -94,22 +113,22 @@ pub(crate) fn parse_range(v: &[u8]) -> Option<CellRange> {
 
 /// Lê as linhas de `buf` para `part`, além do layout que aparecer no pedaço
 /// (`<col>`, `<mergeCell>`, `<pane>`, `<sheetFormatPr>`, `<dimension>`).
-pub(crate) fn parse_rows(
+pub fn parse_rows(
     buf: &[u8],
     part: &mut SheetPart,
     state: &mut RowState,
     scratch: &mut Scratch,
 ) -> Result<(), NeedsSequential> {
-    let close_c = memmem::Finder::new(b"</c>");
     let mut pos = 0;
-    while let Some(off) = memchr(b'<', &buf[pos..]) {
-        let i = pos + off;
+    while let Some(i) = next_byte(buf, pos, b'<') {
         let rest = &buf[i + 1..];
         // <c ...>: o caso mais comum, primeiro.
         if rest.len() > 1 && rest[0] == b'c' && is_name_end(rest[1]) {
-            let Some(end) = tag_end(buf, i) else { break };
-            let self_closing = buf[end - 2] == b'/';
-            let attrs = &buf[i + 2..if self_closing { end - 2 } else { end - 1 }];
+            // Atributos de `<c>` (r, s, t, cm, vm, ph) nunca contêm `>`: basta achar o primeiro.
+            let Some(gt) = next_byte(buf, i + 2, b'>') else { break };
+            let end = gt + 1;
+            let self_closing = buf[gt - 1] == b'/';
+            let attrs = &buf[i + 2..if self_closing { gt - 1 } else { gt }];
             let (mut r_attr, mut s_attr, mut t_attr) = (None, None, None);
             scan_cell_attrs(attrs, &mut r_attr, &mut s_attr, &mut t_attr);
 
@@ -129,13 +148,9 @@ pub(crate) fn parse_rows(
                 pos = end;
                 continue;
             }
-            let close = match close_c.find(&buf[end..]) {
-                Some(k) => end + k,
-                None => buf.len(),
-            };
-            let content = &buf[end..close];
-            store_cell(part, row, col, style, t_attr, content, scratch);
-            pos = (close + 4).min(buf.len());
+            let (kids, after) = scan_children(buf, end);
+            store_cell(part, row, col, style, t_attr, &kids, scratch);
+            pos = after;
             continue;
         }
         // <row ...>
@@ -219,43 +234,48 @@ pub(crate) fn parse_rows(
     Ok(())
 }
 
-/// Lê `r`, `s` e `t` numa passada.
-#[inline]
+/// Lê `r`, `s` e `t` numa passada, byte a byte (os valores têm poucos bytes).
+#[inline(always)]
 fn scan_cell_attrs<'a>(
     attrs: &'a [u8],
     r: &mut Option<&'a [u8]>,
     s: &mut Option<&'a [u8]>,
     t: &mut Option<&'a [u8]>,
 ) {
-    let mut i = 0;
     let n = attrs.len();
+    let mut i = 0;
     while i < n {
         while i < n && attrs[i].is_ascii_whitespace() {
             i += 1;
         }
         let k0 = i;
-        while i < n && attrs[i] != b'=' {
+        while i < n && attrs[i] != b'=' && !attrs[i].is_ascii_whitespace() {
             i += 1;
         }
         let key = &attrs[k0..i];
-        i += 1;
-        while i < n && attrs[i] != b'"' && attrs[i] != b'\'' {
+        while i < n && (attrs[i] == b'=' || attrs[i].is_ascii_whitespace()) {
             i += 1;
         }
         if i >= n {
             return;
         }
         let q = attrs[i];
-        let v0 = i + 1;
-        let Some(len) = memchr(q, &attrs[v0..]) else { return };
-        let v = &attrs[v0..v0 + len];
-        match key.trim_ascii() {
+        if q != b'"' && q != b'\'' {
+            return;
+        }
+        i += 1;
+        let v0 = i;
+        while i < n && attrs[i] != q {
+            i += 1;
+        }
+        let v = &attrs[v0..i];
+        i += 1;
+        match key {
             b"r" => *r = Some(v),
             b"s" => *s = Some(v),
             b"t" => *t = Some(v),
             _ => {}
         }
-        i = v0 + len + 1;
     }
 }
 
@@ -281,40 +301,71 @@ pub(crate) fn parse_ref(r: &[u8]) -> Option<(u32, Option<u32>)> {
     Some((col - 1, row))
 }
 
-/// Um filho `<name ...>...</name>` dentro do conteúdo de uma célula.
+/// Um filho `<name ...>...</name>` dentro de uma célula.
 struct Child<'a> {
     attrs: &'a [u8],
     content: &'a [u8],
 }
 
+/// O que interessa dentro de `<c>...</c>`.
+#[derive(Default)]
+struct Kids<'a> {
+    f: Option<Child<'a>>,
+    v: Option<&'a [u8]>,
+    is: Option<&'a [u8]>,
+}
+
+/// Lê os filhos de uma célula numa passada só, a partir do fim da tag de
+/// abertura. Retorna os filhos e a posição logo depois de `</c>`.
+///
+/// O texto de `<v>` e `<f>` nunca tem `<` cru (vem escapado), então ele vai até
+/// o próximo `<`; só `<is>` (texto rico) precisa procurar o fechamento.
 #[inline]
-fn find_child<'a>(content: &'a [u8], name: &[u8]) -> Option<Child<'a>> {
-    let mut pos = 0;
-    while let Some(off) = memchr(b'<', &content[pos..]) {
-        let i = pos + off;
-        let rest = &content[i + 1..];
-        if starts_tag(rest, name) {
-            let end = tag_end(content, i)?;
-            if content[end - 2] == b'/' {
-                return Some(Child { attrs: &content[i + 1 + name.len()..end - 2], content: &[] });
-            }
-            let attrs = &content[i + 1 + name.len()..end - 1];
-            let mut close = Vec::with_capacity(name.len() + 3);
-            close.extend_from_slice(b"</");
-            close.extend_from_slice(name);
-            close.push(b'>');
-            let k = memmem::find(&content[end..], &close).unwrap_or(content.len() - end);
-            return Some(Child { attrs, content: &content[end..end + k] });
+fn scan_children(buf: &[u8], start: usize) -> (Kids<'_>, usize) {
+    let mut k = Kids::default();
+    let mut p = start;
+    loop {
+        let Some(lt) = next_byte(buf, p, b'<') else { return (k, buf.len()) };
+        let r = &buf[lt + 1..];
+        if r.starts_with(b"/c>") {
+            return (k, lt + 4);
         }
-        pos = i + 1;
+        let is_v = r.len() > 1 && r[0] == b'v' && is_name_end(r[1]);
+        let is_f = r.len() > 1 && r[0] == b'f' && is_name_end(r[1]);
+        if is_v || is_f {
+            let Some(gt) = next_byte(buf, lt + 2, b'>') else { return (k, buf.len()) };
+            let (attrs, content, next) = if buf[gt - 1] == b'/' {
+                (&buf[lt + 2..gt - 1], &buf[gt..gt], gt + 1)
+            } else {
+                let s = gt + 1;
+                let e = next_byte(buf, s, b'<').unwrap_or(buf.len());
+                (&buf[lt + 2..gt], &buf[s..e], e)
+            };
+            if is_v {
+                k.v = Some(content);
+            } else {
+                k.f = Some(Child { attrs, content });
+            }
+            p = next;
+            continue;
+        }
+        if starts_tag(r, b"is") {
+            let Some(gt) = memchr(b'>', &buf[lt + 3..]).map(|x| lt + 3 + x) else { return (k, buf.len()) };
+            let s = gt + 1;
+            let e = memmem::find(&buf[s..], b"</is>").map_or(buf.len(), |x| s + x);
+            k.is = Some(&buf[s..e]);
+            p = (e + 5).min(buf.len());
+            continue;
+        }
+        // `</v>`, `</f>` ou outro elemento: pula a tag.
+        p = next_byte(buf, lt, b'>').map_or(buf.len(), |x| x + 1);
     }
-    None
 }
 
 /// Guarda a fórmula `<f>` da célula, se houver. Retorna o bit de fórmula.
 #[inline]
-fn store_formula(part: &mut SheetPart, row: u32, col: u32, content: &[u8], sc: &mut Scratch) -> u8 {
-    let Some(f) = find_child(content, b"f") else { return 0 };
+fn store_formula(part: &mut SheetPart, row: u32, col: u32, f: Option<&Child>, sc: &mut Scratch) -> u8 {
+    let Some(f) = f else { return 0 };
     if let Some(Some((attrs, raw, id))) = sc.last_formula.get(col as usize)
         && raw.as_slice() == f.content
         && attrs.as_slice() == f.attrs
@@ -373,23 +424,23 @@ fn store_cell(
     col: u32,
     style: u16,
     t: Option<&[u8]>,
-    content: &[u8],
+    kids: &Kids,
     sc: &mut Scratch,
 ) {
-    let formula = store_formula(part, row, col, content, sc);
+    let formula = store_formula(part, row, col, kids.f.as_ref(), sc);
     let scratch = &mut sc.text;
     let t = t.unwrap_or(b"n");
     if t == b"inlineStr" {
         scratch.clear();
-        if let Some(is) = find_child(content, b"is") {
-            rich_text_into(is.content, scratch);
+        if let Some(is) = kids.is {
+            rich_text_into(is, scratch);
         }
         let id = part.strings.push(scratch);
         part.set(row, col, kind::LOCAL_STR | formula, style, id as u64);
         return;
     }
-    let v = match find_child(content, b"v") {
-        Some(v) => v.content,
+    let v = match kids.v {
+        Some(v) => v,
         None => {
             if style != 0 || formula != 0 {
                 part.set(row, col, kind::EMPTY | formula, style, 0);
@@ -440,35 +491,89 @@ impl Chunk {
 }
 
 /// Junta as partes à aba na ordem dos pedaços, à medida que ficam prontas.
+///
+/// Quem termina um parse só deixa a parte na fila (lock curto). Uma thread
+/// por vez faz o merge (`try_lock`): as outras não ficam bloqueadas esperando.
 struct Merger {
-    sheet: Sheet,
-    next: usize,
+    queue: Mutex<Queue>,
+    state: Mutex<MergeState>,
+}
+
+#[derive(Default)]
+struct Queue {
     pending: std::collections::BTreeMap<usize, SheetPart>,
     parse_cpu: Duration,
+}
+
+struct MergeState {
+    sheet: Sheet,
+    next: usize,
     merge: Duration,
 }
 
 impl Merger {
     fn new(name: &str) -> Self {
         Self {
-            sheet: Sheet::new(name),
-            next: 0,
-            pending: Default::default(),
-            parse_cpu: Duration::ZERO,
-            merge: Duration::ZERO,
+            queue: Mutex::new(Queue::default()),
+            state: Mutex::new(MergeState { sheet: Sheet::new(name), next: 0, merge: Duration::ZERO }),
         }
     }
 
-    fn add(&mut self, idx: usize, part: SheetPart, cpu: Duration) {
-        self.parse_cpu += cpu;
-        self.pending.insert(idx, part);
-        let t = Instant::now();
-        while let Some(p) = self.pending.remove(&self.next) {
-            self.sheet.merge_part(p);
-            self.next += 1;
+    fn add(&self, idx: usize, part: SheetPart, cpu: Duration) {
+        {
+            let mut q = self.queue.lock().unwrap();
+            q.parse_cpu += cpu;
+            q.pending.insert(idx, part);
         }
-        self.merge += t.elapsed();
+        // Se outra thread já está juntando, ela vai pegar esta parte também.
+        while let Ok(mut st) = self.state.try_lock() {
+            let t = Instant::now();
+            loop {
+                let next = st.next;
+                let Some(p) = self.queue.lock().unwrap().pending.remove(&next) else { break };
+                st.sheet.merge_part(p);
+                st.next += 1;
+            }
+            st.merge += t.elapsed();
+            drop(st);
+            // Uma parte pode ter chegado entre o último `remove` e o `drop`.
+            let next_ready = {
+                let q = self.queue.lock().unwrap();
+                let st_next = self.state.try_lock().map(|s| s.next);
+                match st_next {
+                    Ok(n) => q.pending.contains_key(&n),
+                    Err(_) => false,
+                }
+            };
+            if !next_ready {
+                break;
+            }
+        }
     }
+
+    /// Termina: junta o que sobrou (no fim, tudo já está na fila).
+    fn finish(self) -> (Sheet, Duration, Duration, bool) {
+        let mut st = self.state.into_inner().unwrap();
+        let mut q = self.queue.into_inner().unwrap();
+        let t = Instant::now();
+        while let Some(p) = q.pending.remove(&st.next) {
+            st.sheet.merge_part(p);
+            st.next += 1;
+        }
+        st.merge += t.elapsed();
+        (st.sheet, q.parse_cpu, st.merge, q.pending.is_empty())
+    }
+}
+
+/// Parte lida na própria tarefa do inflate paralelo.
+struct FusedPart {
+    /// Bytes antes do primeiro `</row>` (fim de uma linha que começou antes).
+    prefix: Vec<u8>,
+    /// Bytes depois do último `</row>` (começo de uma linha que termina depois).
+    suffix: Vec<u8>,
+    /// As linhas inteiras do meio, já lidas (tempo, e se precisou de sequência).
+    /// `None` se a parte não tem nenhum `</row>`: aí tudo está em `prefix`.
+    part: Option<(SheetPart, Duration, bool)>,
 }
 
 /// Um vetor descompactado compartilhado pelas tarefas de parse. Ocupa uma vaga
@@ -497,9 +602,12 @@ pub(crate) fn load_sheet(
     limiter: &InFlight,
     opts: &crate::Options,
 ) -> Result<(Sheet, SheetReport), Error> {
+    // Com poucas threads, o zlib-rs sequencial + parse em paralelo é mais
+    // rápido: o inflate paralelo gasta mais CPU no total (medido: 4 threads
+    // 1,40 s × 1,23 s com 3).
     let parallel = entry.is_deflated()
         && entry.compressed_size() >= PARALLEL_INFLATE_MIN
-        && rayon::current_num_threads() >= 4;
+        && rayon::current_num_threads() >= 6;
     if parallel {
         match load_sheet_with(pkg, entry, name, chunk_bytes, limiter, Some(opts)) {
             Ok(r) => return Ok(r),
@@ -528,18 +636,30 @@ fn load_sheet_with(
 
     // Merge em fluxo: cada parte entra na aba assim que todas as anteriores
     // entraram (ordem fixa = resultado determinístico) e sua memória é liberada.
-    let merger = Mutex::new(Merger::new(name));
+    let merger = Merger::new(name);
+    // Só o consumidor do inflate paralelo (um por aba grande) espera vaga sem
+    // pegar tarefas: ele é o trecho serial do pipeline. Os leitores das outras
+    // abas precisam ajudar, senão todos os workers podem ficar esperando vagas
+    // que só as tarefas paradas nas filas deles liberariam.
+    let help = parallel.is_none() || rayon::current_num_threads() <= 2;
     let needs_seq = std::sync::atomic::AtomicBool::new(false);
     let mut inflate_time = Duration::ZERO;
     let mut io_error = None;
 
+    // Ordem das partes no merge: pedaços despachados e partes já lidas na
+    // própria tarefa do inflate recebem índices na ordem dos bytes.
+    let idx = AtomicUsize::new(0);
     rayon::scope(|s| {
-        let mut idx = 0usize;
+        let idx = &idx;
         // Entrega um pedaço de XML (cortado depois de um `</row>`) para uma thread.
-        let mut dispatch = |chunk: Chunk| {
-            limiter.acquire();
+        let dispatch = |chunk: Chunk| {
+            if help {
+                limiter.acquire();
+            } else {
+                limiter.acquire_without_helping();
+            }
             let (merger, needs_seq) = (&merger, &needs_seq);
-            let my = idx;
+            let my = idx.fetch_add(1, Ordering::Relaxed);
             s.spawn(move |_| {
                 let tp = Instant::now();
                 let mut part = SheetPart::new();
@@ -551,9 +671,8 @@ fn load_sheet_with(
                 drop(chunk);
                 limiter.release();
                 let cpu = tp.elapsed();
-                merger.lock().unwrap().add(my, part, cpu);
+                merger.add(my, part, cpu);
             });
-            idx += 1;
         };
 
         if let Some(o) = parallel {
@@ -562,13 +681,59 @@ fn load_sheet_with(
             // que atravessa dois vetores (`carry`) é copiada.
             let mut carry: Vec<u8> = Vec::new();
             let piece_slots = Arc::new(InFlight::new(o.inflate_pieces.max(1)));
+            // Cada parte é lida na própria thread que a descompactou, com os
+            // bytes ainda no cache: só as linhas inteiras do meio. O começo
+            // (até o primeiro `</row>`) e o fim (depois do último) voltam para
+            // serem costurados aqui com as partes vizinhas.
+            let process = |tail: &[u8]| -> FusedPart {
+                match (memmem::find(tail, b"</row>"), memmem::rfind(tail, b"</row>")) {
+                    (Some(f), Some(l)) => {
+                        let (f, l) = (f + 6, l + 6);
+                        let t = Instant::now();
+                        let mut part = SheetPart::new();
+                        let mut state = RowState::default();
+                        let mut scratch = Scratch::default();
+                        let bad = parse_rows(&tail[f..l], &mut part, &mut state, &mut scratch).is_err();
+                        FusedPart {
+                            prefix: tail[..f].to_vec(),
+                            suffix: tail[l..].to_vec(),
+                            part: Some((part, t.elapsed(), bad)),
+                        }
+                    }
+                    _ => FusedPart { prefix: tail.to_vec(), suffix: Vec::new(), part: None },
+                }
+            };
             let ti = Instant::now();
-            let r = duck_deflate::inflate_parallel(
+            let r = duck_deflate::inflate_parallel_process(
                 pkg.compressed(entry),
                 Some(entry.crc32),
-                duck_deflate::Options { part_bytes: 1 << 20, lookahead: o.inflate_lookahead.max(1) },
-                |buf| {
-                    // A entrada comprimida já consumida não é mais lida (com margem).
+                duck_deflate::Options {
+                    part_bytes: o.inflate_part_bytes,
+                    lookahead: o.inflate_lookahead.max(1),
+                },
+                &process,
+                |piece| {
+                    let buf = match piece {
+                        duck_deflate::Piece::Processed(fp) => {
+                            match fp.part {
+                                Some((part, cpu, bad)) => {
+                                    // Fim da parte anterior + começo desta: as linhas da fronteira.
+                                    carry.extend_from_slice(&fp.prefix);
+                                    dispatch(Chunk::Owned(std::mem::take(&mut carry)));
+                                    if bad {
+                                        needs_seq.store(true, Ordering::Relaxed);
+                                    }
+                                    merger.add(idx.fetch_add(1, Ordering::Relaxed), part, cpu);
+                                    carry = fp.suffix;
+                                }
+                                None => carry.extend_from_slice(&fp.prefix),
+                            }
+                            return Ok(());
+                        }
+                        duck_deflate::Piece::Bytes(b) => b,
+                    };
+                    // Bytes: o começo de uma parte (antes da janela ficar limpa) ou
+                    // uma parte refeita em sequência. Corta em pedaços sem copiar.
                     pkg.release(entry, buf.input_consumed().saturating_sub(64 * 1024));
                     let bytes = buf.bytes();
                     let (Some(first), Some(last)) =
@@ -582,7 +747,11 @@ fn load_sheet_with(
                     carry.extend_from_slice(&bytes[..first]);
                     let joined = std::mem::take(&mut carry);
                     carry.extend_from_slice(&bytes[last..]);
-                    piece_slots.acquire();
+                    if help {
+                        piece_slots.acquire();
+                    } else {
+                        piece_slots.acquire_without_helping();
+                    }
                     let shared = Arc::new(Piece { buf, slots: piece_slots.clone() });
                     dispatch(Chunk::Owned(joined));
                     let mut pos = first;
@@ -604,6 +773,9 @@ fn load_sheet_with(
                 },
             );
             inflate_time = ti.elapsed();
+            if let Ok(rep) = &r {
+                report.inflate_report = Some(*rep);
+            }
             match r {
                 Ok(_) => {
                     if !carry.is_empty() {
@@ -644,7 +816,7 @@ fn load_sheet_with(
                 }
             }
         }
-        report.chunks = idx;
+        report.chunks = idx.load(Ordering::Relaxed);
     });
     if let Some(e) = io_error {
         return Err(e);
@@ -653,16 +825,15 @@ fn load_sheet_with(
     report.inflate = inflate_time;
 
     let tm = Instant::now();
-    let m = merger.into_inner().unwrap();
-    report.parse_cpu = m.parse_cpu;
-    let mut sheet = m.sheet;
-    if needs_seq.into_inner() || !m.pending.is_empty() {
+    let (mut sheet, parse_cpu, merge, complete) = merger.finish();
+    report.parse_cpu = parse_cpu;
+    if needs_seq.into_inner() || !complete {
         report.sequential = true;
         sheet = Sheet::new(name);
         sequential(pkg, entry, chunk_bytes, &mut sheet)?;
     }
     sheet.finish();
-    report.merge = m.merge + tm.elapsed();
+    report.merge = merge + tm.elapsed();
     report.wall = t0.elapsed();
     Ok((sheet, report))
 }

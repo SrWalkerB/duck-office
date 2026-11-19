@@ -24,11 +24,13 @@ mod bits;
 mod block;
 mod huffman;
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use bits::Bits;
-use block::{Corrupt, MARKER, WINDOW, decode_block, read_dynamic_tables, read_header};
+use block::{
+    Corrupt, MARKER, WINDOW, decode_block_bytes, decode_block_u16, read_dynamic_tables, read_header,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
@@ -84,7 +86,7 @@ fn decode_known(data: &[u8], start: u64, stop: u64, out: &mut Vec<u8>) -> Result
             return Err(Error::Corrupt);
         }
         let h = read_header(&mut b)?;
-        decode_block(&mut b, &h, out)?;
+        decode_block_bytes(&mut b, &h, out)?;
         if h.last {
             return Ok((b.bit_pos(), true));
         }
@@ -161,7 +163,7 @@ impl Drop for Buffer {
 // ---------------------------------------------------------------------------
 
 /// Resultado da decodificação especulativa de uma parte.
-struct Spec {
+struct Spec<P> {
     /// Bit onde a parte começou (cabeçalho de bloco encontrado).
     start: u64,
     /// Primeira fronteira de bloco em ou depois do fim da parte.
@@ -169,10 +171,48 @@ struct Spec {
     last: bool,
     /// Saída de 16 bits até a janela ficar limpa (pode ter marcadores).
     head: Vec<u16>,
-    /// Saída em bytes depois disso, precedida dos 32 KB de contexto.
-    tail: Vec<u8>,
+    /// O resto da saída (em bytes), já entregue a `on_tail` na própria tarefa.
+    processed: Option<P>,
     switched: bool,
     tail_crc: crc32fast::Hasher,
+    tail_len: u64,
+    /// `head` já resolvido por uma thread do pool, com a janela que a parte
+    /// anterior publicou (vale só se a parte anterior for aceita como está).
+    resolved: Option<(Vec<u8>, crc32fast::Hasher)>,
+    /// Tempo de CPU por fase: busca, saída de 16 bits, saída em bytes, CRC.
+    times: [std::time::Duration; 4],
+}
+
+/// Troca os marcadores de `head` pelos bytes de `window` (últimos ≤ 32 KB).
+/// `None` se algum marcador aponta para antes do início do stream.
+fn resolve_head(head: &[u16], window: &[u8]) -> Option<Vec<u8>> {
+    let missing = WINDOW - window.len();
+    let mut out = Vec::with_capacity(head.len());
+    for &v in head {
+        if v < MARKER {
+            out.push(v as u8);
+        } else {
+            let w = (v - MARKER) as usize;
+            if w < missing {
+                return None;
+            }
+            out.push(window[w - missing]);
+        }
+    }
+    Some(out)
+}
+
+/// Resolve o `head` da especulação em `slot` com `window`, se ainda não foi.
+fn try_resolve<P>(slot: &Mutex<Option<Spec<P>>>, window: &[u8]) {
+    let mut g = slot.lock().unwrap();
+    if let Some(spec) = g.as_mut()
+        && spec.resolved.is_none()
+        && let Some(r) = resolve_head(&spec.head, window)
+    {
+        let mut crc = crc32fast::Hasher::new();
+        crc.update(&r);
+        spec.resolved = Some((r, crc));
+    }
 }
 
 /// Acha o primeiro cabeçalho de bloco dinâmico válido em `[from, to)`.
@@ -185,7 +225,7 @@ fn find_block(data: &[u8], from: u64, to: u64) -> Option<u64> {
         if byte + 4 <= data.len() {
             let w = u32::from_le_bytes(data[byte..byte + 4].try_into().unwrap()) >> (bit % 8);
             let ok = w & 0b111 == 0b100 && (w >> 3) & 31 <= 29 && (w >> 8) & 31 <= 29;
-            if ok {
+            if ok && code_lengths_complete(data, bit + 3) {
                 let mut b = Bits::new(data, bit + 3);
                 if read_dynamic_tables(&mut b).is_ok() {
                     return Some(bit);
@@ -197,14 +237,57 @@ fn find_block(data: &[u8], from: u64, to: u64) -> Option<u64> {
     None
 }
 
-fn speculate(data: &[u8], from: u64, to: u64, pool: &Pool, expect: usize) -> Option<Spec> {
+/// Pré-filtro sem alocar: os tamanhos do código de comprimentos (logo depois
+/// de HLIT/HDIST/HCLEN) precisam formar um código completo, como o zlib exige.
+/// Descarta quase todas as posições falsas antes de montar tabelas.
+fn code_lengths_complete(data: &[u8], bit: u64) -> bool {
+    let mut b = Bits::new(data, bit);
+    b.refill();
+    let _hlit = b.read(5);
+    let _hdist = b.read(5);
+    let hclen = b.read(4) as usize + 4;
+    let mut count = [0u32; 8];
+    for _ in 0..hclen {
+        count[b.read(3) as usize] += 1;
+    }
+    let mut left: i32 = 1;
+    for &c in &count[1..8] {
+        left = (left << 1) - c as i32;
+        if left < 0 {
+            return false;
+        }
+    }
+    left == 0
+}
+
+/// Decodifica uma parte sem conhecer a janela anterior. A saída em bytes
+/// (depois que a janela fica limpa) vai para `on_tail` na própria tarefa, com
+/// os 32 KB de contexto no começo do vetor; a janela final da parte vai para
+/// `window_out`.
+fn speculate<P>(
+    data: &[u8],
+    from: u64,
+    to: u64,
+    pool: &Pool,
+    expect: usize,
+    on_tail: &(dyn Fn(Vec<u8>, usize) -> P + Sync),
+    window_out: &mut Option<Box<[u8]>>,
+) -> Option<Spec<P>> {
+    let t0 = std::time::Instant::now();
     let start = find_block(data, from, to)?;
+    let t_find = t0.elapsed();
+    let t1 = std::time::Instant::now();
+    let mut t_head = std::time::Duration::ZERO;
     let mut b = Bits::new(data, start);
     let mut head: Vec<u16> = Vec::with_capacity(4 * WINDOW);
     let mut tail: Option<Vec<u8>> = None;
     let mut switched = false;
     // Proteção contra falso positivo que decodifica lixo sem parar.
     let limit = ((to - from) as usize / 8).max(1 << 20) * 64;
+    // CRC calculado bloco a bloco, com os bytes ainda no cache.
+    let mut tail_crc = crc32fast::Hasher::new();
+    let mut t_crc = std::time::Duration::ZERO;
+    let mut marker_end = 0usize;
     let (end, last) = loop {
         let pos = b.bit_pos();
         if pos >= to && pos != start {
@@ -212,18 +295,25 @@ fn speculate(data: &[u8], from: u64, to: u64, pool: &Pool, expect: usize) -> Opt
         }
         let h = read_header(&mut b).ok()?;
         if !switched {
-            decode_block(&mut b, &h, &mut head).ok()?;
+            decode_block_u16(&mut b, &h, &mut head, &mut marker_end).ok()?;
         } else {
-            decode_block(&mut b, &h, tail.as_mut().unwrap()).ok()?;
+            let t = tail.as_mut().unwrap();
+            let before = t.len();
+            decode_block_bytes(&mut b, &h, t).ok()?;
+            let tc = std::time::Instant::now();
+            tail_crc.update(&t[before..]);
+            t_crc += tc.elapsed();
         }
         if h.last {
             break (b.bit_pos(), true);
         }
-        if !switched && head.len() >= WINDOW && head[head.len() - WINDOW..].iter().all(|&v| v < MARKER) {
+        if !switched && head.len() >= marker_end + WINDOW {
+            debug_assert!(head[head.len() - WINDOW..].iter().all(|&v| v < MARKER));
             let mut t = pool.take(expect + WINDOW);
             t.extend(head[head.len() - WINDOW..].iter().map(|&v| v as u8));
             tail = Some(t);
             switched = true;
+            t_head = t1.elapsed();
         }
         if head.len() + tail.as_ref().map_or(0, Vec::len) > limit {
             if let Some(t) = tail {
@@ -232,12 +322,17 @@ fn speculate(data: &[u8], from: u64, to: u64, pool: &Pool, expect: usize) -> Opt
             return None;
         }
     };
-    let mut tail_crc = crc32fast::Hasher::new();
-    if let Some(t) = &tail {
-        tail_crc.update(&t[WINDOW..]);
-    }
-    let tail = tail.unwrap_or_default();
-    Some(Spec { start, end, last, head, tail, switched, tail_crc })
+    let t_body = t1.elapsed().saturating_sub(t_crc);
+    let times = [t_find, t_head, t_body.saturating_sub(t_head), t_crc];
+    let mut tail_len = 0;
+    let processed = tail.map(|t| {
+        // Os últimos 32 KB do vetor (contexto incluso) são a janela para a
+        // parte seguinte, mesmo que a saída em bytes seja curta.
+        *window_out = Some(Box::<[u8]>::from(&t[t.len() - WINDOW..]));
+        tail_len = (t.len() - WINDOW) as u64;
+        on_tail(t, (end / 8) as usize)
+    });
+    Some(Spec { start, end, last, head, processed, switched, tail_crc, tail_len, resolved: None, times })
 }
 
 // ---------------------------------------------------------------------------
@@ -274,6 +369,26 @@ pub struct Report {
     pub output_bytes: u64,
     /// Bytes que saíram da fase de marcadores (resolvidos em série).
     pub head_bytes: u64,
+    /// Partes cujos marcadores já vieram resolvidos por uma thread do pool.
+    pub pre_resolved: usize,
+    /// Tempo da thread consumidora: esperando especulações, resolvendo
+    /// marcadores e CRC, entregando ao `sink`, decodificando em sequência.
+    pub wait: std::time::Duration,
+    pub resolve: std::time::Duration,
+    pub sink: std::time::Duration,
+    pub sequential_time: std::time::Duration,
+    /// Soma do tempo das especulações: busca, saída de 16 bits, bytes, CRC.
+    pub spec_times: [std::time::Duration; 4],
+}
+
+/// Um trecho da saída, em ordem.
+pub enum Piece<P> {
+    /// Bytes descompactados: o começo do stream, uma parte refeita em
+    /// sequência ou o começo de uma parte especulada (marcadores já trocados).
+    Bytes(Buffer),
+    /// O resto de uma parte especulada, já processado pela thread que a
+    /// descompactou (ver [`inflate_parallel_process`]).
+    Processed(P),
 }
 
 /// Descompacta `data` em paralelo, entregando a saída **em ordem** a `sink`,
@@ -288,37 +403,104 @@ pub fn inflate_parallel(
     opts: Options,
     mut sink: impl FnMut(Buffer) -> Result<(), String> + Send,
 ) -> Result<Report, Error> {
+    let keep = |t: Vec<u8>, input_end: usize, _: &Pool, weak: &std::sync::Weak<Pool>| Buffer {
+        vec: t,
+        start: WINDOW,
+        pool: weak.clone(),
+        input_end,
+    };
+    inflate_core(data, expected_crc, opts, &keep, |piece: Piece<Buffer>| match piece {
+        Piece::Bytes(b) | Piece::Processed(b) => sink(b),
+    })
+}
+
+/// Como [`inflate_parallel`], mas a maior parte da saída é **processada na
+/// própria thread que a descompactou** (`process`, com os bytes ainda quentes
+/// no cache), e só o resultado chega a `sink`. Para cada parte especulada,
+/// `sink` recebe primeiro `Piece::Bytes` com o começo da parte (que depende da
+/// janela anterior) e depois `Piece::Processed` com o resultado do resto.
+pub fn inflate_parallel_process<P: Send>(
+    data: &[u8],
+    expected_crc: Option<u32>,
+    opts: Options,
+    process: &(dyn Fn(&[u8]) -> P + Sync),
+    sink: impl FnMut(Piece<P>) -> Result<(), String> + Send,
+) -> Result<Report, Error> {
+    let run = |t: Vec<u8>, _: usize, pool: &Pool, _: &std::sync::Weak<Pool>| {
+        let q = process(&t[WINDOW..]);
+        pool.give(t);
+        q
+    };
+    inflate_core(data, expected_crc, opts, &run, sink)
+}
+
+/// O que fazer, na própria tarefa, com a cauda de cada parte (bytes com 32 KB
+/// de contexto no começo; posição final na entrada; pool; referência ao pool).
+type MakeTail<'a, P> = dyn Fn(Vec<u8>, usize, &Pool, &std::sync::Weak<Pool>) -> P + Sync + 'a;
+
+/// Núcleo comum: `make_tail` decide o que a cauda de cada parte vira.
+fn inflate_core<P: Send>(
+    data: &[u8],
+    expected_crc: Option<u32>,
+    opts: Options,
+    make_tail: &MakeTail<'_, P>,
+    mut sink: impl FnMut(Piece<P>) -> Result<(), String> + Send,
+) -> Result<Report, Error> {
     let part_bits = (opts.part_bytes.max(64 * 1024) as u64) * 8;
     let total_bits = data.len() as u64 * 8;
     let n = total_bits.div_ceil(part_bits).max(1) as usize;
     let bound = |k: usize| (k as u64 * part_bits).min(total_bits);
     // Uma vaga por parte: o resultado entra quando a especulação termina e sai
     // (liberando a memória) assim que é usado.
-    let slots: Vec<(AtomicBool, Mutex<Option<Spec>>)> =
+    let slots: Vec<(AtomicBool, Mutex<Option<Spec<P>>>)> =
         (0..n).map(|_| (AtomicBool::new(false), Mutex::new(None))).collect();
+    // Últimos 32 KB da saída de cada parte especulada (quando ela terminou em
+    // bytes normais): a janela de que a parte seguinte precisa. Permite resolver
+    // os marcadores em paralelo, fora da thread que entrega a saída.
+    let windows: Vec<OnceLock<Box<[u8]>>> = (0..n).map(|_| OnceLock::new()).collect();
     // Com poucas threads, quem espera precisa ajudar o pool (senão trava); com
     // várias, ajudar faz a entrega parar enquanto roda uma tarefa longa de outro.
     let help_while_waiting = rayon::current_num_threads() <= 2;
     let mut report = Report { parts: n, ..Default::default() };
     let mut crc = crc32fast::Hasher::new();
 
-    // Mantém vetores suficientes para as partes adiantadas e as que ainda
-    // estão sendo lidas por quem recebe a saída.
     let pool = std::sync::Arc::new(Pool { free: Mutex::new(Vec::new()), keep: 4 });
     // XML de planilha comprime ~15:1; folga para não realocar.
     let expect = opts.part_bytes.max(64 * 1024) * 20;
+    let weak = std::sync::Arc::downgrade(&pool);
+    let on_tail = |t: Vec<u8>, input_end: usize| -> P { make_tail(t, input_end, &pool, &weak) };
     let result = rayon::scope(|s| -> Result<(), Error> {
         let pool_ref: &Pool = &pool;
-        let weak = std::sync::Arc::downgrade(&pool);
         let slots = &slots;
+        let windows = &windows;
+        let on_tail: &(dyn Fn(Vec<u8>, usize) -> P + Sync) = &on_tail;
+        // Quem entrega a saída dorme enquanto espera; as especulações o acordam.
+        let consumer = std::thread::current();
         let mut next_spawn = 1usize;
         let spawn_until = |upto: usize, next_spawn: &mut usize| {
             while *next_spawn < n && *next_spawn <= upto {
                 let k = *next_spawn;
+                let consumer = consumer.clone();
                 s.spawn(move |_| {
-                    let r = speculate(data, bound(k), bound(k + 1), pool_ref, expect);
+                    let mut my_window = None;
+                    let r =
+                        speculate(data, bound(k), bound(k + 1), pool_ref, expect, on_tail, &mut my_window);
                     *slots[k].1.lock().unwrap() = r;
+                    // Resolve a própria parte com a janela da anterior (se já
+                    // existe) e a seguinte com a própria janela (se ela já terminou).
+                    if k > 0
+                        && let Some(w) = windows[k - 1].get()
+                    {
+                        try_resolve(&slots[k].1, w);
+                    }
+                    if let Some(w) = my_window {
+                        let w = windows[k].get_or_init(|| w);
+                        if k + 1 < n && slots[k + 1].0.load(Ordering::Acquire) {
+                            try_resolve(&slots[k + 1].1, w);
+                        }
+                    }
                     slots[k].0.store(true, Ordering::Release);
+                    consumer.unpark();
                 });
                 *next_spawn += 1;
             }
@@ -326,13 +508,17 @@ pub fn inflate_parallel(
         spawn_until(opts.lookahead.max(1), &mut next_spawn);
 
         let mut window: Vec<u8> = Vec::with_capacity(2 * WINDOW);
+        // A parte anterior foi aceita da especulação e terminou em bytes
+        // normais: aí a janela atual é exatamente a que ela publicou.
+        let mut prev_published = false;
         let mut cur = 0u64;
         let mut k = 0usize;
         loop {
             spawn_until(k + opts.lookahead.max(1), &mut next_spawn);
             let mut done = None;
             if k > 0 {
-                // Espera a especulação da parte k, ajudando o pool enquanto isso.
+                // Espera a especulação da parte k.
+                let tw = std::time::Instant::now();
                 while !slots[k].0.load(Ordering::Acquire) {
                     if help_while_waiting {
                         match rayon::yield_now() {
@@ -340,9 +526,10 @@ pub fn inflate_parallel(
                             _ => std::thread::yield_now(),
                         }
                     } else {
-                        std::thread::yield_now();
+                        std::thread::park_timeout(std::time::Duration::from_millis(2));
                     }
                 }
+                report.wait += tw.elapsed();
                 let taken = slots[k].1.lock().unwrap().take();
                 // A parte anterior pode ter parado num bloco vazio de flush; a
                 // especulação começa no bloco de verdade logo depois.
@@ -355,40 +542,47 @@ pub fn inflate_parallel(
                 if let Some(spec) = taken
                     && spec.start == real
                 {
-                    // Troca os marcadores pelos bytes da janela anterior.
-                    let missing = WINDOW - window.len();
-                    let mut resolved: Vec<u8> = Vec::with_capacity(spec.head.len());
-                    let mut ok = true;
-                    for &v in &spec.head {
-                        if v < MARKER {
-                            resolved.push(v as u8);
-                        } else {
-                            let w = (v - MARKER) as usize;
-                            if w < missing {
-                                ok = false;
-                                report.unresolved += 1;
-                                break;
-                            }
-                            resolved.push(window[w - missing]);
+                    // Troca os marcadores pelos bytes da janela anterior: usa o
+                    // que uma thread do pool já resolveu, se a janela é a mesma.
+                    let tr = std::time::Instant::now();
+                    let pre = if prev_published { spec.resolved } else { None };
+                    let (resolved, head_crc) = match pre {
+                        Some(r) => {
+                            report.pre_resolved += 1;
+                            (Some(r.0), Some(r.1))
                         }
+                        None => (resolve_head(&spec.head, &window), None),
+                    };
+                    if resolved.is_none() {
+                        report.unresolved += 1;
                     }
-                    if ok {
-                        crc.update(&resolved);
+                    for (a, t) in report.spec_times.iter_mut().zip(spec.times) {
+                        *a += t;
+                    }
+                    if let Some(resolved) = resolved {
+                        match head_crc {
+                            Some(h) => crc.combine(&h),
+                            None => crc.update(&resolved),
+                        }
                         push_window(&mut window, &resolved);
                         report.output_bytes += resolved.len() as u64;
                         report.head_bytes += resolved.len() as u64;
+                        report.resolve += tr.elapsed();
+                        let ts = std::time::Instant::now();
                         let input_end = (spec.end / 8) as usize;
-                        sink(Buffer { vec: resolved, start: 0, pool: weak.clone(), input_end })
+                        sink(Piece::Bytes(Buffer { vec: resolved, start: 0, pool: weak.clone(), input_end }))
                             .map_err(Error::Sink)?;
-                        if spec.switched {
-                            let tail = spec.tail;
+                        if let Some(p) = spec.processed {
                             crc.combine(&spec.tail_crc);
-                            push_window(&mut window, &tail[WINDOW..]);
-                            report.output_bytes += (tail.len() - WINDOW) as u64;
-                            sink(Buffer { vec: tail, start: WINDOW, pool: weak.clone(), input_end })
-                                .map_err(Error::Sink)?;
+                            report.output_bytes += spec.tail_len;
+                            // A janela publicada pela tarefa: os últimos 32 KB da parte.
+                            window.clear();
+                            window.extend_from_slice(windows[k].get().expect("janela publicada"));
+                            sink(Piece::Processed(p)).map_err(Error::Sink)?;
                         }
+                        report.sink += ts.elapsed();
                         report.speculative += 1;
+                        prev_published = spec.switched;
                         done = Some((spec.end, spec.last));
                     }
                 }
@@ -397,6 +591,7 @@ pub fn inflate_parallel(
                 Some(d) => d,
                 None => {
                     // Em sequência, com a janela conhecida.
+                    let tq = std::time::Instant::now();
                     let mut out = pool_ref.take(WINDOW + expect);
                     out.extend_from_slice(&window);
                     let (end, last) = decode_known(data, cur, bound(k + 1), &mut out)?;
@@ -407,7 +602,10 @@ pub fn inflate_parallel(
                     window.clear();
                     window.extend_from_slice(&out[tail_start..]);
                     let input_end = (end / 8) as usize;
-                    sink(Buffer { vec: out, start, pool: weak.clone(), input_end }).map_err(Error::Sink)?;
+                    report.sequential_time += tq.elapsed();
+                    prev_published = false;
+                    sink(Piece::Bytes(Buffer { vec: out, start, pool: weak.clone(), input_end }))
+                        .map_err(Error::Sink)?;
                     report.sequential += 1;
                     (end, last)
                 }
@@ -585,6 +783,36 @@ mod tests {
         let (out, rep) = parallel(&z, crc32fast::hash(&src), 64 * 1024);
         assert!(out == src);
         assert_eq!(rep.misaligned, 0, "{rep:?}");
+        assert!(rep.speculative > 0, "{rep:?}");
+    }
+
+    #[test]
+    fn process_in_task_preserves_order() {
+        // Processar a cauda na própria tarefa (aqui: copiar) e remontar em ordem
+        // tem que dar exatamente a saída original.
+        let src = xml(60_000);
+        let z = deflate(&src, 6);
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        let mut out = Vec::new();
+        let copy = |t: &[u8]| t.to_vec();
+        let rep = pool
+            .install(|| {
+                inflate_parallel_process(
+                    &z,
+                    Some(crc32fast::hash(&src)),
+                    Options { part_bytes: 64 * 1024, lookahead: 6 },
+                    &copy,
+                    |piece| {
+                        match piece {
+                            Piece::Bytes(b) => out.extend_from_slice(&b),
+                            Piece::Processed(v) => out.extend_from_slice(&v),
+                        }
+                        Ok(())
+                    },
+                )
+            })
+            .unwrap();
+        assert!(out == src);
         assert!(rep.speculative > 0, "{rep:?}");
     }
 

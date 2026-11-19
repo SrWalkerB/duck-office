@@ -95,7 +95,8 @@ impl Table {
     /// Decodifica um símbolo. Exige pelo menos 15 bits no buffer.
     #[inline(always)]
     pub fn decode(&self, b: &mut Bits) -> Option<u32> {
-        let e = self.t[b.peek(self.bits) as usize];
+        // SAFETY: a tabela primária tem 2^bits entradas e `peek(bits)` < 2^bits.
+        let e = unsafe { *self.t.get_unchecked(b.peek(self.bits) as usize) };
         if e & LINK == 0 {
             let len = e & 15;
             if len == 0 {
@@ -107,7 +108,8 @@ impl Table {
         b.consume(self.bits);
         let sub = e & 15;
         let off = (e & !LINK) >> 4;
-        let e2 = self.t[(off + b.peek(sub)) as usize];
+        // SAFETY: a subtabela em `off` tem 2^sub entradas (alocadas em `build`).
+        let e2 = unsafe { *self.t.get_unchecked((off + b.peek(sub)) as usize) };
         let len = e2 & 15;
         if len == 0 {
             return None;

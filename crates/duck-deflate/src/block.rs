@@ -251,3 +251,190 @@ pub(crate) fn decode_block<O: Out>(b: &mut Bits, h: &Header, out: &mut O) -> Res
     }
     Ok(())
 }
+
+/// Caminho rápido de [`decode_block`] para saída em bytes (o caso de quase toda
+/// a saída): reserva folga uma vez e escreve direto pelo ponteiro, sem checar
+/// capacidade a cada literal; cópias com distância ≥ 16 vão em blocos de 16.
+pub(crate) fn decode_block_bytes(b: &mut Bits, h: &Header, out: &mut Vec<u8>) -> Result<(), Corrupt> {
+    let (lit, dist) = match &h.kind {
+        Kind::Stored => return decode_block(b, h, out),
+        Kind::Fixed => {
+            let f = fixed();
+            (&f.0, &f.1)
+        }
+        Kind::Dynamic(t) => (&t.0, &t.1),
+    };
+    // Um símbolo escreve no máximo 258 bytes, e a cópia em blocos passa até 15.
+    const SLACK: usize = 258 + 16;
+    loop {
+        if out.capacity() - out.len() < SLACK + 4096 {
+            // `reserve_exact`: sem dobrar a capacidade (vetores de ~20 MB).
+            out.reserve_exact(1 << 20);
+        }
+        let cap = out.capacity();
+        let base = out.as_mut_ptr();
+        let mut len = out.len();
+        let result = loop {
+            if cap - len < SLACK {
+                break None;
+            }
+            b.refill();
+            if b.overrun() {
+                break Some(Err(Corrupt));
+            }
+            let Some(sym) = lit.decode(b) else { break Some(Err(Corrupt)) };
+            if sym < 256 {
+                // SAFETY: len < cap (há pelo menos SLACK bytes livres).
+                unsafe { *base.add(len) = sym as u8 };
+                len += 1;
+                continue;
+            }
+            if sym == 256 {
+                break Some(Ok(()));
+            }
+            let li = sym as usize - 257;
+            if li >= 29 {
+                break Some(Err(Corrupt));
+            }
+            let length = LEN_BASE[li] as usize + b.peek(LEN_EXTRA[li] as u32) as usize;
+            b.consume(LEN_EXTRA[li] as u32);
+            let Some(ds) = dist.decode(b) else { break Some(Err(Corrupt)) };
+            let ds = ds as usize;
+            if ds >= 30 {
+                break Some(Err(Corrupt));
+            }
+            let d = DIST_BASE[ds] as usize + b.peek(DIST_EXTRA[ds] as u32) as usize;
+            b.consume(DIST_EXTRA[ds] as u32);
+            if d > len {
+                break Some(Err(Corrupt));
+            }
+            // SAFETY: origem em [len - d, len) já escrita; destino em
+            // [len, len + length + 15) cabe na capacidade (SLACK). Com d ≥ 16,
+            // cada bloco de 16 lê só bytes já escritos antes dele.
+            unsafe {
+                let dst = base.add(len);
+                let src = dst.sub(d);
+                if d >= 16 {
+                    let mut i = 0;
+                    while i < length {
+                        std::ptr::copy_nonoverlapping(src.add(i), dst.add(i), 16);
+                        i += 16;
+                    }
+                } else if d == 1 {
+                    std::ptr::write_bytes(dst, *src, length);
+                } else {
+                    for i in 0..length {
+                        *dst.add(i) = *src.add(i);
+                    }
+                }
+            }
+            len += length;
+        };
+        // SAFETY: todos os bytes até `len` foram escritos acima.
+        unsafe { out.set_len(len) };
+        if let Some(r) = result {
+            return r;
+        }
+    }
+}
+
+/// Caminho rápido da fase de 16 bits (janela anterior desconhecida): igual ao
+/// de bytes, mas referências a antes do início viram marcadores.
+///
+/// `marker_end`: a partir desta posição, `out` com certeza não tem marcador.
+/// Literais nunca são marcadores; uma cópia só pode trazer marcador se a
+/// origem começa antes dessa posição (estimativa conservadora, sem varrer).
+pub(crate) fn decode_block_u16(
+    b: &mut Bits,
+    h: &Header,
+    out: &mut Vec<u16>,
+    marker_end: &mut usize,
+) -> Result<(), Corrupt> {
+    let (lit, dist) = match &h.kind {
+        Kind::Stored => return decode_block(b, h, out),
+        Kind::Fixed => {
+            let f = fixed();
+            (&f.0, &f.1)
+        }
+        Kind::Dynamic(t) => (&t.0, &t.1),
+    };
+    const SLACK: usize = 258 + 8;
+    loop {
+        if out.capacity() - out.len() < SLACK + 4096 {
+            out.reserve_exact(1 << 18);
+        }
+        let cap = out.capacity();
+        let base = out.as_mut_ptr();
+        let mut len = out.len();
+        let result = loop {
+            if cap - len < SLACK {
+                break None;
+            }
+            b.refill();
+            if b.overrun() {
+                break Some(Err(Corrupt));
+            }
+            let Some(sym) = lit.decode(b) else { break Some(Err(Corrupt)) };
+            if sym < 256 {
+                // SAFETY: len < cap.
+                unsafe { *base.add(len) = sym as u16 };
+                len += 1;
+                continue;
+            }
+            if sym == 256 {
+                break Some(Ok(()));
+            }
+            let li = sym as usize - 257;
+            if li >= 29 {
+                break Some(Err(Corrupt));
+            }
+            let length = LEN_BASE[li] as usize + b.peek(LEN_EXTRA[li] as u32) as usize;
+            b.consume(LEN_EXTRA[li] as u32);
+            let Some(ds) = dist.decode(b) else { break Some(Err(Corrupt)) };
+            let ds = ds as usize;
+            if ds >= 30 {
+                break Some(Err(Corrupt));
+            }
+            let d = DIST_BASE[ds] as usize + b.peek(DIST_EXTRA[ds] as u32) as usize;
+            b.consume(DIST_EXTRA[ds] as u32);
+            if d > WINDOW {
+                break Some(Err(Corrupt));
+            }
+            // SAFETY: destino em [len, len + length + 7) cabe na capacidade;
+            // a origem é [len - d, ...) quando d ≤ len (já escrita), e com d ≥ 8
+            // cada bloco de 8 lê só valores escritos antes dele.
+            if d > len || len - d < *marker_end {
+                *marker_end = len + length;
+            }
+            unsafe {
+                let dst = base.add(len);
+                if d <= len {
+                    let src = dst.sub(d);
+                    if d >= 8 {
+                        let mut i = 0;
+                        while i < length {
+                            std::ptr::copy_nonoverlapping(src.add(i), dst.add(i), 8);
+                            i += 8;
+                        }
+                    } else {
+                        for i in 0..length {
+                            *dst.add(i) = *src.add(i);
+                        }
+                    }
+                } else {
+                    for i in 0..length {
+                        let p = (len + i) as isize - d as isize;
+                        *dst.add(i) =
+                            if p < 0 { MARKER + (WINDOW as isize + p) as u16 } else { *base.add(p as usize) };
+                    }
+                }
+            }
+            len += length;
+        };
+        // SAFETY: todos os valores até `len` foram escritos.
+        unsafe { out.set_len(len) };
+        if let Some(r) = result {
+            return r;
+        }
+    }
+}

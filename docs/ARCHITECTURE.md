@@ -95,6 +95,19 @@ Situação depois de resolver as pendências da F1 (agora lendo também fórmula
 
 As duas metas não cumpridas têm a mesma causa: a leitura deixou de ter um trecho serial e agora é **limitada pela CPU total** (~10 s de CPU somados, ~160 ns por célula no parse). O próximo ganho vem de deixar o laço principal do parse mais barato, não de mais paralelismo.
 
+Depois da otimização do parse (19/11/2026; detalhes em "Otimização do parse", no fim do status da F1). A máquina tinha ~7–10% de CPU ocupada por outros programas durante as medições, e os números variam ~10% entre rodadas:
+
+| Meta | Windows | Linux | |
+|---|---|---|---|
+| < 5 s com 1 núcleo | **3,39–3,44 s** | **3,37 s** | ✓ (era 4,85 s) |
+| < 1 s com 8+ núcleos | 570–668 ms (8 thr) | 676 ms (8 thr) | ✓ |
+| < 0,4 s com 16+ núcleos | 441–560 ms (16–32 thr, conforme a carga da máquina) | 449–497 ms | ✗ (a aba gigante sozinha: 409 ms) |
+| ≥ 10× com 16 threads | ~7× | ~6,8× | ✗ (a base de 1 thread ficou 30% mais rápida) |
+| < 600 MB com o arquivo aberto | 477 MB (padrão: 16 thr) | 457 MB | ✓ |
+| Pico < 1 GB | 817–838 MB (padrão); 935–1.020 MB com 32 thr | 641–676 MB (padrão); 728–762 MB com 32 thr | ✓ no padrão |
+
+O pool padrão agora usa **uma thread por núcleo físico** (16 nesta máquina): 32 threads não ganharam tempo sobre 16 e aumentaram o pico de memória.
+
 ---
 
 ## ADR-001 · Onde está o gargalo de verdade
@@ -575,8 +588,45 @@ O que esse trabalho ensinou:
 
 Pendências:
 
-- **Parse mais barato** para cumprir < 0,4 s com 16+ núcleos e ≥ 10× com 16 threads (ver metas acima).
+- ~~**Parse mais barato**~~: feito (ver abaixo). As metas de < 0,4 s e ≥ 10× com 16+ núcleos ainda não foram cumpridas.
 - **Opções do alocador no app**: as opções do `mimalloc` hoje ficam no `duck-bench`. O app (`duck-sheets`) precisa aplicar as mesmas.
+
+### Otimização do parse (19/11/2026)
+
+Medido com `duck-bench parse` (só o parse da aba gigante, numa thread, sobre o XML já em memória) e `duck-bench open` (que agora mostra também o tempo de CPU):
+
+| Mudança | Efeito |
+|---|---|
+| Célula lida **numa passada só**: depois da tag, cada `<` decide se é `<v>`, `<f>`, `<is>` ou `</c>`; o texto de `<v>`/`<f>` vai até o próximo `<` | parse 3,55 → 1,98 s (176 → 98 ns por célula) |
+| Busca de `<`/`>` híbrida: laço simples nos primeiros 32 bytes, `memchr` só depois (as distâncias numa célula são de 0 a ~20 bytes) | 1,98 → 1,82 s |
+| Atributos da célula lidos byte a byte, sem `memchr` nem `trim` | 1,82 → **1,67 s (83 ns por célula)** |
+| Merge das partes com `try_lock` (quem chega com o merge ocupado só deixa a parte na fila) | workers deixam de ficar bloqueados |
+| Quem alimenta o inflate paralelo espera vaga **sem pegar tarefas** do pool, dormindo (`park`) até ser acordado | a entrega não para mais rodando um parse de outro |
+| Marcadores resolvidos **no pool** com a janela publicada pela parte anterior (102 de 105 partes) | resolução serial: ~290 → ~5 ms |
+| Decodificador: escrita direta por ponteiro, cópias em blocos de 16, consulta de tabela sem checagem de limites, caminho rápido também na fase de 16 bits, CRC calculado bloco a bloco (bytes ainda no cache) | inflate paralelo isolado: 264 → ~200 ms, CPU 1,70 → 1,20 s |
+
+O que essa rodada ensinou:
+
+- **Medir o parse isolado** mostrou que só ler o XML, sem guardar nada, custava 76 ns por célula: o gargalo era a varredura (várias buscas curtas por célula), não o armazenamento.
+- **Livelock**: a espera "sem ajudar o pool" posta em todos os leitores de aba travou com 8 threads e 20 abas. Todos os workers ficavam esperando vagas que só as tarefas paradas nas filas deles liberariam. Ela vale só para o consumidor do inflate paralelo, que é único.
+- **O trabalho total cresce com as threads** (aba gigante: 2,3 s de CPU com 1 thread, ~6,2 s com 16, ~7 s com 32). Parte é o inflate especulativo (a fase de 16 bits e a decodificação custam mais que o zlib-rs), parte é SMT e o clock menor com todos os núcleos ligados.
+- **SMT não ajuda** neste trabalho: 32 threads empatam com 16 e gastam mais memória.
+
+**Inflate e parse na mesma tarefa** (`duck_deflate::inflate_parallel_process`):
+
+- Cada parte especulada é lida pela própria thread que a descompactou, com os bytes ainda no cache, mas só as linhas inteiras do meio dela.
+- O começo da parte (que depende da janela anterior) e as linhas que atravessam a fronteira com a vizinha são costurados pela thread consumidora.
+- Essa thread passou a só validar a ordem e encaminhar as partes já lidas ao merge.
+- **0 divergências** contra o calamine, como antes.
+
+Resultado: **não deu o salto esperado**. Comparando as duas versões alternadas na mesma sessão, a fundida ganhou ~4% (mediana 630 × 660 ms com a máquina ocupada), e ficou por isso. Partes maiores (2 e 4 MB) foram piores: menos paralelismo e mais memória.
+
+Onde isso para:
+
+- Com 16 threads a leitura usa ~6–7 s de CPU e mantém ~13–14 núcleos ocupados em média (~85%). Está **limitada pela CPU total**, não por um trecho serial.
+- Com 1 thread o mesmo trabalho custa 3,4 s. A diferença vem do inflate especulativo (~1,2 s de CPU contra 0,7 s do zlib-rs), do clock menor com todos os núcleos ligados e da disputa por cache e memória.
+- Os números variam de 450 a 560 ms com 16 threads conforme a carga dos outros programas da máquina.
+- Para chegar a < 0,4 s, falta cortar ~15–20% da CPU total. As alavancas que sobram são micro-otimizações do parse (hoje 83 ns por célula numa thread) e do decodificador (hoje ~1,6 GB/s numa thread contra ~2,2 GB/s do zlib-rs), com retorno incerto.
 - **Bordas** são só contadas (`border_count`); os detalhes entram com a renderização na F2.
 
 ---

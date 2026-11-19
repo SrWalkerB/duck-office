@@ -65,6 +65,7 @@ fn main() {
         "gen" => cmd_gen(rest),
         "formula-stats" => cmd_formula_stats(rest),
         "inflate" => cmd_inflate(rest),
+        "parse" => cmd_parse(rest),
         _ => {
             eprintln!(
                 "uso: duck-bench <open|sweep|verify|gen> [ARQUIVO] [opções]\n  veja o topo de crates/duck-bench/src/main.rs"
@@ -123,11 +124,17 @@ fn options(args: &[String]) -> Options {
     if let Some(n) = flag(args, "--in-flight").and_then(|v| v.parse::<usize>().ok()) {
         o.max_in_flight = n;
     }
+    if let Some(list) = flag(args, "--sheets") {
+        o.only_sheets = Some(list.split(',').filter_map(|v| v.trim().parse().ok()).collect());
+    }
     if let Some(n) = flag(args, "--lookahead").and_then(|v| v.parse::<usize>().ok()) {
         o.inflate_lookahead = n;
     }
     if let Some(n) = flag(args, "--pieces").and_then(|v| v.parse::<usize>().ok()) {
         o.inflate_pieces = n;
+    }
+    if let Some(kb) = flag(args, "--part-kb").and_then(|v| v.parse::<usize>().ok()) {
+        o.inflate_part_bytes = kb * 1024;
     }
     o
 }
@@ -177,7 +184,9 @@ fn cmd_open(args: &[String]) -> Res {
             v
         })
     });
+    let cpu0 = mem::cpu_seconds();
     let (wb, rep) = load(&path, args)?;
+    let cpu = mem::cpu_seconds() - cpu0;
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Some(h) = sampler {
         let v = h.join().unwrap_or_default();
@@ -198,7 +207,12 @@ fn cmd_open(args: &[String]) -> Res {
     println!("\nduck-bench open");
     println!("  arquivo: {:.1} MB no disco, {:.1} MB de XML nas abas", mb(file_size), mb(rep.xml_bytes()));
     println!("  threads: {}", rep.threads);
-    println!("\nTempo total: {:.0} ms", ms(rep.total));
+    println!(
+        "\nTempo total: {:.0} ms (CPU: {:.2} s, ~{:.1} núcleos ocupados em média)",
+        ms(rep.total),
+        cpu,
+        cpu / rep.total.as_secs_f64()
+    );
     println!("  pacote + workbook        {:>8.1} ms", ms(rep.package));
     println!(
         "  strings compartilhadas   {:>8.1} ms ({} strings)",
@@ -240,6 +254,20 @@ fn cmd_open(args: &[String]) -> Res {
         println!("  ... e mais {} abas menores", idx.len() - 8);
     }
     println!("  * parse = soma do tempo de CPU de todos os pedaços (várias threads)");
+    for (i, s) in rep.sheets.iter().enumerate() {
+        if let Some(r) = s.inflate_report {
+            println!(
+                "  inflate paralelo da aba {i}: {} partes ({} especuladas, {} já resolvidas no pool); entrega: espera {:.0} ms, marcadores {:.0} ms, parse/vagas {:.0} ms, sequencial {:.0} ms",
+                r.parts,
+                r.speculative,
+                r.pre_resolved,
+                ms(r.wait),
+                ms(r.resolve),
+                ms(r.sink),
+                ms(r.sequential_time)
+            );
+        }
+    }
 
     let mut total = duck_core::CellCounts::default();
     for s in &wb.sheets {
@@ -299,7 +327,7 @@ fn cmd_sweep(args: &[String]) -> Res {
         for _ in 0..repeat {
             let mut cmd = Command::new(&exe);
             cmd.arg("open").arg(&path).arg("--threads").arg(n.to_string()).arg("--machine");
-            for f in ["--chunk-mb", "--in-flight", "--lookahead", "--pieces"] {
+            for f in ["--chunk-mb", "--in-flight", "--lookahead", "--pieces", "--sheets", "--part-kb"] {
                 if let Some(v) = flag(args, f) {
                     cmd.arg(f).arg(v);
                 }
@@ -517,6 +545,14 @@ fn cmd_inflate(args: &[String]) -> Res {
         rep.parts, rep.speculative, rep.sequential, rep.no_block, rep.misaligned, rep.unresolved, rep.skipped
     );
     println!("  saída resolvida em série (fase de marcadores): {:.1} MB", mb(rep.head_bytes));
+    let [f, h, t, c] = rep.spec_times;
+    println!(
+        "  especulações (soma): busca {:.0} ms, fase 16 bits {:.0} ms, bytes {:.0} ms, CRC {:.0} ms",
+        ms(f),
+        ms(h),
+        ms(t),
+        ms(c)
+    );
     println!(
         "  CRC32 confere e bytes {} ao zlib-rs",
         if same && pos == reference.len() { "idênticos" } else { "DIFERENTES" }
@@ -526,8 +562,10 @@ fn cmd_inflate(args: &[String]) -> Res {
     }
     // Sem a comparação (que é serial): só o custo de descompactar e entregar.
     let mut best = f64::MAX;
+    let mut best_cpu = f64::MAX;
     for _ in 0..3 {
         let t = Instant::now();
+        let c0 = mem::cpu_seconds();
         let mut total = 0usize;
         pool.install(|| {
             duck_deflate::inflate_parallel(
@@ -542,7 +580,48 @@ fn cmd_inflate(args: &[String]) -> Res {
         })
         .map_err(|e| e.to_string())?;
         best = best.min(ms(t.elapsed()));
+        best_cpu = best_cpu.min(mem::cpu_seconds() - c0);
     }
-    println!("  só descompactar (melhor de 3): {best:.0} ms — {:.1}× o zlib-rs", ms(t_zlib) / best);
+    println!(
+        "  só descompactar (melhor de 3): {best:.0} ms — {:.1}× o zlib-rs (CPU {:.2} s; zlib-rs: {:.2} s)",
+        ms(t_zlib) / best,
+        best_cpu,
+        t_zlib.as_secs_f64()
+    );
+    Ok(())
+}
+
+/// Mede só o parse da maior aba, numa thread: descompacta uma vez e cronometra
+/// o leitor de linhas sobre o XML em memória.
+fn cmd_parse(args: &[String]) -> Res {
+    use std::io::Read;
+    let path = file_arg(args)?;
+    let pkg = duck_xlsx::Package::open(&path).map_err(|e| e.to_string())?;
+    let e = pkg
+        .entries()
+        .filter(|e| e.name.starts_with("xl/worksheets/"))
+        .max_by_key(|e| e.size)
+        .ok_or("sem abas")?
+        .clone();
+    let mut xml = Vec::with_capacity(e.size as usize);
+    flate2::read::DeflateDecoder::new(pkg.compressed(&e)).read_to_end(&mut xml).map_err(|e| e.to_string())?;
+    let repeat: usize = flag(args, "--repeat").and_then(|v| v.parse().ok()).unwrap_or(3);
+    let mut best = f64::MAX;
+    let mut cells = 0u64;
+    for _ in 0..repeat {
+        let t = Instant::now();
+        let sheet = duck_xlsx::parse_sheet_xml(&xml);
+        best = best.min(t.elapsed().as_secs_f64());
+        let c = sheet.counts();
+        cells = c.values() + c.styled_empty;
+    }
+    println!(
+        "parse de {:.0} MB de XML, 1 thread: {:.0} ms ({:.0} MB/s, {:.0} ns por célula, {} células)",
+        mb(xml.len() as u64),
+        best * 1000.0,
+        mb(xml.len() as u64) / best,
+        best * 1e9 / cells as f64,
+        cells
+    );
     Ok(())
 }

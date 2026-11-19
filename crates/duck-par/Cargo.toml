@@ -9,3 +9,6 @@ rust-version.workspace = true
 [dependencies]
 memchr = "2.8.3"
 rayon = "1.12.0"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_SystemInformation"] }
