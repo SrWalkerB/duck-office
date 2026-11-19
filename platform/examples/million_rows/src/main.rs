@@ -8,7 +8,8 @@
 //!   cargo run --release -p million_rows -- --bench # benchmark e sai
 //!
 //! Teclas: setas, PageUp/PageDown, Home, Ctrl+setas, Ctrl+Home/End,
-//! Ctrl+G (vai para a linha 500.000), Ctrl+C (copia a célula), F2 (vsync).
+//! Ctrl+G (vai para a linha do meio), Ctrl+C (copia a célula), F2 (vsync).
+//! `--rows N` muda o tamanho da grade (padrão: 1 milhão).
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -21,7 +22,8 @@ use duck_text::TextSystem;
 // Parâmetros (pixels lógicos)
 // ---------------------------------------------------------------------------
 
-const ROWS: usize = 1_000_000;
+/// Linhas da grade quando `--rows` não é informado.
+const DEFAULT_ROWS: usize = 1_000_000;
 const COLS: usize = 40;
 const ROW_H: u32 = 21;
 const TALL_ROW_H: u32 = 34;
@@ -351,7 +353,7 @@ struct Sheet {
 }
 
 impl Sheet {
-    fn new(bench: bool) -> Self {
+    fn new(bench: bool, nrows: usize) -> Self {
         let start = Instant::now();
         let fonts_loading = std::thread::spawn(|| {
             let t = Instant::now();
@@ -359,7 +361,7 @@ impl Sheet {
             (ts, t.elapsed())
         });
         let t = Instant::now();
-        let rows = Axis::new((0..ROWS).map(|r| if is_tall(r) { TALL_ROW_H } else { ROW_H }).collect());
+        let rows = Axis::new((0..nrows).map(|r| if is_tall(r) { TALL_ROW_H } else { ROW_H }).collect());
         let cols = Axis::new(
             (0..COLS)
                 .map(|c| match c {
@@ -393,7 +395,7 @@ impl Sheet {
             cellbuf: String::with_capacity(64),
             labelbuf: String::with_capacity(64),
             recent_cpu: Vec::with_capacity(120),
-            startup: vec![("índice de 1M linhas (Fenwick)", axis_time)],
+            startup: vec![("índice das linhas (Fenwick)", axis_time)],
             gpu_steps: Vec::new(),
             first_frame: None,
             bench: bench.then(Bench::new),
@@ -429,7 +431,8 @@ impl Sheet {
     fn update_metrics(&mut self) {
         if let Some(text) = &mut self.text {
             text.set_font_size(FONT_PX * self.scale as f32);
-            let w = text.measure("1000000") as f64;
+            // Largura do maior número de linha que existe na grade.
+            let w = text.measure(&self.rows.len().to_string()) as f64;
             self.rownum_w = (w + 2.0 * PAD * self.scale).ceil().max(40.0 * self.scale);
         }
     }
@@ -642,7 +645,7 @@ impl Sheet {
         label.push_str("Linha ");
         fmt_br(&mut label, (ar + 1) as f64, 0);
         label.push_str(" de ");
-        fmt_br(&mut label, ROWS as f64, 0);
+        fmt_br(&mut label, self.rows.len() as f64, 0);
         let mut colname = String::new();
         col_name(ac, &mut colname);
         let _ = write!(label, " · Coluna {colname} · {} instâncias", out.len());
@@ -735,7 +738,7 @@ impl Sheet {
 
     fn key(&mut self, cx: &mut Context, key: Key, ctrl: bool) -> bool {
         let (mut r, mut c) = self.active;
-        let last_r = ROWS - 1;
+        let last_r = self.rows.len() - 1;
         let last_c = COLS - 1;
         match key {
             Key::ArrowUp if ctrl => r = 0,
@@ -760,8 +763,8 @@ impl Sheet {
                 return true;
             }
             Key::Char(ref k) if ctrl && k.eq_ignore_ascii_case("g") => {
-                // "Ir para a linha 500.000", centralizada.
-                r = 499_999;
+                // Vai para a linha do meio da grade, centralizada.
+                r = self.rows.len() / 2 - 1;
                 self.active = (r, c);
                 let l = self.layout();
                 self.scroll_y = self.rows.offset(r) as f64 - l.view_h() / 2.0;
@@ -785,6 +788,7 @@ impl Sheet {
 
     /// Aplica o movimento do benchmark antes do frame. `false` = terminou.
     fn bench_before_frame(&mut self) {
+        let nrows = self.rows.len();
         let Some(b) = &mut self.bench else { return };
         if b.warmup > 0 {
             return;
@@ -793,7 +797,7 @@ impl Sheet {
             0 => self.scroll_y += 40.0,
             1 => {
                 b.rng = mix(b.rng);
-                let row = (b.rng % ROWS as u64) as usize;
+                let row = (b.rng % nrows as u64) as usize;
                 let col = ((b.rng >> 32) % COLS as u64) as usize;
                 self.scroll_y = self.rows.offset(row) as f64;
                 self.scroll_x = self.cols.offset(col) as f64;
@@ -849,7 +853,7 @@ impl Sheet {
     fn print_bench(&self) {
         let Some(b) = &self.bench else { return };
         println!("\nduck-office · F0 · million_rows --bench");
-        println!("  grade: {} linhas × {} colunas (dados sintéticos)", fmt_int(ROWS), COLS);
+        println!("  grade: {} linhas × {} colunas (dados sintéticos)", fmt_int(self.rows.len()), COLS);
         if let Some(g) = &self.gfx {
             let i = g.adapter_info();
             println!("  GPU: {} ({}){}", i.name, i.backend, if i.software { " [software]" } else { "" });
@@ -868,6 +872,12 @@ impl Sheet {
         if let Some(ff) = self.first_frame {
             println!("  {:<34} {:>8.1} ms", "primeiro frame na tela (total)", ff.as_secs_f64() * 1000.0);
         }
+        let (cur, peak) = process_memory();
+        println!(
+            "\nMemória do processo: {:.0} MB agora, {:.0} MB de pico",
+            cur as f64 / 1048576.0,
+            peak as f64 / 1048576.0
+        );
         println!("\nFrames:");
         print!("{}", b.report);
         println!("  máximo de instâncias num frame: {}", b.instances);
@@ -1047,6 +1057,36 @@ impl App for Sheet {
     }
 }
 
+/// Memória do processo (atual, pico), em bytes.
+#[cfg(windows)]
+fn process_memory() -> (u64, u64) {
+    use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    // SAFETY: chamada simples da API do Windows com um struct zerado do tamanho declarado.
+    unsafe {
+        let mut c: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        c.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        if GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) != 0 {
+            return (c.WorkingSetSize as u64, c.PeakWorkingSetSize as u64);
+        }
+    }
+    (0, 0)
+}
+
+#[cfg(not(windows))]
+fn process_memory() -> (u64, u64) {
+    let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let kb = |key: &str| {
+        s.lines()
+            .find(|l| l.starts_with(key))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+            * 1024
+    };
+    (kb("VmRSS:"), kb("VmHWM:"))
+}
+
 fn save_png(path: &str, w: u32, h: u32, rgba: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut enc = png::Encoder::new(file, w, h);
@@ -1060,11 +1100,16 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let value = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     let bench = args.iter().any(|a| a == "--bench");
-    let mut sheet = Sheet::new(bench);
+    // `--rows N`: tamanho da grade (padrão: 1 milhão). Aceita 10_000_000 ou 10.000.000.
+    let nrows = value("--rows")
+        .and_then(|v| v.replace(['_', '.'], "").parse::<usize>().ok())
+        .unwrap_or(DEFAULT_ROWS)
+        .max(2);
+    let mut sheet = Sheet::new(bench, nrows);
     sheet.screenshot = value("--screenshot");
     // `--row N`: começa com a linha N (1-based) selecionada e centralizada.
     if let Some(row) = value("--row").and_then(|r| r.parse::<usize>().ok()) {
-        let r = row.clamp(1, ROWS) - 1;
+        let r = row.clamp(1, sheet.rows.len()) - 1;
         sheet.active = (r, 1);
         sheet.scroll_y = sheet.rows.offset(r) as f64 - 300.0;
     }

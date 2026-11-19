@@ -36,12 +36,18 @@ sudo apt-get install build-essential libxkbcommon-x11-0
 cargo run --release -p million_rows
 ```
 
-Teclas: setas, PageUp/PageDown, Home, Ctrl+setas, Ctrl+Home/End, Ctrl+G (linha 500.000), Ctrl+C (copia a célula), F2 (liga/desliga vsync).
+Teclas: setas, PageUp/PageDown, Home, Ctrl+setas, Ctrl+Home/End, Ctrl+G (linha do meio), Ctrl+C (copia a célula), F2 (liga/desliga vsync).
+
+Outro tamanho de grade (padrão: 1 milhão de linhas):
+
+```
+cargo run --release -p million_rows -- --rows 10000000
+```
 
 Benchmark (abre a janela, mede e sai):
 
 ```
-cargo run --release -p million_rows -- --bench
+cargo run --release -p million_rows -- --bench --rows 10000000
 ```
 
 Screenshot sem mostrar nada na tela:

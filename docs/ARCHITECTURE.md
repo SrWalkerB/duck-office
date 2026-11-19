@@ -504,6 +504,18 @@ O que a F0 ensinou:
 - **Número que não cabe na célula vira `###`**, como no Excel: cortado, ele mostraria um valor errado.
 - O `duck-gfx` também renderiza fora da tela (`render_to_rgba`, usado por `million_rows --screenshot`), base para testes visuais automáticos.
 
+**Grade com 10 milhões de linhas** (19/11/2026, `million_rows --bench --rows 10000000`):
+
+| | 1 milhão | 10 milhões |
+|---|---|---|
+| Primeiro frame na tela (Windows, DX12) | 217–247 ms | 248–273 ms |
+| Índice das linhas (Fenwick) | 4 ms | 43–46 ms (Linux: 73 ms) |
+| CPU por frame, scroll / saltos aleatórios (p50, Windows) | 0,81 / 0,84 ms | 0,81 / 0,85–0,88 ms |
+| CPU por frame, scroll (p50, Linux por software) | 4,1 ms | 4,1 ms |
+| Memória do processo (Windows / Linux) | 190 / 178 MB | 294 / 277 MB |
+
+O custo por frame não muda com 10× mais linhas: só as células visíveis são processadas e achar a linha num pixel é O(log n). O que cresce é o índice: ~10 bytes por linha (tamanho `u32` + árvore `i64`), ou ~105 MB e ~40 ms para 10 milhões. Na F2, o índice deve guardar só as linhas com altura própria (no arquivo de referência são 15 mil de 593 mil) sobre uma altura padrão, em vez de uma entrada por linha.
+
 Pendências da F0:
 
 - **Linux com GPU de verdade.** No Linux só foi testado o WSLg, com renderização por software. Falta um Linux nativo (ou WSL com driver de GPU) para medir o caminho acelerado.

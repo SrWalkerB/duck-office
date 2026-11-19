@@ -12,3 +12,6 @@ duck-platform = { path = "../../duck-platform" }
 duck-gfx = { path = "../../duck-gfx" }
 duck-text = { path = "../../duck-text" }
 png = "0.18.1"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
