@@ -192,13 +192,27 @@ fn is_software(adapter: &wgpu::Adapter) -> bool {
     adapter.get_info().device_type == wgpu::DeviceType::Cpu
 }
 
+/// Há uma GPU de verdade (não por software) em `backends`? Pergunta sem
+/// tocar na janela e sem conectar ao compositor (instância sem display):
+/// criar e destruir superfícies na mesma janela, só para sondar, já derrubou
+/// o compositor do WSLg (Weston, segfault) com o programa aberto.
+fn has_hardware_adapter(backends: wgpu::Backends) -> bool {
+    let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+    desc.backends = backends;
+    let instance = wgpu::Instance::new(desc);
+    pollster::block_on(instance.enumerate_adapters(backends))
+        .iter()
+        .any(|a| !matches!(a.get_info().device_type, wgpu::DeviceType::Cpu))
+}
+
 /// Escolhe superfície e adaptador.
 ///
 /// 1. Backend nativo do SO (rápido de abrir: ~150–250 ms).
-/// 2. Se ele falhar **ou só oferecer renderização por software**, tenta os
-///    outros e prefere qualquer GPU de verdade. Ex.: Linux sem driver Vulkan
-///    para a placa, mas com o lavapipe instalado e OpenGL acelerado.
-/// 3. Sem GPU em nenhum backend, fica com o software do backend nativo.
+/// 2. Se ele falhar, ou só oferecer renderização por software, pergunta aos
+///    outros backends se há GPU de verdade, **sem criar superfície na janela**.
+///    Ex.: Linux sem driver Vulkan para a placa, mas com OpenGL acelerado.
+/// 3. Só se houver, abre a janela nesse backend; senão, fica com o software
+///    do backend nativo (a janela só ganhou uma superfície).
 ///
 /// Com `WGPU_BACKEND` definido, respeita a escolha e não procura alternativas.
 fn select<W>(window: &W) -> Result<(wgpu::Surface<'static>, wgpu::Adapter), GfxError>
@@ -206,19 +220,20 @@ where
     W: HasWindowHandle + HasDisplayHandle + fmt::Debug + Clone + Send + Sync + 'static,
 {
     let primary = primary_backends();
+    let others = wgpu::Backends::all() - primary;
     let first = open(window, primary);
-    if let Ok((_, adapter)) = &first
-        && (!is_software(adapter) || wgpu::Backends::from_env().is_some())
-    {
-        return first;
+    let forced = wgpu::Backends::from_env().is_some();
+    match &first {
+        Ok((_, adapter)) if forced || !is_software(adapter) => return first,
+        Ok(_) if !has_hardware_adapter(others) => return first,
+        Err(e) => log::warn!("backend principal falhou ({e}); tentando os demais"),
+        Ok(_) => {}
     }
-    // Libera a superfície antes de abrir outra na mesma janela.
+    // Há GPU de verdade em outro backend (ou o principal falhou): libera a
+    // superfície do principal antes de abrir outra na mesma janela.
     let primary_works = first.is_ok();
     let first_err = first.err();
-    if let Some(e) = &first_err {
-        log::warn!("backend principal falhou ({e}); tentando os demais");
-    }
-    let other = open(window, wgpu::Backends::all() - primary);
+    let other = open(window, others);
     if let Ok((_, adapter)) = &other
         && (!is_software(adapter) || !primary_works)
     {
