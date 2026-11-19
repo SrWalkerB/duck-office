@@ -470,7 +470,7 @@ Pendências da F0:
 - **Linux com GPU de verdade.** No Linux só foi testado o WSLg, com renderização por software. Falta um Linux nativo (ou WSL com driver de GPU) para medir o caminho acelerado.
 - **Teclado e mouse no Linux** não foram testados por mim (só a renderização). Teste manual: `cargo run --release -p million_rows` no WSL, com setas, Ctrl+G, roda do mouse e arrastar as scrollbars.
 - **Memória base de ~200 MB** com a janela aberta (boa parte é o driver da GPU). Medir e separar na F1, junto com o `duck-bench`.
-- O CI (`.github/workflows/ci.yml`) está escrito, mas ainda não rodou: a pasta não é um repositório git.
+- O CI (`.github/workflows/ci.yml`) está escrito, mas ainda não rodou: o repositório git é só local, sem remoto no GitHub.
 
 ---
 
