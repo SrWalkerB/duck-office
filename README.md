@@ -13,6 +13,11 @@ platform/            biblioteca nativa independente (não depende da suíte)
   duck-text/         shaping, atlas de glifos, cache de texto
   examples/
     million_rows/    grade de 1.000.000 de linhas (prova da F0)
+crates/              a suíte office
+  duck-core/         modelo do workbook: blocos colunares, strings, estilos
+  duck-par/          pool de threads, limitador de memória, cortes SIMD
+  duck-xlsx/         leitura de .xlsx/.xlsm em paralelo e em streaming
+  duck-bench/        medição: open, sweep, verify, gen
 scripts/
   check-platform-deps.sh   garante que platform/ não depende da suíte
 ```
@@ -42,6 +47,34 @@ Screenshot sem mostrar nada na tela:
 ```
 cargo run --release -p million_rows -- --screenshot grade.png --row 500000
 ```
+
+## Medindo a leitura de planilhas
+
+Com um arquivo qualquer:
+
+```
+cargo run --release -p duck-bench -- open caminho/arquivo.xlsx
+```
+
+Curva de ganho por threads (um processo por rodada):
+
+```
+cargo run --release -p duck-bench -- sweep caminho/arquivo.xlsx
+```
+
+Conferir cada célula contra o calamine (leitor independente):
+
+```
+cargo run --release -p duck-bench -- verify caminho/arquivo.xlsx
+```
+
+Gerar uma planilha sintética grande (600 mil linhas × 37 colunas por padrão):
+
+```
+cargo run --release -p duck-bench -- gen sintetica.xlsx --rows 600000
+```
+
+Sem caminho, o `duck-bench` usa `reference = "..."` de um `bench.local.toml` na raiz. Esse arquivo fica fora do git, porque a planilha de referência tem dados reais.
 
 ## Verificações
 

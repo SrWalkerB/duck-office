@@ -70,6 +70,18 @@ Esse arquivo é o **benchmark principal**. Ele contém dados de empresa e **não
 | "Ir para a linha 500000" | **< 1 frame** |
 | Startup a frio do app sem arquivo | **< 300 ms** |
 
+### Metas revisadas depois da F1
+
+A F1 leu o arquivo inteiro em ~0,65 s, bem abaixo das hipóteses iniciais. As metas passam a ser:
+
+| Métrica | Medido na F1 (Ryzen 9 5950X) | Nova meta |
+|---|---|---|
+| Carga completa do arquivo de referência | 0,62–0,65 s (8+ threads); 3,95 s (1 thread) | **< 1 s** com 8+ núcleos; **< 5 s** com 1 núcleo; **< 0,4 s** com 16+ núcleos depois do inflate paralelo |
+| Escalabilidade | 6,1× com 8 threads; satura em ~6,4× | **≥ 10×** com 16 threads (exige inflate paralelo) |
+| Memória com o arquivo aberto | ~460–490 MB | **< 600 MB** |
+| Pico de memória durante a leitura | ~0,9–1,1 GB | **< 1 GB** |
+| Primeira tela visível após abrir (F2) | — | **< 300 ms** (aba ativa primeiro, carga progressiva) |
+
 ---
 
 ## ADR-001 · Onde está o gargalo de verdade
@@ -469,8 +481,43 @@ Pendências da F0:
 
 - **Linux com GPU de verdade.** No Linux só foi testado o WSLg, com renderização por software. Falta um Linux nativo (ou WSL com driver de GPU) para medir o caminho acelerado.
 - **Teclado e mouse no Linux** não foram testados por mim (só a renderização). Teste manual: `cargo run --release -p million_rows` no WSL, com setas, Ctrl+G, roda do mouse e arrastar as scrollbars.
-- **Memória base de ~200 MB** com a janela aberta (boa parte é o driver da GPU). Medir e separar na F1, junto com o `duck-bench`.
+- **Memória base de ~200 MB** com a janela aberta (boa parte é o driver da GPU). Medir na F2, quando a janela e os dados estiverem no mesmo processo.
 - O CI (`.github/workflows/ci.yml`) está escrito, mas ainda não rodou: o repositório git é só local, sem remoto no GitHub.
+
+### Status da F1 (18/11/2026)
+
+Entregue em `crates/`:
+
+- **`duck-core`**: armazenamento colunar em blocos de 1024 linhas (11 bytes por célula: tipo, estilo `u16`, payload de 64 bits), tabelas de strings contíguas, estilos (`cellXfs`, fontes, preenchimentos, formatos de número) e montagem de abas por partes (`SheetPart` + `merge_part` em ordem fixa).
+- **`duck-par`**: pool com número de threads escolhido, limitador de pedaços em memória que executa trabalho enquanto espera (não trava com 1 thread) e corte de buffers por busca SIMD.
+- **`duck-xlsx`**: zip mapeado em memória; strings compartilhadas lidas em paralelo por fronteiras de `</si>`; estilos; todas as abas ao mesmo tempo (maiores primeiro); abas grandes em pedaços de 8 MB cortados depois de `</row>`, cada um numa thread; aba sem número de linha relida em sequência.
+- **`duck-bench`**: `open`, `sweep` (um processo por rodada), `verify` (compara cada célula com o `calamine`, um leitor independente, sem expor o conteúdo das células no relatório) e `gen` (planilha sintética com o perfil da referência).
+
+Resultado no arquivo de referência (185 MB no disco, 1,9 GB de XML, 20 abas):
+
+| | Windows 11 | Linux (WSL, Ubuntu 26.04) |
+|---|---|---|
+| Células com valor / com fórmula | 24.171.714 / 10.111.650 | igual |
+| Divergências contra o calamine | **0** | **0** |
+| Leitura completa, 8 threads | 650 ms | 648 ms |
+| Leitura completa, 1 thread | 3.950 ms | 3.971 ms |
+| Ganho com 8 / 16 threads | 6,07× / 6,41× | 6,13× / 6,41× |
+| Memória com tudo carregado | ~460 MB (dados: 345 MB) | ~490 MB |
+| Pico durante a leitura | 0,87–0,96 GB | 0,95–1,1 GB |
+
+O que a F1 ensinou:
+
+- **O gargalo agora é o inflate da aba gigante**: 1,56 GB de XML num único stream deflate leva ~0,8 s numa thread só, e a curva de ganho satura em ~6,4× a partir de 8 threads. O parse em si escala bem (~400 MB/s por thread). O **inflate paralelo especulativo** é a prioridade de performance da F2.
+- **Fim de linha do XML**: a especificação manda converter `\r\n` e `\r` literais em `\n`; só um CR escapado (`_x000D_`, `&#13;`) sobrevive. O `verify` achou 357 células com quebra de linha erradas no arquivo real antes da correção. Sem a comparação célula a célula, isso teria passado.
+- **Alocador**: o `mimalloc` deixou a leitura ~20% mais rápida que o alocador do sistema, mas segura a memória dos pedaços liberados em cada thread. Chamar `mi_collect` em todas as threads do pool ao fim da leitura traz a memória de ~850 MB de volta para ~460 MB. O pico (~1 GB) ainda vem dessa retenção durante a leitura.
+- O limite de pedaços em memória (8 a 66) quase não muda o tempo nem o pico neste arquivo.
+
+Pendências da F1:
+
+- **Inflate paralelo** (F2): é o que falta para passar de ~6× e chegar perto de 0,4 s.
+- **Pico de memória** acima da nova meta de 1 GB em algumas rodadas: reaproveitar os buffers de pedaço entre threads em vez de alocar e liberar.
+- **Fórmulas** são lidas só como "tem fórmula" (o valor em cache é usado); o texto da fórmula fica para a F3/F4.
+- **Ainda não lidos**: larguras de coluna, alturas de linha, células mescladas e painéis congelados. Entram na F2 junto com a renderização.
 
 ---
 

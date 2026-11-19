@@ -4,7 +4,7 @@ members = [
     "platform/duck-platform",
     "platform/duck-gfx",
     "platform/duck-text",
-    "platform/examples/million_rows",
+    "platform/examples/million_rows", "crates/duck-core", "crates/duck-par", "crates/duck-xlsx", "crates/duck-bench",
 ]
 
 [workspace.package]

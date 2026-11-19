@@ -38,3 +38,13 @@ jobs:
 
       - name: Build release
         run: cargo build --workspace --release
+
+      # Planilha sintética lida pelo duck-xlsx e conferida célula a célula
+      # contra o calamine, com pedaços de 1 MB para exercitar os cortes.
+      - name: duck-xlsx × calamine
+        shell: bash
+        run: |
+          ./target/release/duck-bench gen target/synth.xlsx --rows 100000 --small-sheets 3
+          ./target/release/duck-bench verify target/synth.xlsx --chunk-mb 1
+          ./target/release/duck-bench verify target/synth.xlsx --chunk-mb 1 --threads 1
+          ./target/release/duck-bench open target/synth.xlsx
