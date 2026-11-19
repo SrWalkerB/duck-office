@@ -48,3 +48,5 @@ jobs:
           ./target/release/duck-bench verify target/synth.xlsx --chunk-mb 1
           ./target/release/duck-bench verify target/synth.xlsx --chunk-mb 1 --threads 1
           ./target/release/duck-bench open target/synth.xlsx
+          ./target/release/duck-bench gen-showcase target/vitrine.xlsx
+          ./target/release/duck-bench verify target/vitrine.xlsx

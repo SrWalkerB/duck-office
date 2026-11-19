@@ -1,0 +1,13 @@
+[package]
+name = "duck-ui"
+description = "Desenho 2D e widgets mínimos (campo de texto, abas) sobre duck-gfx e duck-text."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+duck-gfx = { path = "../duck-gfx" }
+duck-platform = { path = "../duck-platform" }
+duck-text = { path = "../duck-text" }

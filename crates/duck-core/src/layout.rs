@@ -43,12 +43,44 @@ pub struct Pane {
     pub frozen_cols: u32,
 }
 
+/// Como a aba é mostrada (`<sheetView>` e `<sheetPr>`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SheetView {
+    pub show_grid_lines: bool,
+    pub show_headers: bool,
+    /// Zoom em porcentagem (10–400).
+    pub zoom: u16,
+    /// Célula do canto superior esquerdo ao abrir.
+    pub top_left: Option<(u32, u32)>,
+    /// Célula ativa ao abrir.
+    pub active_cell: Option<(u32, u32)>,
+    /// Cor da guia da aba.
+    pub tab_color: Option<crate::Color>,
+}
+
+impl Default for SheetView {
+    fn default() -> Self {
+        Self {
+            show_grid_lines: true,
+            show_headers: true,
+            zoom: 100,
+            top_left: None,
+            active_cell: None,
+            tab_color: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Layout {
+    /// `None` até o primeiro `<sheetView>` (ou `<sheetPr>`) ser lido.
+    pub view: Option<SheetView>,
     /// Altura padrão das linhas, em pontos.
     pub default_row_height: Option<f32>,
-    /// Largura padrão das colunas, em caracteres.
+    /// Largura padrão das colunas, em caracteres (`defaultColWidth`).
     pub default_col_width: Option<f32>,
+    /// Largura base em caracteres, sem a margem (`baseColWidth`, padrão 8).
+    pub base_col_width: Option<f32>,
     /// Ordenadas por `first`.
     pub cols: Vec<ColSpec>,
     /// Ordenadas por `row`; só linhas com altura própria ou escondidas.
@@ -64,7 +96,15 @@ impl Layout {
     pub fn absorb(&mut self, other: Layout) {
         self.default_row_height = self.default_row_height.or(other.default_row_height);
         self.default_col_width = self.default_col_width.or(other.default_col_width);
+        self.base_col_width = self.base_col_width.or(other.base_col_width);
         self.pane = self.pane.or(other.pane);
+        self.view = match (self.view, other.view) {
+            (Some(mut a), Some(b)) => {
+                a.tab_color = a.tab_color.or(b.tab_color);
+                Some(a)
+            }
+            (a, b) => a.or(b),
+        };
         self.dimension = self.dimension.or(other.dimension);
         self.cols.extend(other.cols);
         self.rows.extend(other.rows);
@@ -73,6 +113,12 @@ impl Layout {
 
     /// Ordena depois de juntar todos os pedaços.
     pub fn finish(&mut self) {
+        // `<tabColor>` sozinho (sem `<sheetView>`) deixa zoom 0 como marca.
+        if let Some(v) = self.view.as_mut()
+            && v.zoom == 0
+        {
+            v.zoom = 100;
+        }
         self.cols.sort_by_key(|c| c.first);
         self.rows.sort_by_key(|r| r.row);
         self.merges.sort_by_key(|m| (m.first_row, m.first_col));

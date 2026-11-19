@@ -996,7 +996,7 @@ impl App for Sheet {
                 self.scroll_y -= dy;
                 true
             }
-            Event::MouseDown { button: MouseButton::Left, x, y } => {
+            Event::MouseDown { button: MouseButton::Left, x, y, .. } => {
                 self.mouse_down(x, y);
                 true
             }

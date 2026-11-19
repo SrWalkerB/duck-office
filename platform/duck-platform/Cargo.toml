@@ -9,5 +9,6 @@ rust-version.workspace = true
 [dependencies]
 arboard = "3.7.0"
 log = "0.4.35"
+rfd = "0.17.2"
 raw-window-handle = "0.6.2"
 winit = "0.30.13"

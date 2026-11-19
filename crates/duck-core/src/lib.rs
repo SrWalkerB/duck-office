@@ -11,12 +11,17 @@
 //!   é idêntico com qualquer número de threads (ADR-012).
 
 mod layout;
+pub mod numfmt;
 mod styles;
 
 use std::collections::HashMap;
 
-pub use layout::{CellRange, ColSpec, Layout, Pane, RowSpec};
-pub use styles::{Alignment, CellXf, Color, Fill, Font, HAlign, Styles, VAlign};
+pub use layout::{CellRange, ColSpec, Layout, Pane, RowSpec, SheetView};
+pub use numfmt::{Formatted, NumFmt};
+pub use styles::{
+    Alignment, Border, BorderSide, BorderStyle, CellXf, Color, Fill, Font, HAlign, Styles, Theme, VAlign,
+    apply_tint,
+};
 
 /// Linhas por bloco.
 pub const BLOCK_ROWS: usize = 1024;
@@ -84,6 +89,14 @@ impl StringTable {
         self.data.push_str(&other.data);
         self.ends.extend(other.ends.iter().map(|e| e + byte_base));
         base
+    }
+
+    /// Endereços [início, fim) do texto da tabela. Um `&str` devolvido por
+    /// [`StringTable::get`] cai dentro desse intervalo: serve para saber de que
+    /// tabela veio o texto de uma célula sem guardar o índice.
+    pub fn byte_range(&self) -> (usize, usize) {
+        let p = self.data.as_ptr() as usize;
+        (p, p + self.data.len())
     }
 
     pub fn heap_bytes(&self) -> usize {
@@ -597,6 +610,82 @@ impl Sheet {
         Cell { value, style: b.style[i], formula: k & kind::FORMULA != 0 }
     }
 
+    /// Visita, em ordem, as células com valor da coluna `col` nas linhas
+    /// `rows`, pulando blocos vazios. `f` devolve `false` para parar.
+    pub fn for_each_value<'a>(
+        &'a self,
+        col: u32,
+        rows: std::ops::Range<u32>,
+        shared: &'a StringTable,
+        mut f: impl FnMut(u32, Cell<'a>) -> bool,
+    ) {
+        let Some(column) = self.columns.get(col as usize) else { return };
+        let end = (rows.end as usize).min(column.blocks.len() * BLOCK_ROWS);
+        let mut r = rows.start as usize;
+        while r < end {
+            let bi = r / BLOCK_ROWS;
+            let Some(b) = column.blocks[bi].as_deref() else {
+                r = (bi + 1) * BLOCK_ROWS;
+                continue;
+            };
+            let stop = ((bi + 1) * BLOCK_ROWS).min(end);
+            for row in r..stop {
+                if b.kind[row % BLOCK_ROWS] & kind::TYPE_MASK != kind::EMPTY
+                    && !f(row as u32, self.cell(row as u32, col, shared))
+                {
+                    return;
+                }
+            }
+            r = stop;
+        }
+    }
+
+    /// Próxima linha com valor na coluna depois de `row` (exclusive).
+    pub fn next_value_row(&self, col: u32, row: u32) -> Option<u32> {
+        let column = self.columns.get(col as usize)?;
+        let mut r = row as usize + 1;
+        while r < column.blocks.len() * BLOCK_ROWS {
+            let bi = r / BLOCK_ROWS;
+            match column.blocks[bi].as_deref() {
+                None => r = (bi + 1) * BLOCK_ROWS,
+                Some(b) => {
+                    if b.kind[r % BLOCK_ROWS] & kind::TYPE_MASK != kind::EMPTY {
+                        return Some(r as u32);
+                    }
+                    r += 1;
+                }
+            }
+        }
+        None
+    }
+
+    /// Linha com valor mais próxima antes de `row` (exclusive) na coluna.
+    pub fn prev_value_row(&self, col: u32, row: u32) -> Option<u32> {
+        let column = self.columns.get(col as usize)?;
+        let mut r = (row as usize).min(column.blocks.len() * BLOCK_ROWS);
+        while r > 0 {
+            let bi = (r - 1) / BLOCK_ROWS;
+            match column.blocks[bi].as_deref() {
+                None => r = bi * BLOCK_ROWS,
+                Some(b) => {
+                    if b.kind[(r - 1) % BLOCK_ROWS] & kind::TYPE_MASK != kind::EMPTY {
+                        return Some(r as u32 - 1);
+                    }
+                    r -= 1;
+                }
+            }
+        }
+        None
+    }
+
+    /// A célula tem valor (não só estilo).
+    pub fn has_value(&self, row: u32, col: u32) -> bool {
+        self.columns
+            .get(col as usize)
+            .and_then(|c| c.get(row as usize))
+            .is_some_and(|(b, i)| b.kind[i] & kind::TYPE_MASK != kind::EMPTY)
+    }
+
     /// Fórmula da célula como está no arquivo (ver [`FormulaRef`]).
     pub fn formula(&self, row: u32, col: u32) -> Option<FormulaRef<'_>> {
         let id = self.columns.get(col as usize)?.formula_id(row as usize);
@@ -761,6 +850,33 @@ mod tests {
         let counts = sheet.counts();
         assert_eq!(counts.local_strings, 2);
         assert_eq!(counts.formulas, 1);
+    }
+
+    #[test]
+    fn column_scans_skip_empty_blocks() {
+        let mut p = SheetPart::new();
+        p.set(3, 0, kind::NUMBER, 0, 1.0f64.to_bits());
+        p.set(5000, 0, kind::NUMBER, 0, 2.0f64.to_bits());
+        p.set(5001, 0, kind::EMPTY, 7, 0); // só estilo: não conta
+        p.set(9000, 0, kind::NUMBER, 0, 3.0f64.to_bits());
+        let shared = StringTable::new();
+        let mut sheet = Sheet::new("s");
+        sheet.merge_part(p);
+        let mut seen = Vec::new();
+        sheet.for_each_value(0, 0..9000, &shared, |r, _| {
+            seen.push(r);
+            true
+        });
+        assert_eq!(seen, vec![3, 5000]);
+        assert_eq!(sheet.next_value_row(0, 3), Some(5000));
+        assert_eq!(sheet.next_value_row(0, 5000), Some(9000));
+        assert_eq!(sheet.next_value_row(0, 9000), None);
+        assert_eq!(sheet.prev_value_row(0, 9000), Some(5000));
+        assert_eq!(sheet.prev_value_row(0, 3), None);
+        assert_eq!(sheet.prev_value_row(0, 1_000_000), Some(9000));
+        assert!(sheet.has_value(5000, 0));
+        assert!(!sheet.has_value(5001, 0));
+        assert!(!sheet.has_value(5000, 9));
     }
 
     #[test]

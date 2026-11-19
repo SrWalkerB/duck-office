@@ -1,13 +1,17 @@
-//! `duck-text`: texto de uma linha para UI e células.
+//! `duck-text`: texto para UI e células.
 //!
 //! - Shaping completo (`cosmic-text`: bidi, ligaduras, fallback de fontes).
 //! - Rasterização (`swash`) num **atlas de alfa** empacotado em prateleiras.
-//! - **Cache de texto moldado por string**: a mesma string repetida 100 mil
-//!   vezes é moldada uma vez.
+//! - **Estilos** ([`TextStyle`]): família, tamanho, negrito e itálico. Fontes
+//!   que não existem no sistema caem para equivalentes métricos (Calibri →
+//!   Carlito no Linux, Arial → Liberation Sans...) ou para a sans-serif padrão.
+//! - **Cache de texto moldado por (estilo, string)**: a mesma string repetida
+//!   100 mil vezes é moldada uma vez.
 //! - **Caminho rápido para números**: strings só com dígitos e pontuação
 //!   numérica são montadas por caractere, sem shaping (dígitos não têm
 //!   kerning nem ligaduras nas fontes de UI). É o caso mais comum numa
 //!   planilha e o que mais muda durante o scroll.
+//! - **Quebra de linha** ([`TextSystem::wrap`]) para células com texto quebrado.
 //!
 //! O crate não depende de GPU: produz [`GlyphQuad`]s e uma fila de
 //! [`AtlasUpload`]s que o renderer copia para a textura.
@@ -15,7 +19,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use cosmic_text::{Attrs, Buffer, CacheKey, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent};
+use cosmic_text::{
+    Attrs, Buffer, CacheKey, Family, FontSystem, Metrics, Shaping, Style, SwashCache, SwashContent, Weight,
+    Wrap,
+};
 
 /// Um glifo pronto para desenhar: retângulo na tela e região no atlas,
 /// ambos em pixels (1 texel = 1 pixel).
@@ -48,6 +55,39 @@ pub struct TextStats {
     pub atlas_resets: u64,
 }
 
+/// Estilo de um texto. Barato de copiar e de comparar (chave dos caches).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TextStyle {
+    /// Família registrada com [`TextSystem::family`]; 0 = sans-serif padrão.
+    pub family: u16,
+    /// Tamanho em 1/8 de pixel físico.
+    size_q: u32,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+impl TextStyle {
+    /// Tamanho em pixels físicos.
+    pub fn px(&self) -> f32 {
+        self.size_q as f32 / 8.0
+    }
+
+    /// Mesmo estilo com outro tamanho.
+    pub fn with_px(mut self, px: f32) -> Self {
+        self.size_q = quantize(px);
+        self
+    }
+}
+
+fn quantize(px: f32) -> u32 {
+    (px.max(1.0) * 8.0).round() as u32
+}
+
+/// Altura de linha de um tamanho de fonte (em pixels).
+fn line_height_for(px: f32) -> f32 {
+    (px * 1.3).ceil()
+}
+
 #[derive(Clone, Copy)]
 struct GlyphEntry {
     /// Deslocamento do bitmap em relação à origem do glifo (baseline).
@@ -59,6 +99,7 @@ struct GlyphEntry {
     ay: u32,
 }
 
+#[derive(Clone)]
 struct ShapedGlyph {
     key: CacheKey,
     /// Origem do glifo relativa ao topo-esquerdo da caixa de texto.
@@ -69,6 +110,30 @@ struct ShapedGlyph {
 struct ShapedRun {
     glyphs: Vec<ShapedGlyph>,
     width: f32,
+}
+
+/// Texto quebrado em linhas para uma largura.
+pub struct Wrapped {
+    lines: Vec<ShapedRun>,
+    line_height: f32,
+}
+
+impl Wrapped {
+    pub fn lines(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn line_width(&self, i: usize) -> f32 {
+        self.lines.get(i).map_or(0.0, |l| l.width)
+    }
+
+    pub fn line_height(&self) -> f32 {
+        self.line_height
+    }
+
+    pub fn height(&self) -> f32 {
+        self.line_height * self.lines.len() as f32
+    }
 }
 
 /// Glifo pré-moldado de um caractere, usado no caminho rápido.
@@ -134,18 +199,43 @@ impl ShelfPacker {
     }
 }
 
+/// Uma família pedida e a que de fato existe no sistema (`None` = sans-serif).
+struct FamilyEntry {
+    requested: String,
+    resolved: Option<String>,
+}
+
+/// Equivalentes métricos (mesmas larguras) e parecidos, na ordem de preferência.
+fn fallbacks(name: &str) -> &'static [&'static str] {
+    match name.to_ascii_lowercase().as_str() {
+        "calibri" | "calibri light" => &["Carlito", "Liberation Sans", "Arial"],
+        "cambria" => &["Caladea", "Liberation Serif", "Times New Roman"],
+        "arial" | "helvetica" => &["Liberation Sans", "Arimo", "Helvetica", "Arial"],
+        "arial narrow" | "aptos narrow" => &["Arial Narrow", "Liberation Sans Narrow", "Carlito", "Calibri"],
+        "aptos" | "aptos display" => &["Calibri", "Carlito", "Liberation Sans"],
+        "times new roman" | "times" => &["Liberation Serif", "Tinos", "Times New Roman"],
+        "courier new" | "courier" => &["Liberation Mono", "Cousine", "Courier New"],
+        "segoe ui" => &["Noto Sans", "DejaVu Sans", "Liberation Sans"],
+        "verdana" | "tahoma" => &["DejaVu Sans", "Liberation Sans"],
+        _ => &[],
+    }
+}
+
 /// Sistema de texto: fontes, shaping, atlas e caches.
 pub struct TextSystem {
     fonts: FontSystem,
     swash: SwashCache,
     buffer: Buffer,
-    font_size: f32,
-    line_height: f32,
-    family: Family<'static>,
+    /// Estilo padrão (UI): sans-serif no tamanho de [`TextSystem::font_size`].
+    default: TextStyle,
+    families: Vec<FamilyEntry>,
     packer: ShelfPacker,
     glyphs: HashMap<CacheKey, Option<GlyphEntry>>,
-    runs: HashMap<Box<str>, Arc<ShapedRun>>,
-    fast_chars: HashMap<char, FastChar>,
+    runs: HashMap<TextStyle, HashMap<Box<str>, Arc<ShapedRun>>>,
+    cached_runs: usize,
+    wraps: HashMap<(TextStyle, u32), HashMap<Box<str>, Arc<Wrapped>>>,
+    fast_chars: HashMap<(TextStyle, char), FastChar>,
+    baselines: HashMap<TextStyle, i32>,
     uploads: Vec<AtlasUpload>,
     stats: TextStats,
     atlas_reset: bool,
@@ -158,19 +248,20 @@ impl TextSystem {
     /// `font_size` em pixels físicos; `atlas_size` em texels (atlas quadrado).
     pub fn new(font_size: f32, atlas_size: u32) -> Self {
         let mut fonts = FontSystem::new();
-        let line_height = (font_size * 1.3).ceil();
-        let buffer = Buffer::new(&mut fonts, Metrics::new(font_size, line_height));
+        let buffer = Buffer::new(&mut fonts, Metrics::new(font_size, line_height_for(font_size)));
         Self {
             fonts,
             swash: SwashCache::new(),
             buffer,
-            font_size,
-            line_height,
-            family: Family::SansSerif,
+            default: TextStyle { family: 0, size_q: quantize(font_size), bold: false, italic: false },
+            families: vec![FamilyEntry { requested: String::new(), resolved: None }],
             packer: ShelfPacker::new(atlas_size),
             glyphs: HashMap::new(),
             runs: HashMap::new(),
+            cached_runs: 0,
+            wraps: HashMap::new(),
             fast_chars: HashMap::new(),
+            baselines: HashMap::new(),
             uploads: Vec::new(),
             stats: TextStats::default(),
             atlas_reset: false,
@@ -178,28 +269,80 @@ impl TextSystem {
     }
 
     pub fn font_size(&self) -> f32 {
-        self.font_size
+        self.default.px()
     }
 
+    /// Altura de linha do estilo padrão.
     pub fn line_height(&self) -> f32 {
-        self.line_height
+        line_height_for(self.default.px())
     }
 
     pub fn stats(&self) -> TextStats {
         self.stats
     }
 
-    /// Muda o tamanho da fonte (ex.: mudança de DPI). Esvazia os caches.
-    pub fn set_font_size(&mut self, font_size: f32) {
-        if (font_size - self.font_size).abs() < f32::EPSILON {
-            return;
+    /// Estilo padrão (UI).
+    pub fn default_style(&self) -> TextStyle {
+        self.default
+    }
+
+    /// Registra (ou reaproveita) uma família pelo nome e diz qual fonte será
+    /// usada de fato. Nome vazio = sans-serif padrão.
+    pub fn family(&mut self, name: &str) -> u16 {
+        if name.is_empty() {
+            return 0;
         }
-        self.font_size = font_size;
-        self.line_height = (font_size * 1.3).ceil();
-        self.buffer.set_metrics(Metrics::new(self.font_size, self.line_height));
+        if let Some(i) = self.families.iter().position(|f| f.requested.eq_ignore_ascii_case(name)) {
+            return i as u16;
+        }
+        let exists = |db: &cosmic_text::fontdb::Database, n: &str| {
+            db.faces().any(|f| f.families.iter().any(|(fam, _)| fam.eq_ignore_ascii_case(n)))
+        };
+        let db = self.fonts.db();
+        let resolved =
+            std::iter::once(name).chain(fallbacks(name).iter().copied()).find(|n| exists(db, n)).map(|n| {
+                // Nome exatamente como está no banco de fontes.
+                db.faces()
+                    .flat_map(|f| f.families.iter())
+                    .find(|(fam, _)| fam.eq_ignore_ascii_case(n))
+                    .map(|(fam, _)| fam.clone())
+                    .unwrap_or_else(|| n.to_string())
+            });
+        self.families.push(FamilyEntry { requested: name.to_string(), resolved });
+        (self.families.len() - 1) as u16
+    }
+
+    /// Nome da fonte usada de fato pela família (`None` = sans-serif padrão).
+    pub fn resolved_family(&self, family: u16) -> Option<&str> {
+        self.families.get(family as usize).and_then(|f| f.resolved.as_deref())
+    }
+
+    /// Monta um estilo. `px` em pixels físicos.
+    pub fn style(&mut self, family: &str, px: f32, bold: bool, italic: bool) -> TextStyle {
+        TextStyle { family: self.family(family), size_q: quantize(px), bold, italic }
+    }
+
+    /// Altura de linha de um estilo, em pixels.
+    pub fn line_height_of(&self, style: TextStyle) -> f32 {
+        line_height_for(style.px())
+    }
+
+    /// Muda o tamanho do estilo padrão (ex.: mudança de DPI).
+    pub fn set_font_size(&mut self, font_size: f32) {
+        let q = quantize(font_size);
+        if q != self.default.size_q {
+            self.default.size_q = q;
+        }
+    }
+
+    /// Esvazia os caches de texto moldado (ex.: depois de mudar o zoom, os
+    /// tamanhos antigos não voltam tão cedo). Glifos no atlas ficam.
+    pub fn clear_text_caches(&mut self) {
         self.runs.clear();
+        self.cached_runs = 0;
+        self.wraps.clear();
         self.fast_chars.clear();
-        self.reset_atlas();
+        self.baselines.clear();
     }
 
     /// Muda o tamanho do atlas (ex.: a GPU suporta menos que o pedido).
@@ -221,19 +364,30 @@ impl TextSystem {
         std::mem::take(&mut self.atlas_reset)
     }
 
-    /// Largura do texto em pixels.
+    /// Largura do texto em pixels (estilo padrão).
     pub fn measure(&mut self, text: &str) -> f32 {
-        if is_numeric_like(text) {
-            return text.chars().map(|c| self.fast_char(c).advance).sum();
-        }
-        self.shaped(text).width
+        self.measure_styled(text, self.default)
     }
 
-    /// Emite os glifos de `text` com o topo-esquerdo da linha em (x, y),
-    /// recortados por `clip` (x0, y0, x1, y1). Retorna a largura do texto.
-    pub fn draw(
+    /// Largura do texto em pixels.
+    pub fn measure_styled(&mut self, text: &str, style: TextStyle) -> f32 {
+        if is_numeric_like(text) {
+            return text.chars().map(|c| self.fast_char(style, c).advance).sum();
+        }
+        self.shaped(text, style).width
+    }
+
+    /// Emite os glifos de `text` (estilo padrão) com o topo-esquerdo da linha
+    /// em (x, y), recortados por `clip` (x0, y0, x1, y1). Retorna a largura.
+    pub fn draw(&mut self, text: &str, x: f32, y: f32, clip: [f32; 4], sink: impl FnMut(GlyphQuad)) -> f32 {
+        self.draw_styled(text, self.default, x, y, clip, sink)
+    }
+
+    /// Como [`TextSystem::draw`], com estilo.
+    pub fn draw_styled(
         &mut self,
         text: &str,
+        style: TextStyle,
         x: f32,
         y: f32,
         clip: [f32; 4],
@@ -242,10 +396,10 @@ impl TextSystem {
         let (ox, oy) = (x.round() as i32, y.round() as i32);
         if is_numeric_like(text) {
             self.stats.fast_path_runs += 1;
-            let baseline = self.baseline();
+            let baseline = self.baseline(style);
             let mut pen = 0.0f32;
             for c in text.chars() {
-                let fc = self.fast_char(c);
+                let fc = self.fast_char(style, c);
                 if let Some(key) = fc.key {
                     self.emit(key, ox + pen.round() as i32, oy + baseline, clip, &mut sink);
                 }
@@ -253,17 +407,75 @@ impl TextSystem {
             }
             return pen;
         }
-        let run = self.shaped(text);
+        let run = self.shaped(text, style);
         for g in &run.glyphs {
             self.emit(g.key, ox + g.x, oy + g.y, clip, &mut sink);
         }
         run.width
     }
 
-    fn baseline(&mut self) -> i32 {
+    /// Quebra `text` em linhas de no máximo `width` pixels (palavras inteiras;
+    /// palavras maiores que a largura são cortadas por caractere).
+    pub fn wrap(&mut self, text: &str, style: TextStyle, width: f32) -> Arc<Wrapped> {
+        let wq = width.max(1.0).round() as u32;
+        if let Some(w) = self.wraps.get(&(style, wq)).and_then(|m| m.get(text)) {
+            self.stats.cache_hits += 1;
+            return w.clone();
+        }
+        self.stats.shaped_runs += 1;
+        let lh = line_height_for(style.px());
+        let fam = self.families.get(style.family as usize).and_then(|f| f.resolved.clone());
+        let attrs = attrs_for(&fam, style);
+        self.buffer.set_metrics(Metrics::new(style.px(), lh));
+        self.buffer.set_wrap(Wrap::WordOrGlyph);
+        self.buffer.set_size(Some(wq as f32), None);
+        self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        self.buffer.shape_until_scroll(&mut self.fonts, false);
+        let mut lines = Vec::new();
+        for (i, run) in self.buffer.layout_runs().enumerate() {
+            let top = i as f32 * lh;
+            let glyphs = run
+                .glyphs
+                .iter()
+                .map(|g| {
+                    let p = g.physical((0.0, run.line_y - top), 1.0);
+                    ShapedGlyph { key: p.cache_key, x: p.x, y: p.y }
+                })
+                .collect();
+            lines.push(ShapedRun { glyphs, width: run.line_w });
+        }
+        self.buffer.set_wrap(Wrap::None);
+        let w = Arc::new(Wrapped { lines, line_height: lh });
+        self.wraps.entry((style, wq)).or_default().insert(text.into(), w.clone());
+        w
+    }
+
+    /// Desenha a linha `line` de um texto quebrado com o topo-esquerdo em (x, y).
+    pub fn draw_wrapped_line(
+        &mut self,
+        w: &Wrapped,
+        line: usize,
+        x: f32,
+        y: f32,
+        clip: [f32; 4],
+        mut sink: impl FnMut(GlyphQuad),
+    ) {
+        let Some(run) = w.lines.get(line) else { return };
+        let (ox, oy) = (x.round() as i32, y.round() as i32);
+        for g in &run.glyphs {
+            self.emit(g.key, ox + g.x, oy + g.y, clip, &mut sink);
+        }
+    }
+
+    fn baseline(&mut self, style: TextStyle) -> i32 {
+        if let Some(&b) = self.baselines.get(&style) {
+            return b;
+        }
         // Baseline do caminho rápido = baseline do shaping de "0".
-        let run = self.shaped("0");
-        run.glyphs.first().map(|g| g.y).unwrap_or(self.font_size as i32)
+        let run = self.shaped("0", style);
+        let b = run.glyphs.first().map(|g| g.y).unwrap_or(style.px() as i32);
+        self.baselines.insert(style, b);
+        b
     }
 
     fn emit(&mut self, key: CacheKey, gx: i32, gy: i32, clip: [f32; 4], sink: &mut impl FnMut(GlyphQuad)) {
@@ -285,13 +497,16 @@ impl TextSystem {
         });
     }
 
-    fn shaped(&mut self, text: &str) -> Arc<ShapedRun> {
-        if let Some(run) = self.runs.get(text) {
+    fn shaped(&mut self, text: &str, style: TextStyle) -> Arc<ShapedRun> {
+        if let Some(run) = self.runs.get(&style).and_then(|m| m.get(text)) {
             self.stats.cache_hits += 1;
             return run.clone();
         }
         self.stats.shaped_runs += 1;
-        let attrs = Attrs::new().family(self.family);
+        let lh = line_height_for(style.px());
+        let fam = self.families.get(style.family as usize).and_then(|f| f.resolved.clone());
+        let attrs = attrs_for(&fam, style);
+        self.buffer.set_metrics(Metrics::new(style.px(), lh));
         self.buffer.set_size(None, None);
         self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.fonts, false);
@@ -306,21 +521,23 @@ impl TextSystem {
             }
         }
         let run = Arc::new(ShapedRun { glyphs, width });
-        if self.runs.len() >= MAX_CACHED_RUNS {
+        if self.cached_runs >= MAX_CACHED_RUNS {
             self.runs.clear();
+            self.cached_runs = 0;
         }
-        self.runs.insert(text.into(), run.clone());
+        self.cached_runs += 1;
+        self.runs.entry(style).or_default().insert(text.into(), run.clone());
         run
     }
 
-    fn fast_char(&mut self, c: char) -> FastChar {
-        if let Some(fc) = self.fast_chars.get(&c) {
+    fn fast_char(&mut self, style: TextStyle, c: char) -> FastChar {
+        if let Some(fc) = self.fast_chars.get(&(style, c)) {
             return fc.clone();
         }
         let mut tmp = [0u8; 4];
-        let run = self.shaped(c.encode_utf8(&mut tmp));
+        let run = self.shaped(c.encode_utf8(&mut tmp), style);
         let fc = FastChar { key: run.glyphs.first().map(|g| g.key), advance: run.width };
-        self.fast_chars.insert(c, fc.clone());
+        self.fast_chars.insert((style, c), fc.clone());
         fc
     }
 
@@ -371,6 +588,17 @@ impl TextSystem {
         self.atlas_reset = true;
         self.stats.atlas_resets += 1;
     }
+}
+
+fn attrs_for(family: &Option<String>, style: TextStyle) -> Attrs<'_> {
+    let fam = match family {
+        Some(name) => Family::Name(name),
+        None => Family::SansSerif,
+    };
+    Attrs::new()
+        .family(fam)
+        .weight(if style.bold { Weight::BOLD } else { Weight::NORMAL })
+        .style(if style.italic { Style::Italic } else { Style::Normal })
 }
 
 /// Strings que podem ir pelo caminho rápido: dígitos e pontuação numérica.
@@ -433,5 +661,35 @@ mod tests {
         assert_eq!(c.rect[2], full.rect[2] - 2.0);
         // Uma única rasterização para os quatro "8".
         assert_eq!(ts.stats().glyphs_rasterized, 1);
+    }
+
+    #[test]
+    fn styles_change_metrics() {
+        let mut ts = TextSystem::new(16.0, 1024);
+        let regular = ts.default_style();
+        let big = regular.with_px(32.0);
+        let bold = TextStyle { bold: true, ..regular };
+        let w = ts.measure_styled("Planilha", regular);
+        assert!(w > 0.0);
+        let wb = ts.measure_styled("Planilha", big);
+        assert!(wb > w * 1.8, "{wb} vs {w}");
+        // Negrito é mais largo (se o sistema tiver a variante; senão, igual).
+        assert!(ts.measure_styled("Planilha", bold) >= w);
+        // Família inexistente cai na padrão.
+        let f = ts.family("Fonte Que Não Existe");
+        assert!(f > 0);
+        assert_eq!(ts.resolved_family(f), None);
+    }
+
+    #[test]
+    fn wrapping_breaks_lines() {
+        let mut ts = TextSystem::new(16.0, 1024);
+        let st = ts.default_style();
+        let one = ts.measure_styled("palavra", st);
+        let w = ts.wrap("palavra palavra palavra palavra", st, one * 2.5);
+        assert!(w.lines() >= 2, "{} linhas", w.lines());
+        assert!((0..w.lines()).all(|i| w.line_width(i) <= one * 2.5 + 1.0));
+        let w2 = ts.wrap("uma\nduas", st, 1000.0);
+        assert_eq!(w2.lines(), 2);
     }
 }

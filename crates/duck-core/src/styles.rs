@@ -81,8 +81,262 @@ pub struct Styles {
     pub num_fmts: HashMap<u16, String>,
     pub fonts: Vec<Font>,
     pub fills: Vec<Fill>,
+    pub borders: Vec<Border>,
     /// Índice = valor de `s` na célula.
     pub xfs: Vec<CellXf>,
-    /// Quantidade de bordas definidas (detalhes ficam para a F2).
-    pub border_count: usize,
+    /// Paleta indexada própria do arquivo (`<colors><indexedColors>`), ARGB.
+    pub indexed: Option<Vec<u32>>,
+    pub theme: Theme,
+}
+
+/// Estilo de uma linha de borda.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BorderStyle {
+    #[default]
+    None,
+    Thin,
+    Medium,
+    Thick,
+    Double,
+    Hair,
+    Dotted,
+    Dashed,
+    MediumDashed,
+    DashDot,
+    MediumDashDot,
+    DashDotDot,
+    MediumDashDotDot,
+    SlantDashDot,
+}
+
+impl BorderStyle {
+    pub fn parse(s: &[u8]) -> Self {
+        match s {
+            b"thin" => Self::Thin,
+            b"medium" => Self::Medium,
+            b"thick" => Self::Thick,
+            b"double" => Self::Double,
+            b"hair" => Self::Hair,
+            b"dotted" => Self::Dotted,
+            b"dashed" => Self::Dashed,
+            b"mediumDashed" => Self::MediumDashed,
+            b"dashDot" => Self::DashDot,
+            b"mediumDashDot" => Self::MediumDashDot,
+            b"dashDotDot" => Self::DashDotDot,
+            b"mediumDashDotDot" => Self::MediumDashDotDot,
+            b"slantDashDot" => Self::SlantDashDot,
+            _ => Self::None,
+        }
+    }
+
+    /// Espessura em pixels lógicos (a dupla ocupa 3: linha, espaço, linha).
+    pub fn width(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Thin | Self::Hair | Self::Dotted | Self::Dashed | Self::DashDot | Self::DashDotDot => 1,
+            Self::Medium
+            | Self::MediumDashed
+            | Self::MediumDashDot
+            | Self::MediumDashDotDot
+            | Self::SlantDashDot => 2,
+            Self::Thick | Self::Double => 3,
+        }
+    }
+
+    /// Padrão tracejado: (período, parte desenhada), em pixels lógicos.
+    pub fn dash(self) -> Option<(f32, f32)> {
+        match self {
+            Self::Hair | Self::Dotted => Some((2.0, 1.0)),
+            Self::Dashed => Some((4.0, 3.0)),
+            Self::MediumDashed => Some((12.0, 9.0)),
+            Self::DashDot | Self::DashDotDot => Some((6.0, 4.0)),
+            Self::MediumDashDot | Self::MediumDashDotDot | Self::SlantDashDot => Some((12.0, 8.0)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BorderSide {
+    pub style: BorderStyle,
+    pub color: Color,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Border {
+    pub left: BorderSide,
+    pub right: BorderSide,
+    pub top: BorderSide,
+    pub bottom: BorderSide,
+}
+
+impl Border {
+    pub fn is_empty(&self) -> bool {
+        [self.left, self.right, self.top, self.bottom].iter().all(|s| s.style == BorderStyle::None)
+    }
+}
+
+/// Tema do workbook (`theme1.xml`): as 12 cores do esquema e as fontes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Theme {
+    /// Na ordem do arquivo: dk1, lt1, dk2, lt2, accent1–6, hlink, folHlink. RGB.
+    pub colors: [u32; 12],
+    /// Fonte do corpo (`minorFont`), usada pelo estilo Normal.
+    pub minor_font: String,
+    pub major_font: String,
+}
+
+impl Default for Theme {
+    /// Tema "Office" (2013–2022).
+    fn default() -> Self {
+        Self {
+            colors: [
+                0x000000, 0xFFFFFF, 0x44546A, 0xE7E6E6, 0x4472C4, 0xED7D31, 0xA5A5A5, 0xFFC000, 0x5B9BD5,
+                0x70AD47, 0x0563C1, 0x954F72,
+            ],
+            minor_font: "Calibri".into(),
+            major_font: "Calibri Light".into(),
+        }
+    }
+}
+
+impl Theme {
+    /// Cor do índice usado nas células (`theme="n"`): 0↔1 e 2↔3 vêm trocados
+    /// em relação à ordem do arquivo (0 = lt1/fundo, 1 = dk1/texto).
+    pub fn color(&self, index: u8) -> u32 {
+        let i = match index {
+            0 => 1,
+            1 => 0,
+            2 => 3,
+            3 => 2,
+            i => i as usize,
+        };
+        self.colors.get(i).copied().unwrap_or(0)
+    }
+}
+
+impl Styles {
+    /// Resolve uma cor para RGB (sem alfa). `None` = automática (o chamador
+    /// escolhe: texto preto, sem preenchimento, borda preta...).
+    pub fn rgb(&self, c: Color) -> Option<u32> {
+        match c {
+            Color::Auto => None,
+            Color::Rgb(argb) => Some(argb & 0xFF_FFFF),
+            Color::Theme { index, tint } => Some(apply_tint(self.theme.color(index), tint)),
+            Color::Indexed(i) => {
+                let i = i as usize;
+                if i == 64 {
+                    return None; // cor do texto do sistema: automática
+                }
+                let argb = self
+                    .indexed
+                    .as_ref()
+                    .and_then(|p| p.get(i).copied())
+                    .or_else(|| crate::numfmt::INDEXED.get(i).copied())?;
+                Some(argb & 0xFF_FFFF)
+            }
+        }
+    }
+
+    /// Código do formato de número `id` (personalizado ou interno).
+    pub fn num_fmt_code(&self, id: u16) -> &str {
+        match self.num_fmts.get(&id) {
+            Some(s) => s,
+            None => crate::numfmt::builtin(id).unwrap_or("General"),
+        }
+    }
+}
+
+/// Aplica a tonalidade do Excel (`tint`, de -1 a 1) na luminosidade HLS.
+pub fn apply_tint(rgb: u32, tint: f32) -> u32 {
+    if tint == 0.0 {
+        return rgb;
+    }
+    let (h, l, s) = rgb_to_hls(rgb);
+    let tint = tint as f64;
+    let l = if tint < 0.0 { l * (1.0 + tint) } else { l * (1.0 - tint) + tint };
+    hls_to_rgb(h, l.clamp(0.0, 1.0), s)
+}
+
+fn rgb_to_hls(rgb: u32) -> (f64, f64, f64) {
+    let r = ((rgb >> 16) & 0xFF) as f64 / 255.0;
+    let g = ((rgb >> 8) & 0xFF) as f64 / 255.0;
+    let b = (rgb & 0xFF) as f64 / 255.0;
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    if max == min {
+        return (0.0, l, 0.0);
+    }
+    let d = max - min;
+    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let h = if max == r {
+        (g - b) / d + if g < b { 6.0 } else { 0.0 }
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    (h / 6.0, l, s)
+}
+
+fn hls_to_rgb(h: f64, l: f64, s: f64) -> u32 {
+    let to = |v: f64| (v * 255.0).round().clamp(0.0, 255.0) as u32;
+    if s == 0.0 {
+        let v = to(l);
+        return (v << 16) | (v << 8) | v;
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let hue = |mut t: f64| {
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    (to(hue(h + 1.0 / 3.0)) << 16) | (to(hue(h)) << 8) | to(hue(h - 1.0 / 3.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tint_matches_excel() {
+        // Valores que o Excel mostra para as variações de tema mais comuns.
+        assert_eq!(apply_tint(0xFFFFFF, -0.149_998_47), 0xD9D9D9);
+        assert_eq!(apply_tint(0x4472C4, 0.799_981_7), 0xDAE3F3);
+        assert_eq!(apply_tint(0x4472C4, -0.249_977_11), 0x2F5597);
+        assert_eq!(apply_tint(0x000000, 0.499_984_74), 0x7F7F7F);
+        assert_eq!(apply_tint(0x123456, 0.0), 0x123456);
+    }
+
+    #[test]
+    fn theme_index_swap() {
+        let t = Theme::default();
+        assert_eq!(t.color(0), 0xFFFFFF);
+        assert_eq!(t.color(1), 0x000000);
+        assert_eq!(t.color(4), 0x4472C4);
+    }
+
+    #[test]
+    fn resolve_colors() {
+        let st = Styles::default();
+        assert_eq!(st.rgb(Color::Rgb(0xFF112233)), Some(0x112233));
+        assert_eq!(st.rgb(Color::Indexed(10)), Some(0xFF0000));
+        assert_eq!(st.rgb(Color::Indexed(64)), None);
+        assert_eq!(st.rgb(Color::Auto), None);
+        assert_eq!(st.num_fmt_code(4), "#,##0.00");
+    }
 }

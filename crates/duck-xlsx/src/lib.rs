@@ -106,68 +106,169 @@ impl LoadReport {
     }
 }
 
-type SheetResult = Result<(Sheet, SheetReport), Error>;
+pub type SheetResult = Result<(Sheet, SheetReport), Error>;
 
-/// Lê um `.xlsx` / `.xlsm`.
-pub fn open(path: impl AsRef<Path>, opts: &Options) -> Result<(Workbook, LoadReport), Error> {
-    let t0 = Instant::now();
-    let pkg = Package::open(path.as_ref())?;
-    let meta = parts::read_workbook(&pkg)?;
-    let package_time = t0.elapsed();
+/// Uma aba listada no workbook.
+#[derive(Clone, Debug)]
+pub struct SheetInfo {
+    pub name: String,
+    pub hidden: bool,
+    /// Tamanho do XML descompactado.
+    pub xml_bytes: u64,
+}
 
-    let threads = rayon::current_num_threads();
-    let limiter = InFlight::new(if opts.max_in_flight == 0 { threads * 2 + 2 } else { opts.max_in_flight });
+/// Um pacote aberto, para leitura em etapas (carga progressiva): primeiro o
+/// que a primeira tela precisa (estilos, strings, prévia da aba ativa), depois
+/// as abas inteiras.
+pub struct Book {
+    pkg: Package,
+    meta: parts::WorkbookMeta,
+}
 
-    let wanted: Vec<usize> = match &opts.only_sheets {
-        Some(v) => v.iter().copied().filter(|&i| i < meta.sheets.len()).collect(),
-        None => (0..meta.sheets.len()).collect(),
-    };
-    // Maiores primeiro: a descompactação da aba gigante (sequencial) começa logo.
-    let mut order = wanted.clone();
-    let size = |i: usize| pkg.entry(&meta.sheets[i].path).map(|e| e.size).unwrap_or(0);
-    order.sort_by_key(|&i| std::cmp::Reverse(size(i)));
+impl Book {
+    /// Abre o zip e lê `workbook.xml` (rápido: só o diretório central e uma parte pequena).
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
+        let pkg = Package::open(path.as_ref())?;
+        let meta = parts::read_workbook(&pkg)?;
+        Ok(Self { pkg, meta })
+    }
 
-    let shared: Mutex<Option<Result<(StringTable, Duration), Error>>> = Mutex::new(None);
-    let styles: Mutex<Option<Result<(Styles, Duration), Error>>> = Mutex::new(None);
-    let results: Mutex<Vec<(usize, SheetResult)>> = Mutex::new(Vec::new());
+    pub fn sheets(&self) -> Vec<SheetInfo> {
+        self.meta
+            .sheets
+            .iter()
+            .map(|m| SheetInfo {
+                name: m.name.clone(),
+                hidden: m.hidden,
+                xml_bytes: self.pkg.entry(&m.path).map(|e| e.size).unwrap_or(0),
+            })
+            .collect()
+    }
 
-    rayon::scope(|s| {
-        if let Some(path) = &meta.shared_strings {
-            let (pkg, shared) = (&pkg, &shared);
-            s.spawn(move |_| {
-                let t = Instant::now();
-                let r = parts::read_shared_strings(pkg, path).map(|st| (st, t.elapsed()));
-                *shared.lock().unwrap() = Some(r);
-            });
+    /// Aba aberta quando o arquivo foi salvo (sempre uma aba visível, se houver).
+    pub fn active_sheet(&self) -> usize {
+        self.meta.active
+    }
+
+    pub fn date1904(&self) -> bool {
+        self.meta.date1904
+    }
+
+    /// Estilos e tema.
+    pub fn read_styles(&self) -> Result<Styles, Error> {
+        let mut st = match &self.meta.styles {
+            Some(path) => parts::read_styles(&self.pkg, path)?,
+            None => Styles::default(),
+        };
+        if let Some(path) = &self.meta.theme
+            && let Ok(theme) = parts::read_theme(&self.pkg, path)
+        {
+            st.theme = theme;
         }
-        if let Some(path) = &meta.styles {
-            let (pkg, styles) = (&pkg, &styles);
-            s.spawn(move |_| {
-                let t = Instant::now();
-                let r = parts::read_styles(pkg, path).map(|st| (st, t.elapsed()));
-                *styles.lock().unwrap() = Some(r);
-            });
+        Ok(st)
+    }
+
+    pub fn read_shared_strings(&self) -> Result<StringTable, Error> {
+        match &self.meta.shared_strings {
+            Some(path) => parts::read_shared_strings(&self.pkg, path),
+            None => Ok(StringTable::new()),
         }
-        for &i in &order {
-            let (pkg, meta, results, limiter) = (&pkg, &meta, &results, &limiter);
-            let chunk = opts.chunk_bytes.max(64 * 1024);
+    }
+
+    /// Prévia de uma aba: só os primeiros `max_xml_bytes` de XML, numa thread.
+    /// Traz o cabeçalho da aba (colunas, painéis, visão) e as primeiras linhas;
+    /// mesclagens (que ficam no fim do XML) não vêm.
+    pub fn preview_sheet(&self, index: usize, max_xml_bytes: usize) -> Result<Sheet, Error> {
+        let m = self.meta.sheets.get(index).ok_or_else(|| Error::Missing(format!("aba {index}")))?;
+        let entry = self.pkg.entry(&m.path).ok_or_else(|| Error::Missing(m.path.clone()))?;
+        let mut buf = Vec::with_capacity(max_xml_bytes.min(entry.size as usize) + 64 * 1024);
+        let eof = self.pkg.inflater(entry).read_into(&mut buf, max_xml_bytes)?;
+        let cut = if eof { buf.len() } else { duck_par::cut_after_last(&buf, b"</row>").unwrap_or(0) };
+        let mut part = duck_core::SheetPart::new();
+        let mut state = sheet::RowState::default();
+        let mut scratch = sheet::Scratch::default();
+        let _ = sheet::parse_rows(&buf[..cut], &mut part, &mut state, &mut scratch);
+        let mut s = Sheet::new(m.name.clone());
+        s.hidden = m.hidden;
+        s.merge_part(part);
+        s.finish();
+        Ok(s)
+    }
+
+    /// Lê as abas `which` em paralelo (maiores primeiro) e entrega cada uma a
+    /// `done` assim que fica pronta (de qualquer thread).
+    pub fn load_sheets(&self, which: &[usize], opts: &Options, done: &(dyn Fn(usize, SheetResult) + Sync)) {
+        let threads = rayon::current_num_threads();
+        let limiter =
+            InFlight::new(if opts.max_in_flight == 0 { threads * 2 + 2 } else { opts.max_in_flight });
+        rayon::scope(|s| self.spawn_sheets(s, which, opts, &limiter, done));
+    }
+
+    fn spawn_sheets<'s>(
+        &'s self,
+        s: &rayon::Scope<'s>,
+        which: &[usize],
+        opts: &'s Options,
+        limiter: &'s InFlight,
+        done: &'s (dyn Fn(usize, SheetResult) + Sync),
+    ) {
+        let mut order: Vec<usize> = which.iter().copied().filter(|&i| i < self.meta.sheets.len()).collect();
+        // Maiores primeiro: a descompactação da aba gigante (sequencial) começa logo.
+        let size = |i: usize| self.pkg.entry(&self.meta.sheets[i].path).map(|e| e.size).unwrap_or(0);
+        order.sort_by_key(|&i| std::cmp::Reverse(size(i)));
+        let chunk = opts.chunk_bytes.max(64 * 1024);
+        for i in order {
             s.spawn(move |_| {
-                let m = &meta.sheets[i];
-                let r = match pkg.entry(&m.path) {
+                let m = &self.meta.sheets[i];
+                let r = match self.pkg.entry(&m.path) {
                     Some(e) => {
-                        sheet::load_sheet(pkg, e, &m.name, chunk, limiter, opts).map(|(mut sh, rep)| {
+                        sheet::load_sheet(&self.pkg, e, &m.name, chunk, limiter, opts).map(|(mut sh, rep)| {
                             sh.hidden = m.hidden;
                             (sh, rep)
                         })
                     }
                     None => Err(Error::Missing(m.path.clone())),
                 };
-                results.lock().unwrap().push((i, r));
+                done(i, r);
             });
         }
+    }
+}
+
+/// Lê um `.xlsx` / `.xlsm` inteiro: strings, estilos e todas as abas ao mesmo tempo.
+pub fn open(path: impl AsRef<Path>, opts: &Options) -> Result<(Workbook, LoadReport), Error> {
+    let t0 = Instant::now();
+    let book = Book::open(path)?;
+    let package_time = t0.elapsed();
+
+    let threads = rayon::current_num_threads();
+    let limiter = InFlight::new(if opts.max_in_flight == 0 { threads * 2 + 2 } else { opts.max_in_flight });
+    let wanted: Vec<usize> = match &opts.only_sheets {
+        Some(v) => v.clone(),
+        None => (0..book.meta.sheets.len()).collect(),
+    };
+
+    let shared: Mutex<Option<Result<(StringTable, Duration), Error>>> = Mutex::new(None);
+    let styles: Mutex<Option<Result<(Styles, Duration), Error>>> = Mutex::new(None);
+    let results: Mutex<Vec<(usize, SheetResult)>> = Mutex::new(Vec::new());
+    let done = |i: usize, r: SheetResult| results.lock().unwrap().push((i, r));
+
+    rayon::scope(|s| {
+        let (book, shared, styles) = (&book, &shared, &styles);
+        s.spawn(move |_| {
+            let t = Instant::now();
+            let r = book.read_shared_strings().map(|st| (st, t.elapsed()));
+            *shared.lock().unwrap() = Some(r);
+        });
+        s.spawn(move |_| {
+            let t = Instant::now();
+            let r = book.read_styles().map(|st| (st, t.elapsed()));
+            *styles.lock().unwrap() = Some(r);
+        });
+        book.spawn_sheets(s, &wanted, opts, &limiter, &done);
     });
 
-    let mut wb = Workbook { date1904: meta.date1904, ..Default::default() };
+    let mut wb = Workbook { date1904: book.meta.date1904, ..Default::default() };
     let mut report = LoadReport { threads, package: package_time, ..Default::default() };
     if let Some(r) = shared.into_inner().unwrap() {
         let (st, t) = r?;
@@ -206,11 +307,5 @@ pub fn parse_sheet_xml(xml: &[u8]) -> Sheet {
 
 /// Nomes e tamanhos (XML descompactado) das abas, sem ler as células.
 pub fn list_sheets(path: impl AsRef<Path>) -> Result<Vec<(String, u64)>, Error> {
-    let pkg = Package::open(path.as_ref())?;
-    let meta = parts::read_workbook(&pkg)?;
-    Ok(meta
-        .sheets
-        .iter()
-        .map(|m| (m.name.clone(), pkg.entry(&m.path).map(|e| e.size).unwrap_or(0)))
-        .collect())
+    Ok(Book::open(path)?.sheets().into_iter().map(|s| (s.name, s.xml_bytes)).collect())
 }

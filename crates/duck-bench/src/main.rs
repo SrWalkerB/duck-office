@@ -5,6 +5,8 @@
 //! duck-bench sweep  [ARQUIVO] [--threads 1,2,4,...]          curva de ganho por threads (1 processo por rodada)
 //! duck-bench verify [ARQUIVO]                                compara cada célula com o calamine
 //! duck-bench gen    SAIDA.xlsx [--rows N] [--cols M]         gera planilha sintética
+//! duck-bench preview [ARQUIVO] [--mb N]                      mede o caminho da primeira tela (F2)
+//! duck-bench gen-showcase SAIDA.xlsx                         planilha de vitrine (formatos, bordas, painéis)
 //! ```
 //!
 //! Sem ARQUIVO, usa `reference = "..."` de `bench.local.toml` (fora do git:
@@ -12,6 +14,7 @@
 
 mod generate;
 mod mem;
+mod showcase;
 mod verify;
 
 // Alocador com arenas por thread (ADR-012): menos contenção e menos memória
@@ -66,6 +69,13 @@ fn main() {
         "formula-stats" => cmd_formula_stats(rest),
         "inflate" => cmd_inflate(rest),
         "parse" => cmd_parse(rest),
+        "preview" => cmd_preview(rest),
+        "gen-showcase" => match rest.first() {
+            Some(p) => showcase::write(Path::new(p))
+                .map_err(|e| e.to_string())
+                .map(|_| println!("vitrine salva em {p}")),
+            None => Err("uso: duck-bench gen-showcase SAIDA.xlsx".to_string()),
+        },
         _ => {
             eprintln!(
                 "uso: duck-bench <open|sweep|verify|gen> [ARQUIVO] [opções]\n  veja o topo de crates/duck-bench/src/main.rs"
@@ -623,5 +633,57 @@ fn cmd_parse(args: &[String]) -> Res {
         best * 1e9 / cells as f64,
         cells
     );
+    Ok(())
+}
+
+/// O que o duck-sheets faz antes da primeira tela: abrir o pacote, ler estilos
+/// e strings e uma prévia da aba ativa (os primeiros N MB de XML).
+fn cmd_preview(args: &[String]) -> Res {
+    let path = file_arg(args)?;
+    let mb: usize = flag(args, "--mb").and_then(|v| v.parse().ok()).unwrap_or(4);
+    let t0 = Instant::now();
+    let book = duck_xlsx::Book::open(&path).map_err(|e| e.to_string())?;
+    let t_open = t0.elapsed();
+    let active = book.active_sheet();
+    let (styles, (strings, preview)) = rayon::join(
+        || {
+            let t = Instant::now();
+            (book.read_styles(), t.elapsed())
+        },
+        || {
+            rayon::join(
+                || {
+                    let t = Instant::now();
+                    (book.read_shared_strings(), t.elapsed())
+                },
+                || {
+                    let t = Instant::now();
+                    (book.preview_sheet(active, mb << 20), t.elapsed())
+                },
+            )
+        },
+    );
+    let strings = (strings.0.map_err(|e| e.to_string())?, strings.1);
+    let total = t0.elapsed();
+    let st = styles.0.map_err(|e| e.to_string())?;
+    let sh = preview.0.map_err(|e| e.to_string())?;
+    println!(
+        "
+duck-bench preview ({mb} MB de XML da aba ativa)"
+    );
+    println!("  pacote + workbook   {:>7.1} ms", t_open.as_secs_f64() * 1000.0);
+    println!("  estilos + tema      {:>7.1} ms ({} estilos)", styles.1.as_secs_f64() * 1000.0, st.xfs.len());
+    println!(
+        "  strings             {:>7.1} ms ({} strings)",
+        strings.1.as_secs_f64() * 1000.0,
+        strings.0.len()
+    );
+    println!(
+        "  prévia da aba #{active:<4} {:>7.1} ms ({} linhas, {} valores)",
+        preview.1.as_secs_f64() * 1000.0,
+        sh.rows(),
+        sh.counts().values()
+    );
+    println!("  total (paralelo)    {:>7.1} ms", total.as_secs_f64() * 1000.0);
     Ok(())
 }

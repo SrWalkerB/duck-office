@@ -481,7 +481,7 @@ Tendência inicial: **container próprio com codificação de colunas inspirada 
 
 ### Status da F0 (18/11/2026)
 
-Entregue em `platform/`: `duck-platform`, `duck-gfx`, `duck-text` e o exemplo `million_rows` (1.000.000 de linhas × 40 colunas, alturas variáveis, seleção, teclado, roda do mouse, scrollbars arrastáveis, clipboard). `duck-ui` (widgets) fica para quando houver o primeiro widget de verdade (F2).
+Entregue em `platform/`: `duck-platform`, `duck-gfx`, `duck-text` e o exemplo `million_rows` (1.000.000 de linhas × 40 colunas, alturas variáveis, seleção, teclado, roda do mouse, scrollbars arrastáveis, clipboard). `duck-ui` (widgets) ficou para quando houvesse o primeiro widget de verdade: entrou na F2.
 
 Medido com `million_rows --bench` (mesma máquina: Radeon RX 9070 XT, janela 1440×900, vsync desligado):
 
@@ -641,7 +641,77 @@ Onde isso para:
 - Com 1 thread o mesmo trabalho custa 3,4 s. A diferença vem do inflate especulativo (~1,2 s de CPU contra 0,7 s do zlib-rs), do clock menor com todos os núcleos ligados e da disputa por cache e memória.
 - Os números variam de 450 a 560 ms com 16 threads conforme a carga dos outros programas da máquina.
 - Para chegar a < 0,4 s, falta cortar ~15–20% da CPU total. As alavancas que sobram são micro-otimizações do parse (hoje 83 ns por célula numa thread) e do decodificador (hoje ~1,6 GB/s numa thread contra ~2,2 GB/s do zlib-rs), com retorno incerto.
-- **Bordas** são só contadas (`border_count`); os detalhes entram com a renderização na F2.
+- ~~**Bordas** são só contadas~~: lidas por lado na F2 (ver abaixo).
+- ~~**Opções do alocador no app**~~: o `duck-sheets` aplica as mesmas (F2).
+
+### Status da F2 (19/11/2026)
+
+Entregue: o app **`apps/duck-sheets`** abre `.xlsx`/`.xlsm` numa janela nativa, com carga progressiva e a aparência do Excel.
+
+**Leitura (`duck-core`, `duck-xlsx`)**
+
+- **Formatos de número** (`duck_core::numfmt`), com saída em pt-BR (vírgula decimal, ponto de milhar, meses e dias em português):
+  - seções (positivo; negativo; zero; texto), cores (`[Red]`, `[Color10]`) e condições (`[>=100]`);
+  - milhar, escala (`#,##0,`), %, científico (inclusive de engenharia), frações;
+  - datas e horas (inclusive o 29/02/1900 fictício do Excel, base 1904, tempo decorrido `[h]` e frações de segundo);
+  - moeda (`[$R$-416]`), literais, `_` e o preenchimento `*` dos formatos contábeis ("R$" à esquerda, número à direita);
+  - formatos internos 0–49 já em pt-BR (14 = `dd/mm/aaaa`);
+  - "Geral" com até 11 caracteres, perdendo casas decimais para caber na coluna.
+- **Tema** (`theme1.xml`: 12 cores e fontes), **tonalidade** (`tint`, em HLS como o Excel), paleta indexada (inclusive a própria do arquivo).
+- **Bordas** por lado (13 estilos: fina, média, grossa, dupla, pontilhada, tracejada...).
+- **Visão da aba**: linhas de grade, zoom, célula do canto, célula ativa, cor da guia e aba ativa do workbook.
+- **API em etapas** (`duck_xlsx::Book`): abrir, ler estilos+tema, strings, uma **prévia** da aba (os primeiros MB de XML) e abas inteiras com entrega uma a uma. O `open()` de sempre passou a usar as mesmas peças.
+
+**Plataforma (`platform/`)**
+
+- `duck-platform`: diálogo nativo de abrir arquivo e de mensagem (`rfd`), arquivo arrastado para a janela, modificadores e contagem de cliques no mouse, e um `Waker` para outras threads acordarem a janela.
+- `duck-gfx`: instância **tracejada** (o padrão é feito no shader, então uma borda pontilhada é um retângulo só).
+- `duck-text`: **estilos** (família, tamanho, negrito, itálico) com cache por estilo, equivalentes métricos quando a fonte não existe (Calibri → Carlito, Arial → Liberation Sans...) e **quebra de linha**.
+- **`duck-ui`** (crate novo): `Painter` (retângulos, contornos e texto alinhado com recorte), `TextInput` (cursor, seleção, colar/copiar, acentos) e `TabBar` (abas com cor e rolagem).
+
+**O app**
+
+- Abre pela linha de comando, pelo diálogo (Ctrl+O ou sem argumento) ou arrastando o arquivo.
+- **Carga progressiva**: prévia da aba ativa → primeira tela → aba ativa inteira → outras abas, cada uma entregue quando fica pronta. Abas ainda carregando aparecem com "…" na guia.
+- Larguras de coluna em pixels pela fórmula do Excel (largura do dígito da fonte padrão), alturas de linha, linhas e colunas ocultas, estilo de coluna para células sem `<c>`.
+- **Índice esparso de linhas**: altura padrão + só as linhas com altura própria (15 mil de 593 mil na aba gigante), com busca binária, em vez de uma entrada por linha (pendência da F0).
+- Fontes, cores, preenchimentos (sólidos e hachuras), alinhamentos (inclusive recuo), texto quebrado, sublinhado, bordas, `###` e "Geral" que encolhe.
+- **Texto que transborda** para as vizinhas vazias (à direita, à esquerda ou dos dois lados, conforme o alinhamento), apagando as linhas de grade por baixo, inclusive vindo de colunas fora da tela.
+- Mesclagens, **painéis congelados** (quatro quadrantes), abas (ocultas ficam de fora), barra de fórmulas (fórmula como está no arquivo ou o valor guardado) e caixa de nome ("ir para", Ctrl+G).
+- Seleção com mouse, Shift e cabeçalhos; Ctrl+setas até a borda dos dados; **Ctrl+C** copia o que as células mostram, em TSV como o Excel; soma, média e contagem da seleção na barra de status.
+- **Busca** (Ctrl+F, F3) em segundo plano e em paralelo, sem diferença de maiúsculas nem de acentos; resultados destacados na grade.
+- **Zoom** (Ctrl + roda, Ctrl +/−/0), começando no zoom salvo na aba.
+- `mimalloc` com as mesmas opções do `duck-bench`.
+- Modos de medição: `--bench` (rola a aba e mede) e `--screenshot` (renderiza fora da tela e sai), mais `--sheet`, `--cell`, `--zoom` e `--find`.
+
+**Medido** no arquivo de referência (1440×900; Linux = WSLg com renderização **por software**, llvmpipe):
+
+| | Linux (WSLg, software) | Meta |
+|---|---|---|
+| Pacote + estilos + strings + prévia da aba ativa (Windows, `duck-bench preview`) | 15 ms | — |
+| **Primeira tela com dados** (processo inteiro) | **162–182 ms** (aba pequena ou a de 593 mil linhas) | < 300 ms |
+| Aba ativa inteira | 0,18 s (aba pequena) / 0,74 s (593 mil linhas) | — |
+| Todas as 20 abas | 0,90–1,02 s | — |
+| Montagem do frame, p50 / p99 (scroll, saltos, horizontal) | 1,5–2,0 / 2,3–3,2 ms | < 16 ms |
+| Frames por segundo sem vsync (CPU fazendo também a rasterização) | 74–455 | 60+ |
+| Busca de um texto presente em 593.557 células | 33 ms | — |
+| Memória com tudo carregado / pico | 608–643 / 790–854 MB | < 600 MB |
+
+A conferência contra o calamine continua com **0 divergências** (24,2 milhões de células, 10,1 milhões de fórmulas, 29 mesclagens). Uma planilha de vitrine sem dados reais (`duck-bench gen-showcase`) cobre formatos, bordas, painéis e abas, e entrou no CI.
+
+O que a F2 ensinou:
+
+- **A carga completa disputava a CPU com a própria janela.** Começando junto com a prévia, ela ocupava todos os núcleos enquanto o compositor mostrava a janela, e o primeiro frame saía em 550–900 ms. Agora a etapa 2 espera a primeira tela com dados ser apresentada (ou no máximo 400 ms): **162–182 ms** em todas as abas testadas.
+- **Trabalho da janela no pool global espera na fila da leitura.** As estatísticas da seleção usavam `par_iter` no pool global, e a janela ficava parada até a leitura liberar threads. Trabalho pedido pela janela usa um pool próprio.
+- **A prévia é barata**: 4 MB de XML (centenas a milhares de linhas) são lidos em ~2 ms, e com estilos e strings ficam prontos em 15 ms.
+- **Strings compartilhadas na busca**: as ~40 mil strings são testadas uma vez; as células são reconhecidas pelo endereço do texto dentro da tabela (`StringTable::byte_range`), sem guardar o índice.
+- **Formatos contábeis** precisam do preenchimento `*` para parecerem os do Excel; sem ele, "R$" e o número ficam colados.
+
+Pendências da F2:
+
+- **Medir no Windows.** No dia da medição, o driver da placa (AMD Radeon RX 9070 XT) entrou em estado de erro às 11:35 (o Windows mostra o dispositivo com status "Error", e outro programa caiu na mesma hora), antes de qualquer execução do app. DX12 e Vulkan passaram a derrubar qualquer processo que abre a GPU, inclusive o `million_rows` antigo. Os números acima são do WSL, com renderização por software. Falta repetir com a GPU, onde a meta de memória deve ficar abaixo de 600 MB (no WSL, o llvmpipe está dentro do processo).
+- **Teclado e mouse** foram testados só por código (cópia em TSV, Ctrl+setas, busca, referências). Falta o teste manual na janela.
+- **Ainda não suportados**: texto girado (`textRotation`, comum em painéis), formatação condicional (`dxf`), estilo de linha (`<row s customFormat>`), texto com várias fontes na mesma célula (rich text), redimensionar colunas com o mouse, hiperlinks. Gráficos, imagens e slicers ficam para a F5.
 
 ---
 

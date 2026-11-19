@@ -14,7 +14,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use duck_core::{CellError, CellRange, ColSpec, FormulaKind, Pane, RowSpec, Sheet, SheetPart, kind};
+use duck_core::{
+    CellError, CellRange, ColSpec, FormulaKind, Pane, RowSpec, Sheet, SheetPart, SheetView, kind,
+};
 use duck_par::{InFlight, cut_after_last};
 use memchr::{memchr, memmem};
 
@@ -210,6 +212,12 @@ pub fn parse_rows(
             if matches!(attr(attrs, b"state"), Some(b"frozen") | Some(b"frozenSplit")) {
                 let n = |k: &[u8]| attr_f32(attrs, k).map(|v| v.max(0.0) as u32).unwrap_or(0);
                 part.layout.pane = Some(Pane { frozen_rows: n(b"ySplit"), frozen_cols: n(b"xSplit") });
+                // Com painéis congelados, a rolagem começa no canto do painel de baixo.
+                if let (Some(v), Some(tl)) =
+                    (part.layout.view.as_mut(), attr(attrs, b"topLeftCell").and_then(parse_range))
+                {
+                    v.top_left = Some((tl.first_row, tl.first_col));
+                }
             }
             pos = end;
             continue;
@@ -218,8 +226,42 @@ pub fn parse_rows(
             let Some(end) = tag_end(buf, i) else { break };
             let attrs = &buf[i + 14..end - 1];
             part.layout.default_row_height = attr_f32(attrs, b"defaultRowHeight");
-            part.layout.default_col_width =
-                attr_f32(attrs, b"defaultColWidth").or_else(|| attr_f32(attrs, b"baseColWidth"));
+            part.layout.default_col_width = attr_f32(attrs, b"defaultColWidth");
+            part.layout.base_col_width = attr_f32(attrs, b"baseColWidth");
+            pos = end;
+            continue;
+        }
+        // Só o primeiro `<sheetView>` (o da janela principal) conta.
+        if starts_tag(rest, b"sheetView") && part.layout.view.is_none_or(|v| v.zoom == 0) {
+            let Some(end) = tag_end(buf, i) else { break };
+            let attrs = &buf[i + 10..end - 1];
+            let mut v = part.layout.view.unwrap_or_default();
+            v.show_grid_lines = !matches!(attr(attrs, b"showGridLines"), Some(b"0") | Some(b"false"));
+            v.show_headers = !matches!(attr(attrs, b"showRowColHeaders"), Some(b"0") | Some(b"false"));
+            v.zoom = attr(attrs, b"zoomScale").and_then(parse_u32).unwrap_or(100).clamp(10, 400) as u16;
+            v.top_left =
+                attr(attrs, b"topLeftCell").and_then(parse_range).map(|r| (r.first_row, r.first_col));
+            part.layout.view = Some(v);
+            pos = end;
+            continue;
+        }
+        if starts_tag(rest, b"selection") {
+            let Some(end) = tag_end(buf, i) else { break };
+            if let Some(v) = part.layout.view.as_mut()
+                && v.active_cell.is_none()
+            {
+                v.active_cell = attr(&buf[i + 10..end - 1], b"activeCell")
+                    .and_then(parse_range)
+                    .map(|r| (r.first_row, r.first_col));
+            }
+            pos = end;
+            continue;
+        }
+        if starts_tag(rest, b"tabColor") {
+            let Some(end) = tag_end(buf, i) else { break };
+            let mut v = part.layout.view.unwrap_or(SheetView { zoom: 0, ..Default::default() });
+            v.tab_color = Some(crate::parts::color(&buf[i + 9..end - 1]));
+            part.layout.view = Some(v);
             pos = end;
             continue;
         }
@@ -923,7 +965,7 @@ mod tests {
 
     #[test]
     fn layout_and_formulas() {
-        let xml = br#"<worksheet><dimension ref="A1:C4"/><sheetViews><sheetView><pane xSplit="1" ySplit="2" topLeftCell="B3" state="frozen"/></sheetView></sheetViews>
+        let xml = br#"<worksheet><sheetPr><tabColor rgb="FF00B050"/></sheetPr><dimension ref="A1:C4"/><sheetViews><sheetView showGridLines="0" zoomScale="85" workbookViewId="0"><pane xSplit="1" ySplit="2" topLeftCell="B3" state="frozen"/><selection pane="bottomRight" activeCell="C5" sqref="C5"/></sheetView><sheetView workbookViewId="1" zoomScale="50"/></sheetViews>
 <sheetFormatPr defaultRowHeight="15"/><cols><col min="1" max="2" width="12.5" customWidth="1"/><col min="3" max="3" width="9" hidden="1"/></cols>
 <sheetData>
 <row r="1" ht="30" customHeight="1"><c r="A1"><f t="shared" ref="A1:A3" si="0">B1*2</f><v>2</v></c><c r="B1"><v>1</v></c></row>
@@ -934,6 +976,12 @@ mod tests {
         sheet.finish();
         let l = &sheet.layout;
         assert_eq!(l.pane, Some(Pane { frozen_rows: 2, frozen_cols: 1 }));
+        let v = l.view.unwrap();
+        assert!(!v.show_grid_lines);
+        assert_eq!(v.zoom, 85);
+        assert_eq!(v.top_left, Some((2, 1)));
+        assert_eq!(v.active_cell, Some((4, 2)));
+        assert_eq!(v.tab_color, Some(duck_core::Color::Rgb(0xFF00B050)));
         assert_eq!(l.default_row_height, Some(15.0));
         assert_eq!(l.col(1).and_then(|c| c.width), Some(12.5));
         assert!(l.col(2).unwrap().hidden);

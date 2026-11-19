@@ -1,20 +1,23 @@
 //! `duck-platform`: a camada que conversa com o sistema operacional.
 //!
-//! Janelas, eventos de entrada, DPI e clipboard, atrás de uma API própria e
-//! estável. Hoje o backend é `winit` + `arboard`; qualquer um deles pode ser
-//! trocado por chamadas diretas ao Win32 / X11 / Wayland sem mudar os apps.
+//! Janelas, eventos de entrada, DPI, clipboard e diálogos de arquivo, atrás de
+//! uma API própria e estável. Hoje o backend é `winit` + `arboard` + `rfd`;
+//! qualquer um deles pode ser trocado por chamadas diretas ao Win32 / X11 /
+//! Wayland sem mudar os apps.
 //!
 //! Este crate não sabe nada de renderização: [`Window`] expõe os handles
 //! nativos (`raw-window-handle`) para quem desenha (ex.: `duck-gfx`).
 
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use raw_window_handle::{DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, NamedKey};
 use winit::window::{CursorIcon, WindowId};
 
@@ -113,6 +116,38 @@ impl Window {
         };
         self.inner.set_cursor(icon);
     }
+
+    /// Diálogo nativo "Abrir arquivo" (modal, bloqueia até o usuário escolher).
+    /// `filters`: (nome, extensões sem ponto).
+    pub fn pick_file(&self, title: &str, filters: &[(&str, &[&str])]) -> Option<PathBuf> {
+        let mut d = rfd::FileDialog::new().set_title(title).set_parent(&*self.inner);
+        for (name, exts) in filters {
+            d = d.add_filter(*name, exts);
+        }
+        d.pick_file()
+    }
+}
+
+/// Mensagem simples numa caixa de diálogo nativa (erro ao abrir, por exemplo).
+pub fn message_box(title: &str, text: &str) {
+    rfd::MessageDialog::new()
+        .set_title(title)
+        .set_description(text)
+        .set_level(rfd::MessageLevel::Error)
+        .show();
+}
+
+/// Acorda o loop de eventos de qualquer thread: o app recebe [`Event::Wake`].
+/// Usado por quem trabalha em segundo plano (ex.: leitura do arquivo).
+#[derive(Clone)]
+pub struct Waker {
+    proxy: EventLoopProxy<()>,
+}
+
+impl Waker {
+    pub fn wake(&self) {
+        let _ = self.proxy.send_event(());
+    }
 }
 
 impl HasWindowHandle for Window {
@@ -196,6 +231,9 @@ pub enum Event {
         button: MouseButton,
         x: f64,
         y: f64,
+        modifiers: Modifiers,
+        /// 1 = clique, 2 = duplo clique, 3 = triplo...
+        clicks: u8,
     },
     MouseUp {
         button: MouseButton,
@@ -216,6 +254,10 @@ pub enum Event {
         text: Option<String>,
     },
     Focused(bool),
+    /// Arquivo arrastado e solto na janela.
+    FileDropped(PathBuf),
+    /// Pedido de [`Waker::wake`].
+    Wake,
     CloseRequested,
 }
 
@@ -261,6 +303,7 @@ impl Clipboard {
 pub struct Context<'a> {
     event_loop: &'a ActiveEventLoop,
     clipboard: &'a mut Clipboard,
+    proxy: &'a EventLoopProxy<()>,
 }
 
 impl Context<'_> {
@@ -271,6 +314,11 @@ impl Context<'_> {
 
     pub fn clipboard(&mut self) -> &mut Clipboard {
         self.clipboard
+    }
+
+    /// Um [`Waker`] para acordar o loop de outra thread.
+    pub fn waker(&self) -> Waker {
+        Waker { proxy: self.proxy.clone() }
     }
 }
 
@@ -287,7 +335,8 @@ pub trait App {
 /// Cria a janela e roda o loop de eventos até o app encerrar.
 /// O app continua com quem chamou (para ler estado final, erros etc.).
 pub fn run<A: App>(config: WindowConfig, app: &mut A) -> Result<(), Error> {
-    let event_loop = EventLoop::new().map_err(|e| Error::EventLoop(e.to_string()))?;
+    let event_loop =
+        EventLoop::<()>::with_user_event().build().map_err(|e| Error::EventLoop(e.to_string()))?;
     // Ocioso = 0% de CPU: só acorda com eventos ou pedidos de redraw.
     event_loop.set_control_flow(ControlFlow::Wait);
 
@@ -298,6 +347,8 @@ pub fn run<A: App>(config: WindowConfig, app: &mut A) -> Result<(), Error> {
         clipboard: Clipboard::default(),
         modifiers: Modifiers::default(),
         cursor: (0.0, 0.0),
+        last_click: None,
+        proxy: event_loop.create_proxy(),
         error: None,
     };
     event_loop.run_app(&mut runner).map_err(|e| Error::EventLoop(e.to_string()))?;
@@ -314,17 +365,42 @@ struct Runner<'a, A> {
     clipboard: Clipboard,
     modifiers: Modifiers,
     cursor: (f64, f64),
+    /// Último clique (quando, onde, botão, contagem), para detectar duplo clique.
+    last_click: Option<(Instant, (f64, f64), MouseButton, u8)>,
+    proxy: EventLoopProxy<()>,
     error: Option<Error>,
 }
 
 impl<A: App> Runner<'_, A> {
     fn dispatch(&mut self, event_loop: &ActiveEventLoop, event: Event) {
-        let mut cx = Context { event_loop, clipboard: &mut self.clipboard };
+        let mut cx = Context { event_loop, clipboard: &mut self.clipboard, proxy: &self.proxy };
         self.app.event(&mut cx, event);
+    }
+
+    /// Conta cliques seguidos no mesmo lugar (intervalo do duplo clique).
+    fn click_count(&mut self, button: MouseButton) -> u8 {
+        const INTERVAL: Duration = Duration::from_millis(500);
+        const SLOP: f64 = 4.0;
+        let now = Instant::now();
+        let (x, y) = self.cursor;
+        let n = match self.last_click {
+            Some((t, (px, py), b, n))
+                if b == button && now - t < INTERVAL && (px - x).abs() <= SLOP && (py - y).abs() <= SLOP =>
+            {
+                n.saturating_add(1)
+            }
+            _ => 1,
+        };
+        self.last_click = Some((now, (x, y), button, n));
+        n
     }
 }
 
-impl<A: App> ApplicationHandler for Runner<'_, A> {
+impl<A: App> ApplicationHandler<()> for Runner<'_, A> {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, _: ()) {
+        self.dispatch(event_loop, Event::Wake);
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -337,7 +413,7 @@ impl<A: App> ApplicationHandler for Runner<'_, A> {
             Ok(w) => {
                 let window = Window { inner: Arc::new(w) };
                 self.window = Some(window.clone());
-                let mut cx = Context { event_loop, clipboard: &mut self.clipboard };
+                let mut cx = Context { event_loop, clipboard: &mut self.clipboard, proxy: &self.proxy };
                 self.app.init(&mut cx, window.clone());
                 window.request_redraw();
             }
@@ -355,7 +431,7 @@ impl<A: App> ApplicationHandler for Runner<'_, A> {
                 event_loop.exit();
             }
             WindowEvent::RedrawRequested => {
-                let mut cx = Context { event_loop, clipboard: &mut self.clipboard };
+                let mut cx = Context { event_loop, clipboard: &mut self.clipboard, proxy: &self.proxy };
                 self.app.redraw(&mut cx);
             }
             WindowEvent::Resized(size) => {
@@ -365,6 +441,7 @@ impl<A: App> ApplicationHandler for Runner<'_, A> {
                 self.dispatch(event_loop, Event::ScaleFactorChanged(scale_factor))
             }
             WindowEvent::Focused(f) => self.dispatch(event_loop, Event::Focused(f)),
+            WindowEvent::DroppedFile(path) => self.dispatch(event_loop, Event::FileDropped(path)),
             WindowEvent::ModifiersChanged(m) => {
                 let s = m.state();
                 self.modifiers = Modifiers {
@@ -388,7 +465,10 @@ impl<A: App> ApplicationHandler for Runner<'_, A> {
                 };
                 let (x, y) = self.cursor;
                 let ev = match state {
-                    ElementState::Pressed => Event::MouseDown { button, x, y },
+                    ElementState::Pressed => {
+                        let clicks = self.click_count(button);
+                        Event::MouseDown { button, x, y, modifiers: self.modifiers, clicks }
+                    }
                     ElementState::Released => Event::MouseUp { button, x, y },
                 };
                 self.dispatch(event_loop, ev);

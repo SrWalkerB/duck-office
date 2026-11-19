@@ -20,6 +20,8 @@ pub use bytemuck;
 /// - `kind == KIND_SOLID`: preenchido com `color`.
 /// - `kind == KIND_GLYPH`: `color` modulado pelo alfa do atlas em `uv`
 ///   (coordenadas em texels, 1 texel = 1 pixel).
+/// - `kind == KIND_DASH`: tracejado ao longo do lado maior; `uv[0]` = período
+///   (negativo = vertical), `uv[1]` = parte desenhada, em pixels.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct Instance {
@@ -34,6 +36,7 @@ pub struct Instance {
 
 pub const KIND_SOLID: u32 = 0;
 pub const KIND_GLYPH: u32 = 1;
+pub const KIND_DASH: u32 = 2;
 
 impl Instance {
     #[inline]
@@ -44,6 +47,14 @@ impl Instance {
     #[inline]
     pub fn glyph(rect: [f32; 4], uv: [f32; 4], color: [u8; 4]) -> Self {
         Self { rect, uv, color, kind: KIND_GLYPH }
+    }
+
+    /// Linha tracejada (bordas pontilhadas, tracejadas...). O padrão segue a
+    /// posição na tela, então linhas vizinhas ficam alinhadas.
+    #[inline]
+    pub fn dashed(x: f32, y: f32, w: f32, h: f32, color: [u8; 4], period: f32, on: f32) -> Self {
+        let p = if w >= h { period } else { -period };
+        Self { rect: [x, y, w, h], uv: [p, on, p, on], color, kind: KIND_DASH }
     }
 }
 
@@ -130,6 +141,12 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     if (in.kind == 1u) {
         let a = textureLoad(atlas, vec2<i32>(floor(in.uv)), 0).r;
         return vec4<f32>(in.color.rgb, in.color.a * a);
+    }
+    if (in.kind == 2u) {
+        let along = select(in.pos.y, in.pos.x, in.uv.x > 0.0);
+        if ((along % abs(in.uv.x)) >= in.uv.y) {
+            discard;
+        }
     }
     return in.color;
 }
