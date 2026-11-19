@@ -1,0 +1,627 @@
+//! `duck-gfx`: renderer 2D por instâncias sobre `wgpu`.
+//!
+//! Tudo que aparece na tela é um retângulo: fundos, bordas, linhas de grade
+//! e glifos (retângulos que leem um atlas de alfa). Cada retângulo é uma
+//! [`Instance`] de 40 bytes; um frame inteiro sai em **um draw call**.
+//!
+//! O crate não conhece janelas nem texto: recebe qualquer coisa que exponha
+//! handles nativos (`raw-window-handle`) e um atlas que outro crate preenche.
+
+use std::fmt;
+use std::time::{Duration, Instant};
+
+use bytemuck::{Pod, Zeroable};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+
+pub use bytemuck;
+
+/// Um retângulo na tela, em pixels físicos.
+///
+/// - `kind == KIND_SOLID`: preenchido com `color`.
+/// - `kind == KIND_GLYPH`: `color` modulado pelo alfa do atlas em `uv`
+///   (coordenadas em texels, 1 texel = 1 pixel).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct Instance {
+    /// x, y, largura, altura
+    pub rect: [f32; 4],
+    /// u0, v0, u1, v1 em texels do atlas
+    pub uv: [f32; 4],
+    /// RGBA 8 bits, sRGB, não pré-multiplicado
+    pub color: [u8; 4],
+    pub kind: u32,
+}
+
+pub const KIND_SOLID: u32 = 0;
+pub const KIND_GLYPH: u32 = 1;
+
+impl Instance {
+    #[inline]
+    pub fn solid(x: f32, y: f32, w: f32, h: f32, color: [u8; 4]) -> Self {
+        Self { rect: [x, y, w, h], uv: [0.0; 4], color, kind: KIND_SOLID }
+    }
+
+    #[inline]
+    pub fn glyph(rect: [f32; 4], uv: [f32; 4], color: [u8; 4]) -> Self {
+        Self { rect, uv, color, kind: KIND_GLYPH }
+    }
+}
+
+#[derive(Debug)]
+pub enum GfxError {
+    Surface(String),
+    NoAdapter(String),
+    Device(String),
+    UnsupportedSurface,
+}
+
+impl fmt::Display for GfxError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GfxError::Surface(e) => write!(f, "não foi possível criar a superfície: {e}"),
+            GfxError::NoAdapter(e) => write!(f, "nenhuma GPU compatível: {e}"),
+            GfxError::Device(e) => write!(f, "falha ao abrir a GPU: {e}"),
+            GfxError::UnsupportedSurface => write!(f, "superfície incompatível com a GPU"),
+        }
+    }
+}
+
+impl std::error::Error for GfxError {}
+
+/// Resultado de um frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameStatus {
+    /// Frame apresentado.
+    Presented,
+    /// Frame pulado (janela minimizada, superfície recriada...). Tente de novo.
+    Skipped,
+}
+
+/// Informação sobre a GPU em uso.
+#[derive(Clone, Debug)]
+pub struct AdapterInfo {
+    pub name: String,
+    pub backend: String,
+    pub software: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Globals {
+    screen: [f32; 2],
+    _pad: [f32; 2],
+}
+
+const SHADER: &str = r#"
+struct Globals { screen: vec2<f32>, _pad: vec2<f32> };
+@group(0) @binding(0) var<uniform> g: Globals;
+@group(0) @binding(1) var atlas: texture_2d<f32>;
+
+struct VIn {
+    @builtin(vertex_index) vi: u32,
+    @location(0) rect: vec4<f32>,
+    @location(1) uv: vec4<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) kind: u32,
+};
+
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+    @location(2) @interpolate(flat) kind: u32,
+};
+
+@vertex
+fn vs(in: VIn) -> VOut {
+    // Triangle strip: 0=(0,0) 1=(1,0) 2=(0,1) 3=(1,1)
+    let corner = vec2<f32>(f32(in.vi & 1u), f32(in.vi >> 1u));
+    let p = in.rect.xy + corner * in.rect.zw;
+    var out: VOut;
+    out.pos = vec4<f32>(p.x / g.screen.x * 2.0 - 1.0, 1.0 - p.y / g.screen.y * 2.0, 0.0, 1.0);
+    out.uv = mix(in.uv.xy, in.uv.zw, corner);
+    out.color = in.color;
+    out.kind = in.kind;
+    return out;
+}
+
+@fragment
+fn fs(in: VOut) -> @location(0) vec4<f32> {
+    if (in.kind == 1u) {
+        let a = textureLoad(atlas, vec2<i32>(floor(in.uv)), 0).r;
+        return vec4<f32>(in.color.rgb, in.color.a * a);
+    }
+    return in.color;
+}
+"#;
+
+/// Dono da GPU, da superfície da janela e do pipeline 2D.
+pub struct Gfx {
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    globals: wgpu::Buffer,
+    instances: wgpu::Buffer,
+    instance_capacity: usize,
+    atlas: wgpu::Texture,
+    atlas_size: u32,
+    info: AdapterInfo,
+    timings: Vec<(&'static str, Duration)>,
+}
+
+/// Backend nativo de cada SO: DX12 no Windows, Vulkan no Linux, Metal no macOS.
+/// `WGPU_BACKEND=vulkan|dx12|gl|metal` força outro (para testes).
+fn primary_backends() -> wgpu::Backends {
+    if cfg!(windows) {
+        wgpu::Backends::DX12
+    } else if cfg!(target_vendor = "apple") {
+        wgpu::Backends::METAL
+    } else {
+        wgpu::Backends::VULKAN
+    }
+}
+
+/// Cria instância, superfície e adaptador com os backends dados.
+fn open<W>(window: &W, backends: wgpu::Backends) -> Result<(wgpu::Surface<'static>, wgpu::Adapter), GfxError>
+where
+    W: HasWindowHandle + HasDisplayHandle + fmt::Debug + Clone + Send + Sync + 'static,
+{
+    let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()));
+    desc.backends = backends;
+    let instance = wgpu::Instance::new(desc.with_env());
+    let surface = instance.create_surface(window.clone()).map_err(|e| GfxError::Surface(e.to_string()))?;
+    let request = |fallback: bool| {
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: fallback,
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }))
+    };
+    // GPU de verdade; se não houver, o adaptador por software do sistema
+    // (WARP no Windows, llvmpipe no Linux).
+    let adapter =
+        request(false).or_else(|_| request(true)).map_err(|e| GfxError::NoAdapter(e.to_string()))?;
+    Ok((surface, adapter))
+}
+
+fn is_software(adapter: &wgpu::Adapter) -> bool {
+    adapter.get_info().device_type == wgpu::DeviceType::Cpu
+}
+
+/// Escolhe superfície e adaptador.
+///
+/// 1. Backend nativo do SO (rápido de abrir: ~150–250 ms).
+/// 2. Se ele falhar **ou só oferecer renderização por software**, tenta os
+///    outros e prefere qualquer GPU de verdade. Ex.: Linux sem driver Vulkan
+///    para a placa, mas com o lavapipe instalado e OpenGL acelerado.
+/// 3. Sem GPU em nenhum backend, fica com o software do backend nativo.
+///
+/// Com `WGPU_BACKEND` definido, respeita a escolha e não procura alternativas.
+fn select<W>(window: &W) -> Result<(wgpu::Surface<'static>, wgpu::Adapter), GfxError>
+where
+    W: HasWindowHandle + HasDisplayHandle + fmt::Debug + Clone + Send + Sync + 'static,
+{
+    let primary = primary_backends();
+    let first = open(window, primary);
+    if let Ok((_, adapter)) = &first
+        && (!is_software(adapter) || wgpu::Backends::from_env().is_some())
+    {
+        return first;
+    }
+    // Libera a superfície antes de abrir outra na mesma janela.
+    let primary_works = first.is_ok();
+    let first_err = first.err();
+    if let Some(e) = &first_err {
+        log::warn!("backend principal falhou ({e}); tentando os demais");
+    }
+    let other = open(window, wgpu::Backends::all() - primary);
+    if let Ok((_, adapter)) = &other
+        && (!is_software(adapter) || !primary_works)
+    {
+        return other;
+    }
+    let other_err = other.err();
+    if primary_works {
+        return open(window, primary);
+    }
+    Err(first_err.or(other_err).unwrap_or(GfxError::UnsupportedSurface))
+}
+
+impl Gfx {
+    /// Abre a GPU e cria a superfície da janela.
+    pub fn new<W>(window: W, width: u32, height: u32, vsync: bool, atlas_size: u32) -> Result<Self, GfxError>
+    where
+        W: HasWindowHandle + HasDisplayHandle + fmt::Debug + Clone + Send + Sync + 'static,
+    {
+        let mut timings = Vec::new();
+        let t = Instant::now();
+        // Inicializar um backend só custa ~250 ms; todos de uma vez, ~900 ms.
+        let (surface, adapter) = select(&window)?;
+        timings.push(("instância + adaptador", t.elapsed()));
+
+        let ainfo = adapter.get_info();
+        let info = AdapterInfo {
+            name: ainfo.name.clone(),
+            backend: format!("{:?}", ainfo.backend),
+            software: ainfo.device_type == wgpu::DeviceType::Cpu,
+        };
+
+        let max_tex = adapter.limits().max_texture_dimension_2d;
+        let atlas_size = atlas_size.min(max_tex);
+        let t = Instant::now();
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("duck-gfx"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits {
+                max_texture_dimension_2d: max_tex,
+                ..wgpu::Limits::downlevel_webgl2_defaults()
+            },
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
+        .map_err(|e| GfxError::Device(e.to_string()))?;
+        timings.push(("device", t.elapsed()));
+
+        let t = Instant::now();
+        let mut config = surface
+            .get_default_config(&adapter, width.max(1), height.max(1))
+            .ok_or(GfxError::UnsupportedSurface)?;
+        // Formato não-sRGB: a mistura de alfa acontece em espaço sRGB, como em
+        // navegadores e toolkits de UI (texto com o peso esperado).
+        let caps = surface.get_capabilities(&adapter);
+        if let Some(f) = caps.formats.iter().find(|f| !f.is_srgb()) {
+            config.format = *f;
+        }
+        config.present_mode = present_mode(vsync);
+        config.desired_maximum_frame_latency = 1;
+        surface.configure(&device, &config);
+        timings.push(("superfície (swapchain)", t.elapsed()));
+
+        let t = Instant::now();
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("duck-gfx shader"),
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        });
+
+        let globals = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("globals"),
+            size: std::mem::size_of::<Globals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let atlas = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("atlas"),
+            size: wgpu::Extent3d { width: atlas_size, height: atlas_size, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("duck-gfx bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("duck-gfx bg"),
+            layout: &bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+            ],
+        });
+
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("duck-gfx layout"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
+
+        const ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+            0 => Float32x4,
+            1 => Float32x4,
+            2 => Unorm8x4,
+            3 => Uint32,
+        ];
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("duck-gfx pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Instance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &ATTRS,
+                })],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let instance_capacity = 16 * 1024;
+        let instances = create_instance_buffer(&device, instance_capacity);
+        timings.push(("shader + pipeline", t.elapsed()));
+
+        Ok(Self {
+            surface,
+            device,
+            queue,
+            config,
+            pipeline,
+            bind_group,
+            globals,
+            instances,
+            instance_capacity,
+            atlas,
+            atlas_size,
+            info,
+            timings,
+        })
+    }
+
+    pub fn adapter_info(&self) -> &AdapterInfo {
+        &self.info
+    }
+
+    /// Quanto cada etapa da inicialização levou.
+    pub fn init_timings(&self) -> &[(&'static str, Duration)] {
+        &self.timings
+    }
+
+    /// Lado do atlas quadrado de glifos, em texels.
+    pub fn atlas_size(&self) -> u32 {
+        self.atlas_size
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        if (width, height) == (self.config.width, self.config.height) {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+    }
+
+    pub fn set_vsync(&mut self, vsync: bool) {
+        let mode = present_mode(vsync);
+        if self.config.present_mode != mode {
+            self.config.present_mode = mode;
+            self.surface.configure(&self.device, &self.config);
+        }
+    }
+
+    /// Copia uma região de alfa (1 byte por pixel, linhas contíguas) para o atlas.
+    pub fn upload_atlas(&self, x: u32, y: u32, w: u32, h: u32, data: &[u8]) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        debug_assert_eq!(data.len(), (w * h) as usize);
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.atlas,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w), rows_per_image: Some(h) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+    }
+
+    /// Desenha as instâncias, na ordem dada, sobre `clear` e apresenta.
+    pub fn render(&mut self, instances: &[Instance], clear: [u8; 4]) -> FrameStatus {
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) => t,
+            wgpu::CurrentSurfaceTexture::Suboptimal(_)
+            | wgpu::CurrentSurfaceTexture::Outdated
+            | wgpu::CurrentSurfaceTexture::Lost => {
+                // Swapchain não bate mais com a janela: reconfigura e pula o frame.
+                self.surface.configure(&self.device, &self.config);
+                return FrameStatus::Skipped;
+            }
+            wgpu::CurrentSurfaceTexture::Timeout
+            | wgpu::CurrentSurfaceTexture::Occluded
+            | wgpu::CurrentSurfaceTexture::Validation => return FrameStatus::Skipped,
+        };
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let encoder = self.encode(&view, instances, clear);
+        self.queue.submit([encoder.finish()]);
+        self.queue.present(frame);
+        FrameStatus::Presented
+    }
+
+    /// Desenha um frame fora da tela e devolve os pixels em RGBA 8 bits
+    /// (para screenshots e testes visuais). Bloqueia até a GPU terminar.
+    pub fn render_to_rgba(&mut self, instances: &[Instance], clear: [u8; 4]) -> (u32, u32, Vec<u8>) {
+        let (w, h) = (self.config.width, self.config.height);
+        let target = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self.encode(&view, instances, clear);
+
+        let row = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: (row * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        self.queue.submit([encoder.finish()]);
+        readback.map_async(wgpu::MapMode::Read, .., |r| {
+            if let Err(e) = r {
+                log::error!("falha ao ler o frame da GPU: {e}");
+            }
+        });
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+
+        let bgra = matches!(
+            self.config.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        if let Ok(data) = readback.get_mapped_range(..) {
+            for y in 0..h as usize {
+                let line = &data[y * row as usize..][..(w * 4) as usize];
+                for px in line.as_chunks::<4>().0 {
+                    if bgra {
+                        out.extend_from_slice(&[px[2], px[1], px[0], 255]);
+                    } else {
+                        out.extend_from_slice(&[px[0], px[1], px[2], 255]);
+                    }
+                }
+            }
+        }
+        readback.unmap();
+        (w, h, out)
+    }
+
+    /// Envia instâncias e uniforms e grava o render pass num encoder novo.
+    fn encode(
+        &mut self,
+        view: &wgpu::TextureView,
+        instances: &[Instance],
+        clear: [u8; 4],
+    ) -> wgpu::CommandEncoder {
+        if instances.len() > self.instance_capacity {
+            self.instance_capacity = instances.len().next_power_of_two();
+            self.instances = create_instance_buffer(&self.device, self.instance_capacity);
+        }
+        if !instances.is_empty() {
+            self.queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(instances));
+        }
+        let globals =
+            Globals { screen: [self.config.width as f32, self.config.height as f32], _pad: [0.0; 2] };
+        self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+
+        let mut encoder =
+            self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        {
+            let c = |v: u8| v as f64 / 255.0;
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("main"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: c(clear[0]),
+                            g: c(clear[1]),
+                            b: c(clear[2]),
+                            a: c(clear[3]),
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if !instances.is_empty() {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_vertex_buffer(0, self.instances.slice(..));
+                pass.draw(0..4, 0..instances.len() as u32);
+            }
+        }
+        encoder
+    }
+}
+
+fn present_mode(vsync: bool) -> wgpu::PresentMode {
+    if vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync }
+}
+
+fn create_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("instances"),
+        size: (capacity * std::mem::size_of::<Instance>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}

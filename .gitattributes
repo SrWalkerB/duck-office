@@ -1,0 +1,3 @@
+# LF em todo o repositório (o bash do CI não aceita CRLF nos scripts).
+* text=auto eol=lf
+*.png binary

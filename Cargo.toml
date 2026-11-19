@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = [
+    "platform/duck-platform",
+    "platform/duck-gfx",
+    "platform/duck-text",
+    "platform/examples/million_rows",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "UNLICENSED"
+publish = false
+rust-version = "1.95"
+
+[profile.dev.package."*"]
+# Dependências (wgpu, cosmic-text, swash...) otimizadas mesmo em debug:
+# mantém o modo dev utilizável sem pagar o tempo de compilação no nosso código.
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
