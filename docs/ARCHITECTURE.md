@@ -684,18 +684,21 @@ Entregue: o app **`apps/duck-sheets`** abre `.xlsx`/`.xlsm` numa janela nativa, 
 - `mimalloc` com as mesmas opções do `duck-bench`.
 - Modos de medição: `--bench` (rola a aba e mede) e `--screenshot` (renderiza fora da tela e sai), mais `--sheet`, `--cell`, `--zoom` e `--find`.
 
-**Medido** no arquivo de referência (1440×900; Linux = WSLg com renderização **por software**, llvmpipe):
+**Medido** no arquivo de referência (1440×900). Windows = AMD Radeon RX 9070 XT em DX12, aba ativa pequena, 3 rodadas em 21/11/2026; Linux = WSLg com renderização **por software** (llvmpipe):
 
-| | Linux (WSLg, software) | Meta |
-|---|---|---|
-| Pacote + estilos + strings + prévia da aba ativa (Windows, `duck-bench preview`) | 15 ms | — |
-| **Primeira tela com dados** (processo inteiro) | **162–182 ms** (aba pequena ou a de 593 mil linhas) | < 300 ms |
-| Aba ativa inteira | 0,18 s (aba pequena) / 0,74 s (593 mil linhas) | — |
-| Todas as 20 abas | 0,90–1,02 s | — |
-| Montagem do frame, p50 / p99 (scroll, saltos, horizontal) | 1,5–2,0 / 2,3–3,2 ms | < 16 ms |
-| Frames por segundo sem vsync (CPU fazendo também a rasterização) | 74–455 | 60+ |
-| Busca de um texto presente em 593.557 células | 33 ms | — |
-| Memória com tudo carregado / pico | 608–643 / 790–854 MB | < 600 MB |
+| | Windows (GPU) | Linux (WSLg, software) | Meta |
+|---|---|---|---|
+| Pacote + estilos + strings + prévia da aba ativa | 15 ms (`duck-bench preview`) | — | — |
+| Arquivo aberto + prévia (processo inteiro) | 68–70 ms | — | — |
+| Abertura da GPU (instância + adaptador / device) | 200–206 ms (95–102 / 37–38 ms) | — | — |
+| **Primeira tela com dados** (processo inteiro) | **221–229 ms** | **162–182 ms** (aba pequena ou a de 593 mil linhas) | < 300 ms |
+| Aba ativa inteira | 0,22 s (aba pequena) | 0,18 s (aba pequena) / 0,74 s (593 mil linhas) | — |
+| Todas as 20 abas | 0,70–0,71 s | 0,90–1,02 s | — |
+| Montagem do frame, p50 / p99 (scroll, saltos, horizontal) | 0,5–0,6 / 0,6–2,5 ms | 1,5–2,0 / 2,3–3,2 ms | < 16 ms |
+| Frame inteiro, p99 / pior | 1,4–4,7 / 9,1 ms | — | < 16 ms |
+| Frames por segundo sem vsync | 866–1.147 | 74–455 (a CPU também rasteriza) | 60+ |
+| Busca de um texto presente em 593.557 células | — | 33 ms | — |
+| Memória com tudo carregado / pico | **657–663 / 985–1.006 MB** | 608–643 / 790–854 MB | < 600 MB |
 
 A conferência contra o calamine continua com **0 divergências** (24,2 milhões de células, 10,1 milhões de fórmulas, 29 mesclagens). Uma planilha de vitrine sem dados reais (`duck-bench gen-showcase`) cobre formatos, bordas, painéis e abas, e entrou no CI.
 
@@ -706,10 +709,12 @@ O que a F2 ensinou:
 - **A prévia é barata**: 4 MB de XML (centenas a milhares de linhas) são lidos em ~2 ms, e com estilos e strings ficam prontos em 15 ms.
 - **Strings compartilhadas na busca**: as ~40 mil strings são testadas uma vez; as células são reconhecidas pelo endereço do texto dentro da tabela (`StringTable::byte_range`), sem guardar o índice.
 - **Formatos contábeis** precisam do preenchimento `*` para parecerem os do Excel; sem ele, "R$" e o número ficam colados.
+- **Varrer as fontes do sistema atrasava a primeira tela no Windows.** O `FontSystem::new()` do cosmic-text lê as ~350 fontes instaladas: ~170 ms com o cache de disco quente e **~600 ms com ele frio** (primeira rodada depois de compilar: primeira tela em 651 ms). E a leitura da planilha só começava depois das fontes e da GPU. Agora o `duck-text` começa com 12 fontes essenciais (`TextSystem::new_fast`: Segoe UI, Calibri e Arial), o resto é lido numa thread depois da primeira tela e entra com `TextSystem::add_fonts` sem invalidar o atlas (as faces mantêm o id), e a leitura da planilha começa junto com a abertura da GPU. O caminho crítico ficou sendo só a GPU (~200 ms).
 
 Pendências da F2:
 
-- **Medir no Windows.** No dia da medição, o driver da placa (AMD Radeon RX 9070 XT) entrou em estado de erro às 11:35 (o Windows mostra o dispositivo com status "Error", e outro programa caiu na mesma hora), antes de qualquer execução do app. DX12 e Vulkan passaram a derrubar qualquer processo que abre a GPU, inclusive o `million_rows` antigo. Os números acima são do WSL, com renderização por software. Falta repetir com a GPU, onde a meta de memória deve ficar abaixo de 600 MB (no WSL, o llvmpipe está dentro do processo).
+- **Memória acima da meta**: 657–663 MB com tudo carregado no Windows (meta: < 600 MB) e pico de ~1 GB durante a leitura. Medido em 21/11/2026, depois que o driver da placa, que tinha entrado em estado de erro no dia da primeira medição, voltou a funcionar.
+- **Abrir a GPU** é agora o caminho crítico da primeira tela (~200 ms, dos quais ~100 ms em instância + adaptador). Alavanca: criar instância, adaptador e device numa thread antes de a janela existir (~45 ms), e só a superfície depois.
 - **Teclado e mouse** foram testados só por código (cópia em TSV, Ctrl+setas, busca, referências). Falta o teste manual na janela.
 - **Ainda não suportados**: texto girado (`textRotation`, comum em painéis), formatação condicional (`dxf`), estilo de linha (`<row s customFormat>`), texto com várias fontes na mesma célula (rich text), redimensionar colunas com o mouse, hiperlinks. Gráficos, imagens e slicers ficam para a F5.
 

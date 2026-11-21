@@ -2,13 +2,13 @@
 
 Onde o projeto está, o que já foi feito e o que falta. Os detalhes de cada decisão e as medições completas ficam em [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-**Fase atual: fim da F2.** O visualizador está pronto e medido no Linux; falta medir no Windows. A próxima fase é a **F3** (edição e salvar).
+**Fase atual: fim da F2.** O visualizador está pronto e medido no Windows e no Linux. A próxima fase é a **F3** (edição e salvar).
 
 | Fase | Entrega | Status |
 |---|---|---|
 | **F0** | Camada nativa (`platform/`) e grade de 1 milhão de linhas | ✅ Concluída |
 | **F1** | Leitura paralela de `.xlsx`/`.xlsm` e benchmark | ✅ Concluída (metas de 16+ núcleos em aberto) |
-| **F2** | Visualizador `duck-sheets` | ✅ Concluída · medição no Windows pendente |
+| **F2** | Visualizador `duck-sheets` | ✅ Concluída (meta de memória em aberto) |
 | **F3** | Edição e salvar com round-trip | ⏳ Próxima |
 | **F4** | Motor de cálculo | ⏳ Planejada |
 | **F5+** | Gráficos, pivôs, slicers, VBA, formato nativo, docs e slides | ⏳ Planejada |
@@ -54,11 +54,17 @@ Feito:
 - **Plataforma**: crate novo `duck-ui` (Painter, campo de texto, abas), texto com estilos e quebra de linha, bordas tracejadas no shader.
 - **Medição**: `--bench`, `--screenshot`, `duck-bench preview` e uma planilha de vitrine sem dados reais (`duck-bench gen-showcase`) no CI.
 
-Resultado (Linux/WSLg, renderização por software): **primeira tela com dados em 162–182 ms**, todas as abas em ~1 s, frame montado em até 3,2 ms (p99), busca em 593 mil células em 33 ms.
+Resultado no Windows (AMD RX 9070 XT, DX12): **primeira tela com dados em 221–229 ms**, todas as 20 abas em 0,7 s, 866–1.147 fps sem vsync (p99 do frame até 4,7 ms), memória de 657–663 MB com tudo carregado.
+
+No Linux (WSLg, renderização por software): primeira tela em 162–182 ms, todas as abas em ~1 s, frame montado em até 3,2 ms (p99), busca em 593 mil células em 33 ms.
+
+Para não atrasar a primeira tela, a leitura da planilha começa junto com a abertura da GPU, e só 12 fontes essenciais são carregadas no início. As outras ~340 fontes do sistema são lidas numa thread depois da primeira tela; com o cache de disco frio, isso levava até 0,6 s.
 
 Falta na F2:
 
-- [ ] **Medir no Windows** com a GPU (primeira tela, fps, memória < 600 MB). Bloqueado: o driver da placa de vídeo da máquina de teste está em estado de erro.
+- [x] Medir no Windows com a GPU (21/11/2026).
+- [ ] **Memória abaixo de 600 MB** (hoje 657–663 MB no Windows, pico de ~1 GB).
+- [ ] Abrir a GPU antes da janela existir (a GPU é o que resta no caminho da primeira tela: ~200 ms).
 - [ ] Teste manual de teclado e mouse na janela.
 - [ ] Texto girado (`textRotation`), comum em painéis.
 - [ ] Formatação condicional.

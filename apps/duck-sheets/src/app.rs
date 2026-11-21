@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use duck_core::{CellRange, Sheet, StringTable, Styles, Value};
 use duck_gfx::{FrameStatus, Gfx, Instance};
 use duck_platform::{App, Context, Cursor, Event, Key, Modifiers, MouseButton, WheelDelta, Window};
-use duck_text::{TextStyle, TextSystem};
+use duck_text::{FontSet, TextStyle, TextSystem};
 use duck_ui::{Rect, TabBar, TextInput};
 use duck_xlsx::SheetInfo;
 use rayon::prelude::*;
@@ -354,6 +354,9 @@ pub struct SheetsApp {
     pub gfx: Option<Gfx>,
     pub text: Option<TextSystem>,
     fonts_loading: Option<std::thread::JoinHandle<TextSystem>>,
+    /// Resto das fontes do sistema, lido depois da primeira tela.
+    font_scan: Option<std::sync::mpsc::Receiver<FontSet>>,
+    waker: Option<duck_platform::Waker>,
     pub scale: f32,
     pub doc: Option<Doc>,
     pub loader: Option<Loader>,
@@ -389,7 +392,7 @@ pub struct SheetsApp {
 
 impl SheetsApp {
     pub fn new(t0: Instant, opts: Opts) -> Self {
-        let fonts_loading = std::thread::spawn(|| TextSystem::new(UI_FONT_PX, ATLAS));
+        let fonts_loading = std::thread::spawn(|| TextSystem::new_fast(UI_FONT_PX, ATLAS));
         let bench = opts.bench.then(|| Bench {
             phase: 0,
             frame: 0,
@@ -409,6 +412,8 @@ impl SheetsApp {
             gfx: None,
             text: None,
             fonts_loading: Some(fonts_loading),
+            font_scan: None,
+            waker: None,
             scale: 1.0,
             doc: None,
             loader: None,
@@ -522,6 +527,7 @@ impl SheetsApp {
                     self.message = format!("Pronto em {} ms", at.as_millis());
                 }
                 Msg::Failed(e) => {
+                    self.start_font_scan();
                     self.message = format!("Erro: {e}");
                     if self.doc.is_none() {
                         if self.opts.bench || self.opts.screenshot.is_some() {
@@ -574,6 +580,54 @@ impl SheetsApp {
         if doc.finished.is_none() {
             self.message = format!("Carregando: {} de {} abas", doc.loaded, n);
         }
+    }
+
+    /// Lê o resto das fontes do sistema numa thread. Só depois da primeira
+    /// tela: com o cache de disco frio, leva até 0,6 s e competiria com ela.
+    fn start_font_scan(&mut self) {
+        let complete = self.text.as_ref().is_none_or(|t| t.fonts_complete());
+        if complete || self.font_scan.is_some() {
+            return;
+        }
+        let Some(waker) = self.waker.clone() else { return };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("duck-fonts".into())
+            .spawn(move || {
+                let _ = tx.send(duck_text::scan_system_fonts());
+                waker.wake();
+            })
+            .expect("thread de fontes");
+        self.font_scan = Some(rx);
+    }
+
+    /// Junta o resto das fontes, se já chegou. `true` = redesenhar.
+    fn poll_fonts(&mut self) -> bool {
+        let Some(rx) = &self.font_scan else { return false };
+        let Ok(set) = rx.try_recv() else { return false };
+        self.font_scan = None;
+        self.mark("todas as fontes");
+        let Some(text) = &mut self.text else { return false };
+        if text.add_fonts(set) {
+            // Uma família do arquivo passou a existir: a largura do dígito
+            // (unidade das colunas) e os estilos podem mudar.
+            self.font_key = (0, 0);
+            let looks = self.doc.as_ref().map(|d| d.looks.clone());
+            if let Some(looks) = looks {
+                let mdw = self.measure_mdw(&looks);
+                if let Some(doc) = &mut self.doc
+                    && mdw != doc.mdw
+                {
+                    doc.mdw = mdw;
+                    for slot in &mut doc.sheets {
+                        if let Some(data) = &slot.data {
+                            slot.view = Some(build_view(data, mdw, slot.view.take(), None));
+                        }
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// Largura do dígito na fonte padrão do arquivo a 100% (96 DPI).
@@ -1475,6 +1529,12 @@ impl SheetsApp {
             let i = g.adapter_info();
             let (w, h) = g.size();
             println!("  GPU: {} ({}) · janela {w}×{h} · escala {:.2}", i.name, i.backend, self.scale);
+            let parts: Vec<String> = g
+                .init_timings()
+                .iter()
+                .map(|(n, d)| format!("{n} {:.0} ms", d.as_secs_f64() * 1000.0))
+                .collect();
+            println!("  abertura da GPU: {}", parts.join(" · "));
         }
         println!("\nLinha do tempo (desde o início do processo):");
         let mut tl = self.timeline.clone();
@@ -1510,6 +1570,16 @@ impl App for SheetsApp {
     fn init(&mut self, cx: &mut Context, window: Window) {
         self.mark("janela criada");
         self.scale = window.scale_factor() as f32;
+        self.waker = Some(cx.waker());
+        self.window = Some(window.clone());
+        // A leitura começa já: corre junto com a GPU e as fontes.
+        if let Some(p) = self.opts.path.clone() {
+            self.open(p, cx.waker());
+        } else if self.opts.bench || self.opts.screenshot.is_some() {
+            self.error = Some("informe o arquivo".into());
+            cx.exit();
+            return;
+        }
         let (w, h) = window.inner_size();
         let vsync = !self.opts.bench;
         match Gfx::new(window.clone(), w, h, vsync, ATLAS) {
@@ -1528,12 +1598,9 @@ impl App for SheetsApp {
         text.set_font_size(UI_FONT_PX * self.scale);
         self.text = Some(text);
         self.mark("fontes prontas");
-        self.window = Some(window);
-        if let Some(p) = self.opts.path.clone() {
-            self.open(p, cx.waker());
-        } else if self.opts.bench || self.opts.screenshot.is_some() {
-            self.error = Some("informe o arquivo".into());
-            cx.exit();
+        if self.loader.is_none() {
+            // Sem arquivo: nada a esperar para ler o resto das fontes.
+            self.start_font_scan();
         }
     }
 
@@ -1543,7 +1610,8 @@ impl App for SheetsApp {
                 if self.trace {
                     eprintln!("{:>8.1} ms  wake", self.t0.elapsed().as_secs_f64() * 1000.0);
                 }
-                let a = self.poll_loader();
+                let fonts = self.poll_fonts();
+                let a = self.poll_loader() || fonts;
                 let b = self.poll_search();
                 if a && let Some(q) = self.opts.find.take() {
                     // `--find`: busca assim que a aba ativa chegar.
@@ -1635,9 +1703,11 @@ impl App for SheetsApp {
             gfx.upload_atlas(u.x, u.y, u.w, u.h, &u.data);
         }
         let atlas_reset = text.take_atlas_reset();
-        // Screenshot: depois de todas as abas e de uma busca pedida (`--find`).
+        // Screenshot: depois de todas as abas, de todas as fontes e de uma
+        // busca pedida (`--find`).
         let searching = self.opts.find.is_some() || self.find.as_ref().is_some_and(|f| f.job.is_some());
-        let done = self.doc.as_ref().is_some_and(|d| d.finished.is_some()) && !searching;
+        let done =
+            self.doc.as_ref().is_some_and(|d| d.finished.is_some()) && !searching && text.fonts_complete();
         if self.screenshot_pending && done && !atlas_reset {
             let (w, h, rgba) = gfx.render_to_rgba(&self.instances, crate::draw::WHITE);
             let path = self.opts.screenshot.clone().unwrap();
@@ -1663,6 +1733,7 @@ impl App for SheetsApp {
             if let Some(l) = &self.loader {
                 l.proceed();
             }
+            self.start_font_scan();
         }
         if self.recent_cpu.len() == 120 {
             self.recent_cpu.remove(0);

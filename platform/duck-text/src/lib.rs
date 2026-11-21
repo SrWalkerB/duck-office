@@ -12,13 +12,19 @@
 //!   kerning nem ligaduras nas fontes de UI). É o caso mais comum numa
 //!   planilha e o que mais muda durante o scroll.
 //! - **Quebra de linha** ([`TextSystem::wrap`]) para células com texto quebrado.
+//! - **Início rápido** ([`TextSystem::new_fast`]): carrega só as fontes que a
+//!   primeira tela quase sempre usa; o resto vem de [`scan_system_fonts`] numa
+//!   thread e entra com [`TextSystem::add_fonts`]. Varrer todas as fontes do
+//!   Windows (~350 arquivos) leva de 0,2 a 0,6 s com o cache de disco frio.
 //!
 //! O crate não depende de GPU: produz [`GlyphQuad`]s e uma fila de
 //! [`AtlasUpload`]s que o renderer copia para a textura.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use cosmic_text::fontdb::{self, Database};
 use cosmic_text::{
     Attrs, Buffer, CacheKey, Family, FontSystem, Metrics, Shaping, Style, SwashCache, SwashContent, Weight,
     Wrap,
@@ -221,9 +227,95 @@ fn fallbacks(name: &str) -> &'static [&'static str] {
     }
 }
 
+/// A família (ou um equivalente de [`fallbacks`]) com o nome exato do banco
+/// de fontes; `None` = não existe, usa a sans-serif padrão.
+fn resolve_family(db: &Database, name: &str) -> Option<String> {
+    std::iter::once(name).chain(fallbacks(name).iter().copied()).find_map(|n| {
+        db.faces()
+            .flat_map(|f| f.families.iter())
+            .find(|(fam, _)| fam.eq_ignore_ascii_case(n))
+            .map(|(fam, _)| fam.clone())
+    })
+}
+
+/// Fontes do sistema lidas por [`scan_system_fonts`], prontas para
+/// [`TextSystem::add_fonts`].
+pub struct FontSet {
+    db: Database,
+}
+
+impl FontSet {
+    /// Número de faces (cada estilo de cada fonte conta uma).
+    pub fn len(&self) -> usize {
+        self.db.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.db.is_empty()
+    }
+}
+
+/// Lê todas as fontes instaladas. Lento (centenas de arquivos): rode numa thread.
+pub fn scan_system_fonts() -> FontSet {
+    let mut db = Database::new();
+    db.load_system_fonts();
+    FontSet { db }
+}
+
+/// Fontes que a primeira tela quase sempre usa: a da interface e as padrões
+/// do Office. Vazio = a plataforma não tem uma lista; carrega tudo.
+fn essential_fonts() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        const FILES: [&str; 12] = [
+            "segoeui.ttf",
+            "segoeuib.ttf",
+            "segoeuii.ttf",
+            "segoeuiz.ttf",
+            "calibri.ttf",
+            "calibrib.ttf",
+            "calibrii.ttf",
+            "calibriz.ttf",
+            "arial.ttf",
+            "arialbd.ttf",
+            "ariali.ttf",
+            "arialbi.ttf",
+        ];
+        // Mesma pasta que `load_system_fonts` usa, para reconhecer as repetidas.
+        let root = std::env::var_os("SYSTEMROOT").map_or_else(|| PathBuf::from("C:\\Windows"), PathBuf::from);
+        let dir = root.join("Fonts");
+        FILES.iter().map(|f| dir.join(f)).collect()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// Arquivo de onde veio uma face (para não repetir faces ao juntar).
+fn face_key(face: &fontdb::FaceInfo) -> Option<(String, u32)> {
+    let path: &Path = match &face.source {
+        fontdb::Source::File(p) | fontdb::Source::SharedFile(p, _) => p,
+        fontdb::Source::Binary(_) => return None,
+    };
+    Some((path.to_string_lossy().to_lowercase(), face.index))
+}
+
+fn font_system(mut db: Database) -> FontSystem {
+    // Os padrões do cosmic-text, exceto a sans-serif no Windows: lá a "Open
+    // Sans" não existe e o texto caía na Segoe UI pela lista de reserva.
+    db.set_monospace_family("Noto Sans Mono");
+    db.set_serif_family("DejaVu Serif");
+    db.set_sans_serif_family(if cfg!(windows) { "Segoe UI" } else { "Open Sans" });
+    let locale = sys_locale::get_locale().unwrap_or_else(|| "en-US".into());
+    FontSystem::new_with_locale_and_db(locale, db)
+}
+
 /// Sistema de texto: fontes, shaping, atlas e caches.
 pub struct TextSystem {
     fonts: FontSystem,
+    /// Todas as fontes do sistema já estão no banco.
+    fonts_complete: bool,
     swash: SwashCache,
     buffer: Buffer,
     /// Estilo padrão (UI): sans-serif no tamanho de [`TextSystem::font_size`].
@@ -245,12 +337,33 @@ pub struct TextSystem {
 const MAX_CACHED_RUNS: usize = 200_000;
 
 impl TextSystem {
+    /// Com todas as fontes do sistema (lento; veja [`TextSystem::new_fast`]).
     /// `font_size` em pixels físicos; `atlas_size` em texels (atlas quadrado).
     pub fn new(font_size: f32, atlas_size: u32) -> Self {
-        let mut fonts = FontSystem::new();
+        Self::with_fonts(font_system(scan_system_fonts().db), true, font_size, atlas_size)
+    }
+
+    /// Só com as fontes essenciais (dezenas de ms). As outras entram depois
+    /// com [`TextSystem::add_fonts`]; até lá, famílias que faltam caem na
+    /// sans-serif. Em plataformas sem lista de essenciais, carrega tudo
+    /// ([`TextSystem::fonts_complete`] = `true`).
+    pub fn new_fast(font_size: f32, atlas_size: u32) -> Self {
+        let mut db = Database::new();
+        for path in essential_fonts() {
+            let _ = db.load_font_file(path);
+        }
+        let complete = db.is_empty();
+        if complete {
+            db.load_system_fonts();
+        }
+        Self::with_fonts(font_system(db), complete, font_size, atlas_size)
+    }
+
+    fn with_fonts(mut fonts: FontSystem, fonts_complete: bool, font_size: f32, atlas_size: u32) -> Self {
         let buffer = Buffer::new(&mut fonts, Metrics::new(font_size, line_height_for(font_size)));
         Self {
             fonts,
+            fonts_complete,
             swash: SwashCache::new(),
             buffer,
             default: TextStyle { family: 0, size_q: quantize(font_size), bold: false, italic: false },
@@ -295,21 +408,40 @@ impl TextSystem {
         if let Some(i) = self.families.iter().position(|f| f.requested.eq_ignore_ascii_case(name)) {
             return i as u16;
         }
-        let exists = |db: &cosmic_text::fontdb::Database, n: &str| {
-            db.faces().any(|f| f.families.iter().any(|(fam, _)| fam.eq_ignore_ascii_case(n)))
-        };
-        let db = self.fonts.db();
-        let resolved =
-            std::iter::once(name).chain(fallbacks(name).iter().copied()).find(|n| exists(db, n)).map(|n| {
-                // Nome exatamente como está no banco de fontes.
-                db.faces()
-                    .flat_map(|f| f.families.iter())
-                    .find(|(fam, _)| fam.eq_ignore_ascii_case(n))
-                    .map(|(fam, _)| fam.clone())
-                    .unwrap_or_else(|| n.to_string())
-            });
+        let resolved = resolve_family(self.fonts.db(), name);
         self.families.push(FamilyEntry { requested: name.to_string(), resolved });
         (self.families.len() - 1) as u16
+    }
+
+    /// `false` enquanto faltar juntar o resto das fontes ([`TextSystem::add_fonts`]).
+    pub fn fonts_complete(&self) -> bool {
+        self.fonts_complete
+    }
+
+    /// Junta as fontes de [`scan_system_fonts`] às já carregadas. Glifos no
+    /// atlas continuam valendo (as faces antigas mantêm o id); o texto moldado
+    /// é refeito, porque a reserva para caracteres que faltavam pode ter
+    /// mudado. Retorna `true` se alguma família passou a usar outra fonte
+    /// (larguras medidas antes podem ter mudado).
+    pub fn add_fonts(&mut self, set: FontSet) -> bool {
+        let known: HashSet<(String, u32)> = self.fonts.db().faces().filter_map(face_key).collect();
+        let db = self.fonts.db_mut();
+        for face in set.db.faces() {
+            if face_key(face).is_none_or(|k| !known.contains(&k)) {
+                db.push_face_info(face.clone());
+            }
+        }
+        self.fonts_complete = true;
+        let mut changed = false;
+        for i in 1..self.families.len() {
+            let resolved = resolve_family(self.fonts.db(), &self.families[i].requested);
+            if resolved != self.families[i].resolved {
+                self.families[i].resolved = resolved;
+                changed = true;
+            }
+        }
+        self.clear_text_caches();
+        changed
     }
 
     /// Nome da fonte usada de fato pela família (`None` = sans-serif padrão).
@@ -679,6 +811,23 @@ mod tests {
         let f = ts.family("Fonte Que Não Existe");
         assert!(f > 0);
         assert_eq!(ts.resolved_family(f), None);
+    }
+
+    #[test]
+    fn fast_start_then_all_fonts() {
+        let mut ts = TextSystem::new_fast(16.0, 1024);
+        let st = ts.default_style();
+        let w = ts.measure_styled("Planilha", st);
+        assert!(w > 0.0, "nenhuma fonte no início rápido");
+        let f = ts.family("Times New Roman");
+        let _ = ts.add_fonts(scan_system_fonts());
+        assert!(ts.fonts_complete());
+        // Igual a carregar tudo de uma vez: mesmas faces (sem repetidas) e famílias.
+        let mut full = TextSystem::new(16.0, 1024);
+        assert_eq!(ts.fonts.db().len(), full.fonts.db().len());
+        let g = full.family("Times New Roman");
+        assert_eq!(ts.resolved_family(f), full.resolved_family(g));
+        assert_eq!(ts.measure_styled("Planilha", st), full.measure_styled("Planilha", full.default_style()));
     }
 
     #[test]
