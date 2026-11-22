@@ -1,6 +1,6 @@
 # duck-office
 
-Suíte office nativa e focada em performance, para Windows e Linux. O primeiro app é o **duck-sheets** (planilhas compatíveis com `.xlsx`/`.xlsm`), feito para abrir arquivos gigantes sem travar.
+Suíte office nativa e focada em performance, para Windows, Linux e macOS. O primeiro app é o **duck-sheets** (planilhas compatíveis com `.xlsx`/`.xlsm`), feito para abrir arquivos gigantes sem travar.
 
 Roadmap e status das fases: [ROADMAP.md](ROADMAP.md) · Decisões de arquitetura: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
@@ -33,6 +33,12 @@ Requer Rust 1.95 ou mais novo. No Linux (Ubuntu/Debian), também:
 
 ```
 sudo apt-get install build-essential libxkbcommon-x11-0
+```
+
+No macOS, as ferramentas de linha de comando do Xcode:
+
+```
+xcode-select --install
 ```
 
 ### duck-sheets

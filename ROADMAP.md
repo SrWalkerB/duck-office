@@ -17,8 +17,8 @@ Onde o projeto está, o que já foi feito e o que falta. Os detalhes de cada dec
 
 ## ✅ F0 · Camada nativa e grade de 1 milhão de linhas
 
-- `duck-platform`: janela, teclado, mouse, DPI e clipboard (Windows e Linux).
-- `duck-gfx`: renderer 2D por instâncias sobre wgpu, 1 draw call por frame, DX12 no Windows e Vulkan no Linux, renderização fora da tela para screenshots.
+- `duck-platform`: janela, teclado, mouse, DPI e clipboard (Windows, Linux e macOS).
+- `duck-gfx`: renderer 2D por instâncias sobre wgpu, 1 draw call por frame, DX12 no Windows, Vulkan no Linux e Metal no macOS, renderização fora da tela para screenshots.
 - `duck-text`: shaping, atlas de glifos, cache de texto e caminho rápido para números.
 - `million_rows`: grade de 1 a 10 milhões de linhas.
 - Regra no CI: `platform/` não depende de nada da suíte.

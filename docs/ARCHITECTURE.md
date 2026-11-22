@@ -136,7 +136,7 @@ O pool padrão agora usa **uma thread por núcleo físico** (16 nesta máquina):
 - Segurança de memória por padrão nos parsers.
 - Paralelismo seguro (`rayon`, canais, `Send`/`Sync` verificados pelo compilador).
 - Ecossistema que cobre exatamente o que precisamos: `quick-xml`, `zip`, `zlib-rs`/`libdeflater`, `memmap2`, `winit`, `wgpu`, `cosmic-text`, `swash`, `accesskit`.
-- Um único toolchain (`cargo`) para Windows e Linux.
+- Um único toolchain (`cargo`) para Windows, Linux e macOS.
 
 **Alternativas rejeitadas.**
 
@@ -349,7 +349,9 @@ Futuras: `duck-vba`, `duck-docs`, `duck-slides`, todas reutilizando `duck-core` 
 
 **Decisão.** **Windows e Linux (X11 e Wayland) desde o primeiro dia**; macOS depois. Nenhuma escolha pode impedir o macOS: todas as dependências da UI (`winit`, `wgpu`, `cosmic-text`, `rfd`, `arboard`) já suportam macOS (Metal).
 
-- CI compila e testa em Windows e Linux em todo commit.
+**Atualização (nov/2026).** O macOS entrou: compila, passa nos testes e no `verify` contra o calamine, e roda no CI. Memória e CPU no macOS vêm de `proc_pid_rusage` e `getrusage`. Ainda sem lista de fontes essenciais (carrega todas as do sistema) e sem a configuração do mimalloc que o Linux tem.
+
+- CI compila e testa em Windows, Linux e macOS em todo commit.
 - Código específico de cada SO fica isolado em `duck-platform` (ADR-007); nenhum outro crate usa `#[cfg(windows)]` ou `#[cfg(target_os = "linux")]`.
 - Distribuição inicial: binário único no Windows (instalador depois); no Linux, AppImage e/ou Flatpak.
 
