@@ -37,4 +37,4 @@ if [ "$fail" -ne 0 ]; then
     echo "platform/ precisa continuar independente (ver docs/ARCHITECTURE.md, ADR-007)." >&2
     exit 1
 fi
-echo "ok: platform/ não depende de nenhum crate da suíte ($(echo $platform | wc -w) crates verificados)."
+echo "ok: platform/ não depende de nenhum crate da suíte ($(echo $platform | wc -w | tr -d " ") crates verificados)."
