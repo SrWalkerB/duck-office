@@ -152,3 +152,7 @@ cargo clippy --workspace --all-targets
 cargo test --workspace
 bash scripts/check-platform-deps.sh
 ```
+
+## Licença
+
+[MIT](LICENSE). Grátis para usar, copiar, modificar e distribuir.
