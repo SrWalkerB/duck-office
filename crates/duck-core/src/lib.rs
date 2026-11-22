@@ -4,9 +4,11 @@
 //!   [`BLOCK_ROWS`] linhas. Blocos vazios não alocam.
 //! - Na montagem, cada célula ocupa 11 bytes dentro do bloco: tipo (`u8`),
 //!   estilo (`u16`) e um payload de 64 bits (número `f64`, índice de string,
-//!   booleano ou erro). No fim ([`Sheet::finish`]), cada bloco é compactado:
+//!   booleano ou erro). Assim que um bloco não muda mais, ele é compactado:
 //!   estilo único vira um valor só, payloads que cabem em 32 bits (inteiros,
-//!   índices) usam 4 bytes, e blocos só com estilo não guardam payload.
+//!   índices) usam 4 bytes, e blocos só com estilo não guardam payload. Isso
+//!   acontece já durante a leitura ([`SheetPart::pack_inner`] e
+//!   [`Sheet::merge_part`]); [`Sheet::finish`] compacta o que sobrou.
 //! - Strings ficam em tabelas contíguas ([`StringTable`]); células guardam
 //!   só o índice.
 //! - Partes da mesma aba podem ser montadas em paralelo ([`SheetPart`]) e
@@ -233,8 +235,9 @@ fn zeroed_lane<T: Copy>() -> Box<[T; BLOCK_ROWS]> {
 }
 
 /// Payload em 32 bits, se couber sem perda: números inteiros na faixa de
-/// `i32` (sem o -0), strings locais com tabela < 256 e índice < 2^24, e o
-/// resto (índices, booleanos, erros) se for < 2^32.
+/// `i32` (sem o -0), strings locais com tabela < 2^12 e índice < 2^20 (uma
+/// tabela por parte de 8 MB de XML: a aba de 1,6 GB tem centenas), e o resto
+/// (índices, booleanos, erros) se for < 2^32.
 #[inline]
 fn narrow(k: u8, p: u64) -> Option<u32> {
     match k & kind::TYPE_MASK {
@@ -244,18 +247,23 @@ fn narrow(k: u8, p: u64) -> Option<u32> {
         }
         kind::LOCAL_STR => {
             let (table, index) = (p >> 32, p & 0xffff_ffff);
-            (table < 256 && index < 1 << 24).then_some(((table << 24) | index) as u32)
+            (table < 1 << TABLE_BITS && index < 1 << INDEX_BITS)
+                .then_some(((table << INDEX_BITS) | index) as u32)
         }
         _ => u32::try_from(p).ok(),
     }
 }
+
+/// Bits de tabela e de índice de uma string local compactada ([`narrow`]).
+const TABLE_BITS: u32 = 12;
+const INDEX_BITS: u32 = 20;
 
 /// Inverso de [`narrow`].
 #[inline]
 fn widen(k: u8, v: u32) -> u64 {
     match k & kind::TYPE_MASK {
         kind::NUMBER => (v as i32 as f64).to_bits(),
-        kind::LOCAL_STR => (((v >> 24) as u64) << 32) | (v & 0x00ff_ffff) as u64,
+        kind::LOCAL_STR => (((v >> INDEX_BITS) as u64) << 32) | (v & ((1 << INDEX_BITS) - 1)) as u64,
         _ => v as u64,
     }
 }
@@ -408,6 +416,37 @@ impl Slot {
         }
     }
 
+    /// Aponta as strings locais do bloco para a tabela `table` da aba (a parte
+    /// só conhece a própria tabela, a 0). Um bloco compactado continua assim.
+    fn retag(&mut self, table: u64) {
+        let local = |k: &u8| k & kind::TYPE_MASK == kind::LOCAL_STR;
+        if table == 0 || !self.kinds().iter().any(local) {
+            return;
+        }
+        if let Slot::Packed(p) = self
+            && let Packed { kind: kinds, payload: PayloadLane::Narrow(a), .. } = &mut **p
+            && table < 1 << TABLE_BITS
+        {
+            // Os índices da parte já cabem em INDEX_BITS (senão o lane seria `Wide`).
+            for (v, k) in a.iter_mut().zip(kinds.iter()) {
+                if local(k) {
+                    *v |= (table as u32) << INDEX_BITS;
+                }
+            }
+            return;
+        }
+        let packed = matches!(self, Slot::Packed(_));
+        let b = self.wide_mut();
+        for i in 0..BLOCK_ROWS {
+            if local(&b.kind[i]) {
+                b.payload[i] |= table << 32;
+            }
+        }
+        if packed {
+            self.pack();
+        }
+    }
+
     fn heap_bytes(&self) -> usize {
         match self {
             Slot::Wide(_) => std::mem::size_of::<Block>(),
@@ -445,6 +484,14 @@ impl Ids {
         match self {
             Ids::Each(a) => a,
             Ids::Same(_) => unreachable!(),
+        }
+    }
+
+    /// Troca cada id por `f(id)`, sem descompactar.
+    fn map(&mut self, f: impl Fn(u32) -> u32) {
+        match self {
+            Ids::Same(id) => *id = f(*id),
+            Ids::Each(a) => a.iter_mut().for_each(|id| *id = f(*id)),
         }
     }
 
@@ -505,6 +552,18 @@ impl Column {
 
     pub fn allocated_blocks(&self) -> usize {
         self.blocks.iter().filter(|b| b.is_some()).count()
+    }
+
+    /// Compacta os blocos de `range` que existirem.
+    fn pack_range(&mut self, range: std::ops::Range<usize>) {
+        let n = self.blocks.len();
+        for b in self.blocks[range.start.min(n)..range.end.min(n)].iter_mut().flatten() {
+            b.pack();
+        }
+        let n = self.formulas.len();
+        for f in self.formulas[range.start.min(n)..range.end.min(n)].iter_mut().flatten() {
+            f.pack();
+        }
     }
 
     /// Compacta os blocos (fim da montagem; ver [`Sheet::finish_with`]).
@@ -619,6 +678,8 @@ pub struct SheetPart {
     /// Maior linha/coluna + 1 vistas nesta parte.
     pub rows: u32,
     pub cols: u32,
+    /// Menor linha vista nesta parte (`None` = parte sem células).
+    first_row: Option<u32>,
 }
 
 impl SheetPart {
@@ -641,6 +702,24 @@ impl SheetPart {
         b.payload[i] = payload;
         self.rows = self.rows.max(row + 1);
         self.cols = self.cols.max(col + 1);
+        self.first_row = Some(self.first_row.map_or(row, |f| f.min(row)));
+    }
+
+    /// Compacta os blocos que só esta parte pode ter: os que ficam inteiros
+    /// entre a menor e a maior linha dela (as partes de uma aba cobrem faixas
+    /// de linhas que não se cruzam). Os das pontas ficam para o merge.
+    ///
+    /// Feito na thread que leu a parte, em paralelo: a aba é montada já
+    /// compactada, em vez de ocupar o dobro até o fim da leitura.
+    pub fn pack_inner(&mut self) {
+        let Some(first) = self.first_row else { return };
+        let lo = (first as usize).div_ceil(BLOCK_ROWS);
+        let hi = self.rows as usize / BLOCK_ROWS;
+        if lo < hi {
+            for col in &mut self.columns {
+                col.pack_range(lo..hi);
+            }
+        }
     }
 
     #[inline]
@@ -651,6 +730,8 @@ impl SheetPart {
         }
         let r = row as usize;
         self.columns[c].formula_block_mut(r / BLOCK_ROWS)[r % BLOCK_ROWS] = id;
+        self.rows = self.rows.max(row + 1);
+        self.first_row = Some(self.first_row.map_or(row, |f| f.min(row)));
     }
 
     /// Fórmula com texto próprio (normal, matricial, tabela de dados ou mestre
@@ -721,6 +802,8 @@ pub struct Sheet {
     pub layout: Layout,
     rows: u32,
     cols: u32,
+    /// Os blocos abaixo deste índice já foram compactados no merge.
+    sealed: usize,
 }
 
 impl Sheet {
@@ -737,6 +820,7 @@ impl Sheet {
             layout: Layout::default(),
             rows: 0,
             cols: 0,
+            sealed: 0,
         }
     }
 
@@ -755,7 +839,6 @@ impl Sheet {
     pub fn merge_part(&mut self, mut part: SheetPart) {
         // As strings da parte viram mais uma tabela da aba (sem copiar).
         let table = if part.strings.is_empty() { 0 } else { self.strings.len() as u64 };
-        let tag = table << 32;
         if !part.strings.is_empty() {
             self.strings.push(std::mem::take(&mut part.strings));
         }
@@ -792,17 +875,11 @@ impl Sheet {
             }
             for (bi, slot) in pcol.blocks.iter_mut().enumerate() {
                 let Some(mut pslot) = slot.take() else { continue };
-                let pb = pslot.wide_mut();
-                if tag != 0 {
-                    for i in 0..BLOCK_ROWS {
-                        if pb.kind[i] & kind::TYPE_MASK == kind::LOCAL_STR {
-                            pb.payload[i] |= tag;
-                        }
-                    }
-                }
+                pslot.retag(table);
                 match &mut col.blocks[bi] {
                     None => col.blocks[bi] = Some(pslot),
                     Some(existing) => {
+                        let pb = pslot.wide_mut();
                         let existing = existing.wide_mut();
                         for i in 0..BLOCK_ROWS {
                             if pb.present(i) {
@@ -819,18 +896,16 @@ impl Sheet {
             }
             for (bi, slot) in pcol.formulas.iter_mut().enumerate() {
                 let Some(mut pids) = slot.take() else { continue };
-                let pf = pids.each_mut();
                 if !identity {
-                    for id in pf.iter_mut() {
-                        if *id != 0 && *id & SHARED_BIT == 0 {
-                            *id = remap[*id as usize - 1] + 1;
-                        }
-                    }
+                    pids.map(
+                        |id| if id != 0 && id & SHARED_BIT == 0 { remap[id as usize - 1] + 1 } else { id },
+                    );
                 }
                 match &mut col.formulas[bi] {
                     None => col.formulas[bi] = Some(pids),
                     Some(existing) => {
-                        for (e, &n) in existing.each_mut().iter_mut().zip(pf.iter()) {
+                        for (i, e) in existing.each_mut().iter_mut().enumerate() {
+                            let n = pids.get(i);
                             if n != 0 {
                                 *e = n;
                             }
@@ -842,6 +917,19 @@ impl Sheet {
         self.layout.absorb(std::mem::take(&mut part.layout));
         self.rows = self.rows.max(part.rows);
         self.cols = self.cols.max(part.cols);
+        // As partes chegam na ordem do arquivo, e as linhas de uma aba vêm em
+        // ordem crescente: os blocos inteiros antes da primeira linha desta
+        // parte não mudam mais. Se um arquivo fugir disso, escrever num bloco
+        // compactado o descompacta: fica mais lento, nunca errado.
+        if let Some(first) = part.first_row {
+            let upto = first as usize / BLOCK_ROWS;
+            if upto > self.sealed {
+                for col in &mut self.columns {
+                    col.pack_range(self.sealed..upto);
+                }
+                self.sealed = upto;
+            }
+        }
     }
 
     /// Termina a montagem: ordena o layout e compacta os blocos (a aba fica
@@ -1172,8 +1260,10 @@ mod tests {
         }
         let local = (7u64 << 32) | 123_456;
         assert_eq!(widen(kind::LOCAL_STR, narrow(kind::LOCAL_STR, local).unwrap()), local);
-        assert_eq!(narrow(kind::LOCAL_STR, (256u64 << 32) | 1), None);
-        assert_eq!(narrow(kind::LOCAL_STR, 1 << 24), None);
+        let many = (4095u64 << 32) | ((1 << 20) - 1);
+        assert_eq!(widen(kind::LOCAL_STR, narrow(kind::LOCAL_STR, many).unwrap()), many);
+        assert_eq!(narrow(kind::LOCAL_STR, (4096u64 << 32) | 1), None);
+        assert_eq!(narrow(kind::LOCAL_STR, 1 << 20), None);
         assert_eq!(widen(kind::SHARED_STR | kind::FORMULA, narrow(kind::SHARED_STR, 99).unwrap()), 99);
     }
 
@@ -1231,6 +1321,84 @@ mod tests {
         sheet.merge_part(late);
         assert_eq!(sheet.cell(1, 0, &shared).value, Value::Number(7.5));
         assert_eq!(sheet.cell(2, 0, &shared).value, Value::Text("a"));
+    }
+
+    /// Aba de teste em partes: `cuts` são as linhas onde cada parte começa.
+    /// Cada parte tem a própria tabela de strings locais e modelos de fórmula.
+    fn parts(rows: u32, cuts: &[u32]) -> Vec<SheetPart> {
+        let mut bounds: Vec<u32> = cuts.to_vec();
+        bounds.push(rows);
+        bounds
+            .windows(2)
+            .map(|w| {
+                let mut p = SheetPart::new();
+                for r in w[0]..w[1] {
+                    let s = p.strings.push(&format!("s{r}"));
+                    p.set(r, 0, kind::LOCAL_STR, 3, s as u64);
+                    p.set(r, 1, kind::NUMBER | kind::FORMULA, (r % 7 == 0) as u16, (r as f64).to_bits());
+                    p.set_formula_template(r, 1, "R[0]C[-1]+1");
+                    if r % 5 == 0 {
+                        p.set(r, 2, kind::NUMBER, 0, (r as f64 + 0.5).to_bits());
+                    }
+                }
+                p
+            })
+            .collect()
+    }
+
+    fn snapshot(s: &Sheet, rows: u32) -> Vec<(String, Option<String>)> {
+        let shared = StringTable::new();
+        (0..3)
+            .flat_map(|c| (0..rows + 10).map(move |r| (r, c)))
+            .map(|(r, c)| {
+                (format!("{:?}", s.cell(r, c, &shared)), s.formula(r, c).map(|f| f.text.to_string()))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn packing_while_merging_keeps_cells() {
+        // 300 partes pequenas (300 tabelas de strings: passa das 256 de antes)
+        // e depois partes grandes, com blocos inteiros no meio de cada uma.
+        let rows = 9000;
+        let mut cuts: Vec<u32> = (0..300).map(|i| i * 10).collect();
+        cuts.extend([3000, 3500, 5100, 7777]);
+        let mut whole = Sheet::new("s");
+        whole.merge_part(parts(rows, &[0]).pop().unwrap());
+        let expected = snapshot(&whole, rows);
+
+        let mut sheet = Sheet::new("s");
+        for mut p in parts(rows, &cuts) {
+            p.pack_inner();
+            sheet.merge_part(p);
+        }
+        assert_eq!(snapshot(&sheet, rows), expected);
+        // Antes do `finish`, a aba já está compactada: só ficam abertos, em
+        // cada coluna, o bloco da fronteira com a última parte e o último.
+        let wide = |s: &Sheet| {
+            s.columns
+                .iter()
+                .flat_map(|c| c.blocks.iter().flatten())
+                .filter(|b| matches!(b, Slot::Wide(_)))
+                .count()
+        };
+        assert_eq!(wide(&sheet), 6);
+        sheet.finish();
+        assert_eq!(snapshot(&sheet, rows), expected);
+        assert_eq!(wide(&sheet), 0);
+        whole.finish();
+        assert!(sheet.heap_bytes() < whole.heap_bytes() + 64 * 1024);
+
+        // Fora de ordem (arquivo com linhas fora de ordem): mais lento, mesmo resultado.
+        let mut shuffled = Sheet::new("s");
+        let mut ps = parts(rows, &cuts);
+        ps.reverse();
+        for mut p in ps {
+            p.pack_inner();
+            shuffled.merge_part(p);
+        }
+        shuffled.finish();
+        assert_eq!(snapshot(&shuffled, rows), expected);
     }
 
     #[test]

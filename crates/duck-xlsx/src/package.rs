@@ -112,26 +112,39 @@ impl Package {
     }
 
     /// Avisa o sistema que os bytes comprimidos de `e` até `upto` não serão
-    /// mais lidos. No Linux, as páginas do arquivo mapeado saem da memória do
-    /// processo (contam no RSS) e voltam do disco se forem lidas de novo; no
-    /// Windows, não faz nada.
+    /// mais lidos: as páginas do arquivo mapeado saem da memória do processo
+    /// (contam no RSS / working set) e voltam do disco se forem lidas de novo.
+    /// A aba de 1,6 GB de XML tem ~150 MB compactados: sem isso, ficariam
+    /// todos na memória do processo até o fim da leitura.
     pub fn release(&self, e: &Entry, upto: usize) {
+        const PAGE: usize = 4096;
+        let start = e.data_offset.div_ceil(PAGE) * PAGE;
+        let end = ((e.data_offset + upto.min(e.compressed)) / PAGE) * PAGE;
+        if end <= start {
+            return;
+        }
         #[cfg(unix)]
         {
-            const PAGE: usize = 4096;
-            let start = e.data_offset.div_ceil(PAGE) * PAGE;
-            let end = ((e.data_offset + upto.min(e.compressed)) / PAGE) * PAGE;
-            if end > start {
-                // SAFETY: mapeamento só de leitura de um arquivo que não é
-                // alterado por nós: depois do MADV_DONTNEED, uma leitura traz
-                // de volta o mesmo conteúdo do arquivo.
-                let _ = unsafe {
-                    self.mmap.unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, start, end - start)
-                };
+            // SAFETY: mapeamento só de leitura de um arquivo que não é
+            // alterado por nós: depois do MADV_DONTNEED, uma leitura traz
+            // de volta o mesmo conteúdo do arquivo.
+            let _ = unsafe {
+                self.mmap.unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, start, end - start)
+            };
+        }
+        #[cfg(windows)]
+        {
+            // `VirtualUnlock` num intervalo que não está travado tira as
+            // páginas do working set (e retorna "erro": ERROR_NOT_LOCKED,
+            // o esperado). Elas continuam no cache de arquivos do sistema.
+            // SAFETY: o intervalo está dentro do mapeamento, que vive enquanto `self`.
+            unsafe {
+                windows_sys::Win32::System::Memory::VirtualUnlock(
+                    self.mmap.as_ptr().add(start).cast(),
+                    end - start,
+                );
             }
         }
-        #[cfg(not(unix))]
-        let _ = (e, upto);
     }
 
     pub fn inflater(&self, e: &Entry) -> Inflater<'_> {
@@ -165,6 +178,11 @@ pub struct Inflater<'a> {
 }
 
 impl Inflater<'_> {
+    /// Bytes comprimidos já lidos.
+    pub fn consumed(&self) -> usize {
+        self.pos
+    }
+
     /// Acrescenta bytes descompactados em `out` até ele ter `want` bytes ou a
     /// parte acabar. Retorna `true` quando a parte acabou.
     pub fn read_into(&mut self, out: &mut Vec<u8>, want: usize) -> Result<bool, Error> {

@@ -70,12 +70,15 @@ pub struct Options {
     pub inflate_pieces: usize,
     /// Inflate paralelo: tamanho de cada parte, em bytes comprimidos.
     pub inflate_part_bytes: usize,
+    /// Inflate paralelo: cada tarefa lê a própria parte em pedaços deste
+    /// tamanho, à medida que descompacta (a parte inteira tem ~15 MB de XML).
+    pub inflate_stream_bytes: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        // Valores medidos no arquivo de referência: mais que isso quase não
-        // ganha tempo e passa de 1 GB de pico.
+        // Valores medidos no arquivo de referência: mais que isso não ganha
+        // tempo (16 threads) e só aumenta o pico de memória.
         Self {
             chunk_bytes: 8 * 1024 * 1024,
             max_in_flight: 0,
@@ -83,6 +86,7 @@ impl Default for Options {
             inflate_lookahead: 16,
             inflate_pieces: 8,
             inflate_part_bytes: 1 << 20,
+            inflate_stream_bytes: 1 << 20,
         }
     }
 }

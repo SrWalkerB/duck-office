@@ -607,15 +607,79 @@ impl Merger {
     }
 }
 
-/// Parte lida na própria tarefa do inflate paralelo.
+/// Parte lida na própria tarefa do inflate paralelo, em pedaços de ~1 MB à
+/// medida que sai do inflate (a parte inteira descompactada não fica na memória).
+#[derive(Default)]
 struct FusedPart {
     /// Bytes antes do primeiro `</row>` (fim de uma linha que começou antes).
     prefix: Vec<u8>,
     /// Bytes depois do último `</row>` (começo de uma linha que termina depois).
+    /// Durante a leitura, é o começo de linha que ficou do pedaço anterior.
     suffix: Vec<u8>,
     /// As linhas inteiras do meio, já lidas (tempo, e se precisou de sequência).
     /// `None` se a parte não tem nenhum `</row>`: aí tudo está em `prefix`.
     part: Option<(SheetPart, Duration, bool)>,
+    scratch: Scratch,
+}
+
+impl FusedPart {
+    /// Lê mais um pedaço da parte (cortado em qualquer byte, até no meio de
+    /// um `</row>`).
+    fn feed(&mut self, mut bytes: &[u8]) {
+        let FusedPart { prefix, suffix, part, scratch } = self;
+        if part.is_none() {
+            let Some(f) = row_end(prefix, bytes) else {
+                prefix.extend_from_slice(bytes);
+                return;
+            };
+            prefix.extend_from_slice(&bytes[..f]);
+            bytes = &bytes[f..];
+            *part = Some((SheetPart::new(), Duration::ZERO, false));
+        }
+        let Some((part, cpu, bad)) = part else { return };
+        let t = Instant::now();
+        let mut parse = |xml: &[u8]| {
+            *bad |= parse_rows(xml, part, &mut RowState::default(), scratch).is_err();
+        };
+        if !suffix.is_empty() {
+            // Termina a linha que começou no pedaço anterior.
+            let Some(f) = row_end(suffix, bytes) else {
+                suffix.extend_from_slice(bytes);
+                return;
+            };
+            suffix.extend_from_slice(&bytes[..f]);
+            parse(suffix);
+            suffix.clear();
+            bytes = &bytes[f..];
+        }
+        match memmem::rfind(bytes, b"</row>") {
+            Some(l) => {
+                parse(&bytes[..l + 6]);
+                suffix.extend_from_slice(&bytes[l + 6..]);
+            }
+            None => suffix.extend_from_slice(bytes),
+        }
+        // As linhas lidas até aqui não mudam mais: compacta os blocos que
+        // ficaram inteiros, ainda nesta thread.
+        part.pack_inner();
+        *cpu += t.elapsed();
+    }
+}
+
+/// Posição em `bytes` logo depois do primeiro `</row>` que termina nele,
+/// contando um que começou no fim de `before` (os bytes anteriores).
+fn row_end(before: &[u8], bytes: &[u8]) -> Option<usize> {
+    const TAG: &[u8] = b"</row>";
+    let k = before.len().min(TAG.len() - 1);
+    let n = bytes.len().min(TAG.len() - 1);
+    let mut joint = [0u8; 2 * (TAG.len() - 1)];
+    joint[..k].copy_from_slice(&before[before.len() - k..]);
+    joint[k..k + n].copy_from_slice(&bytes[..n]);
+    if let Some(p) = memmem::find(&joint[..k + n], TAG) {
+        // `k` < 6: o fim do `</row>` sempre cai em `bytes`.
+        return Some(p + TAG.len() - k);
+    }
+    memmem::find(bytes, TAG).map(|p| p + TAG.len())
 }
 
 /// Um vetor descompactado compartilhado pelas tarefas de parse. Ocupa uma vaga
@@ -712,6 +776,7 @@ fn load_sheet_with(
                 }
                 drop(chunk);
                 limiter.release();
+                part.pack_inner();
                 let cpu = tp.elapsed();
                 merger.add(my, part, cpu);
             });
@@ -727,23 +792,10 @@ fn load_sheet_with(
             // bytes ainda no cache: só as linhas inteiras do meio. O começo
             // (até o primeiro `</row>`) e o fim (depois do último) voltam para
             // serem costurados aqui com as partes vizinhas.
-            let process = |tail: &[u8]| -> FusedPart {
-                match (memmem::find(tail, b"</row>"), memmem::rfind(tail, b"</row>")) {
-                    (Some(f), Some(l)) => {
-                        let (f, l) = (f + 6, l + 6);
-                        let t = Instant::now();
-                        let mut part = SheetPart::new();
-                        let mut state = RowState::default();
-                        let mut scratch = Scratch::default();
-                        let bad = parse_rows(&tail[f..l], &mut part, &mut state, &mut scratch).is_err();
-                        FusedPart {
-                            prefix: tail[..f].to_vec(),
-                            suffix: tail[l..].to_vec(),
-                            part: Some((part, t.elapsed(), bad)),
-                        }
-                    }
-                    _ => FusedPart { prefix: tail.to_vec(), suffix: Vec::new(), part: None },
-                }
+            let process = |acc: Option<FusedPart>, bytes: &[u8]| -> FusedPart {
+                let mut fp = acc.unwrap_or_default();
+                fp.feed(bytes);
+                fp
             };
             let ti = Instant::now();
             let r = duck_deflate::inflate_parallel_process(
@@ -752,6 +804,7 @@ fn load_sheet_with(
                 duck_deflate::Options {
                     part_bytes: o.inflate_part_bytes,
                     lookahead: o.inflate_lookahead.max(1),
+                    stream_bytes: o.inflate_stream_bytes,
                 },
                 &process,
                 |piece| {
@@ -853,6 +906,7 @@ fn load_sheet_with(
                 let chunk = std::mem::replace(&mut buf, tail);
                 buf.reserve(chunk_bytes);
                 dispatch(Chunk::Owned(chunk));
+                pkg.release(entry, inf.consumed().saturating_sub(64 * 1024));
                 if eof {
                     break;
                 }
@@ -1004,6 +1058,55 @@ mod tests {
         assert_eq!(f(0, 1), None);
         // As duas fórmulas "SUM($B$1:Bn)" viram um modelo só.
         assert_eq!(sheet.formula_texts_stored(), 3);
+    }
+
+    fn part_of(xml: &[u8]) -> SheetPart {
+        let mut part = SheetPart::new();
+        let _ = parse_rows(xml, &mut part, &mut RowState::default(), &mut Scratch::default());
+        part
+    }
+
+    #[test]
+    fn fused_part_reads_any_split() {
+        // Uma parte lida em pedaços de qualquer tamanho (inclusive cortando
+        // `</row>` ao meio) tem que dar as mesmas células que a leitura inteira.
+        let mut xml = String::from("<sheetData>");
+        for r in 1..=400 {
+            xml.push_str(&format!(
+                r#"<row r="{r}"><c r="A{r}"><v>{r}</v></c><c r="B{r}" t="str"><f>A{r}&amp;"x"</f><v>t{r}</v></c><c r="C{r}" s="2"/></row>"#
+            ));
+        }
+        xml.push_str("</sheetData>");
+        let xml = xml.as_bytes();
+        let shared = StringTable::new();
+        let expected = parse_all(xml);
+        let dump = |s: &Sheet| {
+            (0..410)
+                .flat_map(|r| (0..3).map(move |c| (r, c)))
+                .map(|(r, c)| (format!("{:?}", s.cell(r, c, &shared)), duck_calc::cell_formula(s, r, c)))
+                .map(|(v, f)| (v, f.map(|f| f.into_owned())))
+                .collect::<Vec<_>>()
+        };
+        // A parte vai até o meio de uma linha; o resto do XML fica para a vizinha.
+        let end = xml.len() - 1000;
+        for step in [1, 5, 6, 7, 100, 4096, xml.len()] {
+            let mut fp: Option<FusedPart> = None;
+            for piece in xml[..end].chunks(step) {
+                let mut p = fp.take().unwrap_or_default();
+                p.feed(piece);
+                fp = Some(p);
+            }
+            let fp = fp.unwrap();
+            let (middle, _, bad) = fp.part.expect("tem linhas inteiras");
+            assert!(!bad);
+            let mut sheet = Sheet::new("t");
+            sheet.merge_part(part_of(&fp.prefix));
+            sheet.merge_part(middle);
+            let mut rest = fp.suffix.clone();
+            rest.extend_from_slice(&xml[end..]);
+            sheet.merge_part(part_of(&rest));
+            assert_eq!(dump(&sheet), dump(&expected), "pedaços de {step} bytes");
+        }
     }
 
     #[test]

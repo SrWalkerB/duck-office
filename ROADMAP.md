@@ -54,17 +54,17 @@ Feito:
 - **Plataforma**: crate novo `duck-ui` (Painter, campo de texto, abas), texto com estilos e quebra de linha, bordas tracejadas no shader.
 - **Medição**: `--bench`, `--screenshot`, `duck-bench preview` e uma planilha de vitrine sem dados reais (`duck-bench gen-showcase`) no CI.
 
-Resultado no Windows (AMD RX 9070 XT, DX12): **primeira tela com dados em 221–229 ms**, todas as 20 abas em 0,7 s, 858–1.140 fps sem vsync (p99 do frame até 4,6 ms), **memória de 441–462 MB** com tudo carregado (era 657–663 MB).
+Resultado no Windows (AMD RX 9070 XT, DX12): **primeira tela com dados em 212–245 ms**, todas as 20 abas em 0,61–0,65 s, ~980–1.160 fps sem vsync (p99 do frame até 2,3 ms), **memória de 423–437 MB** com tudo carregado (era 657–663 MB) e **pico de 517–527 MB** durante a leitura (era 954–979 MB).
 
-No Linux (WSLg, renderização por software): primeira tela em 162–182 ms, todas as abas em ~1 s, frame montado em até 3,2 ms (p99), busca em 593 mil células em 33 ms.
+No Linux (WSLg, renderização por software): primeira tela em 125–182 ms, todas as abas em 0,75–0,95 s, frame montado em até 1,2 ms (p99), busca em 593 mil células em 33 ms, memória de 401–412 MB e pico de 475–489 MB (era 652–658 MB).
 
 Para não atrasar a primeira tela, a leitura da planilha começa junto com a abertura da GPU, e só 12 fontes essenciais são carregadas no início. As outras ~340 fontes do sistema são lidas numa thread depois da primeira tela; com o cache de disco frio, isso levava até 0,6 s.
 
 Falta na F2:
 
 - [x] Medir no Windows com a GPU (21/11/2026).
-- [x] Memória abaixo de 600 MB: 441–462 MB no Windows, com os blocos de células compactados depois da leitura (dados: 396 → 198 MB).
-- [ ] Pico de memória durante a leitura (~960 MB).
+- [x] Memória abaixo de 600 MB: 423–437 MB no Windows, com os blocos de células compactados (dados: 396 → 193 MB).
+- [x] Pico de memória durante a leitura: 517–527 MB no Windows e 475–489 MB no Linux (era ~960 e ~655 MB), com a leitura completa ~15% mais rápida.
 - [ ] Abrir a GPU antes da janela existir (a GPU é o que resta no caminho da primeira tela: ~200 ms).
 - [ ] Teste manual de teclado e mouse na janela.
 - [ ] Texto girado (`textRotation`), comum em painéis.

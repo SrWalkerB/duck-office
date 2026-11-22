@@ -260,17 +260,29 @@ fn code_lengths_complete(data: &[u8], bit: u64) -> bool {
     left == 0
 }
 
+/// O que a tarefa faz com a saída em bytes (a cauda) da parte que descompactou.
+enum Tail<'a, P> {
+    /// Entrega o vetor inteiro, com 32 KB de contexto no começo, e a posição
+    /// final na entrada.
+    Whole(&'a (dyn Fn(Vec<u8>, usize) -> P + Sync)),
+    /// Processa a cauda em pedaços de ~`n` bytes à medida que descompacta
+    /// ([`inflate_parallel_process`]): só ~n bytes ficam na memória por tarefa.
+    Stream(&'a Process<'a, P>, usize),
+}
+
+/// Processa um pedaço da cauda, com o resultado dos pedaços anteriores.
+type Process<'a, P> = dyn Fn(Option<P>, &[u8]) -> P + Sync + 'a;
+
 /// Decodifica uma parte sem conhecer a janela anterior. A saída em bytes
-/// (depois que a janela fica limpa) vai para `on_tail` na própria tarefa, com
-/// os 32 KB de contexto no começo do vetor; a janela final da parte vai para
-/// `window_out`.
+/// (depois que a janela fica limpa) vai para `mode` na própria tarefa; a
+/// janela final da parte vai para `window_out`.
 fn speculate<P>(
     data: &[u8],
     from: u64,
     to: u64,
     pool: &Pool,
     expect: usize,
-    on_tail: &(dyn Fn(Vec<u8>, usize) -> P + Sync),
+    mode: &Tail<'_, P>,
     window_out: &mut Option<Box<[u8]>>,
 ) -> Option<Spec<P>> {
     let t0 = std::time::Instant::now();
@@ -288,6 +300,11 @@ fn speculate<P>(
     let mut tail_crc = crc32fast::Hasher::new();
     let mut t_crc = std::time::Duration::ZERO;
     let mut marker_end = 0usize;
+    let mut tail_len = 0u64;
+    // Resultado dos pedaços já processados (modo `Stream`) e o tempo gasto
+    // neles (fica fora dos tempos de descompactação).
+    let mut acc: Option<P> = None;
+    let mut t_proc = std::time::Duration::ZERO;
     let (end, last) = loop {
         let pos = b.bit_pos();
         if pos >= to && pos != start {
@@ -303,34 +320,57 @@ fn speculate<P>(
             let tc = std::time::Instant::now();
             tail_crc.update(&t[before..]);
             t_crc += tc.elapsed();
+            tail_len += (t.len() - before) as u64;
+            if let Tail::Stream(process, n) = mode
+                && t.len() - WINDOW >= *n
+            {
+                // Entrega o que já saiu e fica só com a janela (32 KB), que os
+                // próximos blocos ainda podem referenciar.
+                let tp = std::time::Instant::now();
+                acc = Some(process(acc.take(), &t[WINDOW..]));
+                let keep = t.len() - WINDOW;
+                t.copy_within(keep.., 0);
+                t.truncate(WINDOW);
+                t_proc += tp.elapsed();
+            }
         }
         if h.last {
             break (b.bit_pos(), true);
         }
         if !switched && head.len() >= marker_end + WINDOW {
             debug_assert!(head[head.len() - WINDOW..].iter().all(|&v| v < MARKER));
-            let mut t = pool.take(expect + WINDOW);
+            let cap = match mode {
+                Tail::Whole(_) => expect,
+                // Um bloco deflate pode passar um pouco do tamanho do pedaço.
+                Tail::Stream(_, n) => n + (1 << 20),
+            };
+            let mut t = pool.take(cap + WINDOW);
             t.extend(head[head.len() - WINDOW..].iter().map(|&v| v as u8));
             tail = Some(t);
             switched = true;
             t_head = t1.elapsed();
         }
-        if head.len() + tail.as_ref().map_or(0, Vec::len) > limit {
+        if head.len() + tail_len as usize > limit {
             if let Some(t) = tail {
                 pool.give(t);
             }
             return None;
         }
     };
-    let t_body = t1.elapsed().saturating_sub(t_crc);
+    let t_body = t1.elapsed().saturating_sub(t_crc + t_proc);
     let times = [t_find, t_head, t_body.saturating_sub(t_head), t_crc];
-    let mut tail_len = 0;
     let processed = tail.map(|t| {
         // Os últimos 32 KB do vetor (contexto incluso) são a janela para a
         // parte seguinte, mesmo que a saída em bytes seja curta.
         *window_out = Some(Box::<[u8]>::from(&t[t.len() - WINDOW..]));
-        tail_len = (t.len() - WINDOW) as u64;
-        on_tail(t, (end / 8) as usize)
+        match mode {
+            Tail::Whole(f) => f(t, (end / 8) as usize),
+            Tail::Stream(process, _) => {
+                let p = process(acc.take(), &t[WINDOW..]);
+                pool.give(t);
+                p
+            }
+        }
     });
     Some(Spec { start, end, last, head, processed, switched, tail_crc, tail_len, resolved: None, times })
 }
@@ -345,11 +385,15 @@ pub struct Options {
     pub part_bytes: usize,
     /// Quantas partes especular à frente (limita a memória).
     pub lookahead: usize,
+    /// [`inflate_parallel_process`]: tamanho dos pedaços em que cada tarefa
+    /// processa a própria saída. Sem isso, cada tarefa seguraria a parte
+    /// inteira descompactada (~15 MB de XML por MB comprimido).
+    pub stream_bytes: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { part_bytes: 1 << 20, lookahead: 16 }
+        Self { part_bytes: 1 << 20, lookahead: 16, stream_bytes: 1 << 20 }
     }
 }
 
@@ -403,13 +447,13 @@ pub fn inflate_parallel(
     opts: Options,
     mut sink: impl FnMut(Buffer) -> Result<(), String> + Send,
 ) -> Result<Report, Error> {
-    let keep = |t: Vec<u8>, input_end: usize, _: &Pool, weak: &std::sync::Weak<Pool>| Buffer {
+    let keep = |t: Vec<u8>, input_end: usize, weak: &std::sync::Weak<Pool>| Buffer {
         vec: t,
         start: WINDOW,
         pool: weak.clone(),
         input_end,
     };
-    inflate_core(data, expected_crc, opts, &keep, |piece: Piece<Buffer>| match piece {
+    inflate_core(data, expected_crc, opts, TailFn::Whole(&keep), |piece: Piece<Buffer>| match piece {
         Piece::Bytes(b) | Piece::Processed(b) => sink(b),
     })
 }
@@ -419,31 +463,38 @@ pub fn inflate_parallel(
 /// no cache), e só o resultado chega a `sink`. Para cada parte especulada,
 /// `sink` recebe primeiro `Piece::Bytes` com o começo da parte (que depende da
 /// janela anterior) e depois `Piece::Processed` com o resultado do resto.
+///
+/// `process` recebe o resto da parte em pedaços consecutivos (de cerca de
+/// [`Options::stream_bytes`], cortados em qualquer byte), em ordem, junto com
+/// o que devolveu no pedaço anterior (`None` no primeiro). O que devolve no
+/// último é o resultado da parte.
 pub fn inflate_parallel_process<P: Send>(
     data: &[u8],
     expected_crc: Option<u32>,
     opts: Options,
-    process: &(dyn Fn(&[u8]) -> P + Sync),
+    process: &(dyn Fn(Option<P>, &[u8]) -> P + Sync),
     sink: impl FnMut(Piece<P>) -> Result<(), String> + Send,
 ) -> Result<Report, Error> {
-    let run = |t: Vec<u8>, _: usize, pool: &Pool, _: &std::sync::Weak<Pool>| {
-        let q = process(&t[WINDOW..]);
-        pool.give(t);
-        q
-    };
-    inflate_core(data, expected_crc, opts, &run, sink)
+    let n = opts.stream_bytes.max(64 * 1024);
+    inflate_core(data, expected_crc, opts, TailFn::Stream(process, n), sink)
 }
 
-/// O que fazer, na própria tarefa, com a cauda de cada parte (bytes com 32 KB
-/// de contexto no começo; posição final na entrada; pool; referência ao pool).
-type MakeTail<'a, P> = dyn Fn(Vec<u8>, usize, &Pool, &std::sync::Weak<Pool>) -> P + Sync + 'a;
+/// O que fazer, na própria tarefa, com a cauda de cada parte.
+enum TailFn<'a, P> {
+    /// Bytes com 32 KB de contexto no começo; posição final na entrada;
+    /// referência ao pool (para o vetor voltar a ele quando for descartado).
+    Whole(&'a Keep<'a, P>),
+    Stream(&'a Process<'a, P>, usize),
+}
 
-/// Núcleo comum: `make_tail` decide o que a cauda de cada parte vira.
+type Keep<'a, P> = dyn Fn(Vec<u8>, usize, &std::sync::Weak<Pool>) -> P + Sync + 'a;
+
+/// Núcleo comum: `tail_fn` decide o que a cauda de cada parte vira.
 fn inflate_core<P: Send>(
     data: &[u8],
     expected_crc: Option<u32>,
     opts: Options,
-    make_tail: &MakeTail<'_, P>,
+    tail_fn: TailFn<'_, P>,
     mut sink: impl FnMut(Piece<P>) -> Result<(), String> + Send,
 ) -> Result<Report, Error> {
     let part_bits = (opts.part_bytes.max(64 * 1024) as u64) * 8;
@@ -468,12 +519,21 @@ fn inflate_core<P: Send>(
     // XML de planilha comprime ~15:1; folga para não realocar.
     let expect = opts.part_bytes.max(64 * 1024) * 20;
     let weak = std::sync::Arc::downgrade(&pool);
-    let on_tail = |t: Vec<u8>, input_end: usize| -> P { make_tail(t, input_end, &pool, &weak) };
+    let whole = |t: Vec<u8>, input_end: usize| -> P {
+        match tail_fn {
+            TailFn::Whole(f) => f(t, input_end, &weak),
+            TailFn::Stream(..) => unreachable!(),
+        }
+    };
+    let mode = match tail_fn {
+        TailFn::Whole(_) => Tail::Whole(&whole),
+        TailFn::Stream(f, n) => Tail::Stream(f, n),
+    };
     let result = rayon::scope(|s| -> Result<(), Error> {
         let pool_ref: &Pool = &pool;
         let slots = &slots;
         let windows = &windows;
-        let on_tail: &(dyn Fn(Vec<u8>, usize) -> P + Sync) = &on_tail;
+        let mode = &mode;
         // Quem entrega a saída dorme enquanto espera; as especulações o acordam.
         let consumer = std::thread::current();
         let mut next_spawn = 1usize;
@@ -483,8 +543,7 @@ fn inflate_core<P: Send>(
                 let consumer = consumer.clone();
                 s.spawn(move |_| {
                     let mut my_window = None;
-                    let r =
-                        speculate(data, bound(k), bound(k + 1), pool_ref, expect, on_tail, &mut my_window);
+                    let r = speculate(data, bound(k), bound(k + 1), pool_ref, expect, mode, &mut my_window);
                     *slots[k].1.lock().unwrap() = r;
                     // Resolve a própria parte com a janela da anterior (se já
                     // existe) e a seguinte com a própria janela (se ela já terminou).
@@ -718,10 +777,15 @@ mod tests {
         let mut out = Vec::new();
         let rep = pool
             .install(|| {
-                inflate_parallel(data, Some(crc), Options { part_bytes: part, lookahead: 6 }, |b| {
-                    out.extend_from_slice(&b);
-                    Ok(())
-                })
+                inflate_parallel(
+                    data,
+                    Some(crc),
+                    Options { part_bytes: part, lookahead: 6, ..Default::default() },
+                    |b| {
+                        out.extend_from_slice(&b);
+                        Ok(())
+                    },
+                )
             })
             .unwrap();
         (out, rep)
@@ -788,19 +852,23 @@ mod tests {
 
     #[test]
     fn process_in_task_preserves_order() {
-        // Processar a cauda na própria tarefa (aqui: copiar) e remontar em ordem
-        // tem que dar exatamente a saída original.
+        // Processar a cauda na própria tarefa (aqui: copiar, em pedaços menores
+        // que a parte) e remontar em ordem tem que dar exatamente a saída original.
         let src = xml(60_000);
         let z = deflate(&src, 6);
         let pool = rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
         let mut out = Vec::new();
-        let copy = |t: &[u8]| t.to_vec();
+        let copy = |acc: Option<Vec<u8>>, t: &[u8]| {
+            let mut v = acc.unwrap_or_default();
+            v.extend_from_slice(t);
+            v
+        };
         let rep = pool
             .install(|| {
                 inflate_parallel_process(
                     &z,
                     Some(crc32fast::hash(&src)),
-                    Options { part_bytes: 64 * 1024, lookahead: 6 },
+                    Options { part_bytes: 64 * 1024, lookahead: 6, stream_bytes: 64 * 1024 },
                     &copy,
                     |piece| {
                         match piece {

@@ -146,6 +146,9 @@ fn options(args: &[String]) -> Options {
     if let Some(kb) = flag(args, "--part-kb").and_then(|v| v.parse::<usize>().ok()) {
         o.inflate_part_bytes = kb * 1024;
     }
+    if let Some(kb) = flag(args, "--stream-kb").and_then(|v| v.parse::<usize>().ok()) {
+        o.inflate_stream_bytes = kb * 1024;
+    }
     o
 }
 
@@ -532,7 +535,7 @@ fn cmd_inflate(args: &[String]) -> Res {
             duck_deflate::inflate_parallel(
                 data,
                 Some(e.crc32),
-                duck_deflate::Options { part_bytes: part_mb << 20, lookahead },
+                duck_deflate::Options { part_bytes: part_mb << 20, lookahead, ..Default::default() },
                 |b| {
                     let piece = b.bytes();
                     same &= reference.get(pos..pos + piece.len()) == Some(piece);
@@ -581,7 +584,7 @@ fn cmd_inflate(args: &[String]) -> Res {
             duck_deflate::inflate_parallel(
                 data,
                 Some(e.crc32),
-                duck_deflate::Options { part_bytes: part_mb << 20, lookahead },
+                duck_deflate::Options { part_bytes: part_mb << 20, lookahead, ..Default::default() },
                 |b| {
                     total += b.len();
                     Ok(())

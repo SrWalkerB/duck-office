@@ -226,7 +226,7 @@ Futuras: `duck-vba`, `duck-docs`, `duck-slides`, todas reutilizando `duck-core` 
 
    - O inflate produz fatias do XML descompactado. Cada fatia é cortada numa fronteira `<row ` (achada com busca SIMD), então **cada pedaço é autocontido** e vai para um núcleo diferente.
    - As linhas trazem o próprio número (`r="12345"`), e as células só guardam ids de string e de estilo. Por isso cada thread monta os seus blocos sem esperar as outras, e a emenda final é só ligar ponteiros, não copiar dados.
-   - O inflate de uma parte é sequencial por natureza. Para partes grandes (≥ 8 MB comprimidos) entra o **inflate paralelo especulativo** do `duck-deflate` (técnica do rapidgzip): decodificação de várias partes ao mesmo tempo sem conhecer a janela anterior, marcadores resolvidos em ordem, conferência pelo CRC32 do zip e volta automática ao zlib-rs se algo não bater.
+   - O inflate de uma parte é sequencial por natureza. Para partes grandes (≥ 8 MB comprimidos) entra o **inflate paralelo especulativo** do `duck-deflate` (técnica do rapidgzip): decodificação de várias partes ao mesmo tempo sem conhecer a janela anterior, marcadores resolvidos em ordem, conferência pelo CRC32 do zip e volta automática ao zlib-rs se algo não bater. Cada tarefa lê as linhas da própria parte em pedaços de 1 MB à medida que descompacta, e os blocos que ficam inteiros já são compactados ali: nem o XML descompactado nem a aba sem compactar ficam inteiros na memória.
 
 3. **Partes independentes em paralelo**: `sharedStrings`, `styles` e todas as abas carregam ao mesmo tempo (as células só referenciam ids, então não há dependência de ordem). **A aba ativa tem prioridade** no escalonador. A grade é pintada assim que as primeiras linhas chegam (**carga progressiva**); o resto continua em background e a barra de rolagem cresce conforme carrega.
 4. **Abas não visitadas podem ficar lazy** (carregadas ao clicar), com pré-carga em background quando a CPU estiver livre.
@@ -529,7 +529,7 @@ Pendências da F0:
 
 Entregue em `crates/`:
 
-- **`duck-core`**: armazenamento colunar em blocos de 1024 linhas (11 bytes por célula: tipo, estilo `u16`, payload de 64 bits; compactados no fim da leitura desde a F2), tabelas de strings contíguas, estilos (`cellXfs`, fontes, preenchimentos, formatos de número) e montagem de abas por partes (`SheetPart` + `merge_part` em ordem fixa).
+- **`duck-core`**: armazenamento colunar em blocos de 1024 linhas (11 bytes por célula: tipo, estilo `u16`, payload de 64 bits; compactados durante a leitura desde a F2), tabelas de strings contíguas, estilos (`cellXfs`, fontes, preenchimentos, formatos de número) e montagem de abas por partes (`SheetPart` + `merge_part` em ordem fixa).
 - **`duck-par`**: pool com número de threads escolhido, limitador de pedaços em memória que executa trabalho enquanto espera (não trava com 1 thread) e corte de buffers por busca SIMD.
 - **`duck-xlsx`**: zip mapeado em memória; strings compartilhadas lidas em paralelo por fronteiras de `</si>`; estilos; todas as abas ao mesmo tempo (maiores primeiro); abas grandes em pedaços de 8 MB cortados depois de `</row>`, cada um numa thread; aba sem número de linha relida em sequência.
 - **`duck-bench`**: `open`, `sweep` (um processo por rodada), `verify` (compara cada célula com o `calamine`, um leitor independente, sem expor o conteúdo das células no relatório) e `gen` (planilha sintética com o perfil da referência).
@@ -691,14 +691,14 @@ Entregue: o app **`apps/duck-sheets`** abre `.xlsx`/`.xlsm` numa janela nativa, 
 | Pacote + estilos + strings + prévia da aba ativa | 15 ms (`duck-bench preview`) | — | — |
 | Arquivo aberto + prévia (processo inteiro) | 68–70 ms | — | — |
 | Abertura da GPU (instância + adaptador / device) | 200–206 ms (95–102 / 37–38 ms) | — | — |
-| **Primeira tela com dados** (processo inteiro) | **221–229 ms** | **162–182 ms** (aba pequena ou a de 593 mil linhas) | < 300 ms |
+| **Primeira tela com dados** (processo inteiro) | **212–245 ms** | **162–182 ms** (aba pequena ou a de 593 mil linhas) | < 300 ms |
 | Aba ativa inteira | 0,22 s (aba pequena) | 0,18 s (aba pequena) / 0,74 s (593 mil linhas) | — |
-| Todas as 20 abas | 0,73–0,75 s | 0,90–1,02 s | — |
+| Todas as 20 abas | 0,61–0,65 s | 0,75–0,95 s | — |
 | Montagem do frame, p50 / p99 (scroll, saltos, horizontal) | 0,5–0,6 / 0,6–2,5 ms | 1,5–2,0 / 2,3–3,2 ms | < 16 ms |
 | Frame inteiro, p99 / pior | 1,4–4,7 / 9,1 ms | — | < 16 ms |
 | Frames por segundo sem vsync | 866–1.147 | 74–455 (a CPU também rasteriza) | 60+ |
 | Busca de um texto presente em 593.557 células | — | 33 ms | — |
-| Memória com tudo carregado / pico | **441–462 / 954–979 MB** (privada: 407–429 MB) | 608–643 / 790–854 MB (antes da compactação) | < 600 MB |
+| Memória com tudo carregado / pico | **423–437 / 517–527 MB** (privada: 390–403 MB) | 401–412 / 475–489 MB (privada: 282–294 MB) | < 600 MB |
 
 A conferência contra o calamine continua com **0 divergências** (24,2 milhões de células, 10,1 milhões de fórmulas, 29 mesclagens). Uma planilha de vitrine sem dados reais (`duck-bench gen-showcase`) cobre formatos, bordas, painéis e abas, e entrou no CI.
 
@@ -711,10 +711,14 @@ O que a F2 ensinou:
 - **Formatos contábeis** precisam do preenchimento `*` para parecerem os do Excel; sem ele, "R$" e o número ficam colados.
 - **Varrer as fontes do sistema atrasava a primeira tela no Windows.** O `FontSystem::new()` do cosmic-text lê as ~350 fontes instaladas: ~170 ms com o cache de disco quente e **~600 ms com ele frio** (primeira rodada depois de compilar: primeira tela em 651 ms). E a leitura da planilha só começava depois das fontes e da GPU. Agora o `duck-text` começa com 12 fontes essenciais (`TextSystem::new_fast`: Segoe UI, Calibri e Arial), o resto é lido numa thread depois da primeira tela e entra com `TextSystem::add_fonts` sem invalidar o atlas (as faces mantêm o id), e a leitura da planilha começa junto com a abertura da GPU. O caminho crítico ficou sendo só a GPU (~200 ms).
 - **A memória no Windows passava da meta (655 MB) e quase toda era do modelo.** Medida separando a privada da compartilhada: o driver da placa ocupa ~135 MB privados com qualquer arquivo (DX12 e Vulkan parecidos), os dados ~396 MB e o resto era sobra do alocador. Nos 25 mil blocos de 11 KB do arquivo de referência, 83% têm um estilo só, 17% não têm valor (só estilo), 72% têm valores que cabem em 32 bits (inteiros, índices de string) e 70% dos blocos de fórmula repetem o mesmo id. Agora `Sheet::finish` compacta cada bloco (estilo único vira um valor; payload de 0, 32 ou 64 bits; ids de fórmula iguais viram um só), em paralelo por coluna: **dados de 396 para 198 MB**, processo de 655 para ~450 MB, leitura com o mesmo tempo e 0 divergências. Escrever num bloco compactado o descompacta (base para a edição da F3). Percorrer todas as células ficou 2,4× mais rápido (126 → 53 ms), porque `for_each_value` decodifica direto do bloco em vez de procurá-lo de novo a cada célula. E, no fim da leitura, o `mi_collect` roda em cada thread do pool: as páginas livres ficavam presas nas threads paradas (~30 MB).
+- **O pico da leitura (~960 MB no app, 820–860 MB no `duck-bench`) tinha três causas**, todas na aba de 1,6 GB de XML:
+  - *A aba só era compactada no fim* (~300 MB sem compactar). Agora cada thread compacta os blocos que ficam inteiros dentro da própria parte (`SheetPart::pack_inner`), e o merge, que recebe as partes na ordem do arquivo, compacta os da fronteira assim que a parte seguinte chega. Se as linhas vierem fora de ordem, escrever num bloco compactado o descompacta: fica mais lento, nunca errado. As strings locais compactadas passaram a aceitar 4.096 tabelas, uma por parte (antes eram 256; a aba gigante tem mais de 400 partes).
+  - *O arquivo mapeado ficava inteiro na memória do processo no Windows* (~150 MB compactados da aba). O `Package::release` já tirava as páginas lidas no Linux (`MADV_DONTNEED`); no Windows agora usa `VirtualUnlock`, que tira do working set páginas que não estão travadas (elas continuam no cache de arquivos do sistema).
+  - *Cada tarefa do inflate paralelo segurava a parte inteira descompactada* (~15 MB × 16 tarefas). Agora `inflate_parallel_process` entrega a saída em pedaços de 1 MB, guardando só a janela de 32 KB entre eles, e a leitura das linhas emenda os pedaços (até um `</row>` cortado ao meio).
+  - Resultado no `duck-bench open` (16 threads): **pico de 820–860 para 352–373 MB** e leitura de 465–480 para **369–419 ms** (pedaços de 1 MB cabem no cache, o que deixou o parse mais rápido). Com 4 e 8 threads o pico também cai à metade e a leitura fica 7–10% mais rápida; no Linux, 493–535 para 321–338 MB e 568–651 para 489–497 ms. No app: pico de 954–979 para 517–527 MB no Windows e de 652–658 para 475–489 MB no Linux, 0 divergências nos dois.
 
 Pendências da F2:
 
-- **Pico de memória durante a leitura**: ~960 MB (pedaços de XML descompactados e blocos ainda sem compactar, em todas as threads ao mesmo tempo).
 - **Abrir a GPU** é agora o caminho crítico da primeira tela (~200 ms, dos quais ~100 ms em instância + adaptador). Alavanca: criar instância, adaptador e device numa thread antes de a janela existir (~45 ms), e só a superfície depois.
 - **Teclado e mouse** foram testados só por código (cópia em TSV, Ctrl+setas, busca, referências). Falta o teste manual na janela.
 - **Ainda não suportados**: texto girado (`textRotation`, comum em painéis), formatação condicional (`dxf`), estilo de linha (`<row s customFormat>`), texto com várias fontes na mesma célula (rich text), redimensionar colunas com o mouse, hiperlinks. Gráficos, imagens e slicers ficam para a F5.
