@@ -1364,7 +1364,28 @@ pub fn process_memory() -> (u64, u64) {
     (0, 0)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn process_memory() -> (u64, u64) {
+    let current = mac_rusage().map_or(0, |r| r.ri_resident_size);
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: `getrusage` só escreve no struct passado. No macOS, `ru_maxrss`
+    // vem em bytes (no Linux seria em KB).
+    let peak =
+        if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) } == 0 { ru.ru_maxrss as u64 } else { 0 };
+    (current, peak)
+}
+
+#[cfg(target_os = "macos")]
+fn mac_rusage() -> Option<libc::rusage_info_v4> {
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    // SAFETY: com RUSAGE_INFO_V4, `proc_pid_rusage` escreve um `rusage_info_v4`.
+    let rc = unsafe {
+        libc::proc_pid_rusage(std::process::id() as i32, libc::RUSAGE_INFO_V4, (&raw mut info).cast())
+    };
+    (rc == 0).then_some(info)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn process_memory() -> (u64, u64) {
     let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     let kb = |key: &str| {
@@ -1396,7 +1417,14 @@ pub fn private_memory() -> u64 {
     0
 }
 
-#[cfg(not(windows))]
+/// No macOS, a "pegada física" (phys_footprint): é o que o Monitor de
+/// Atividade mostra como "Memória".
+#[cfg(target_os = "macos")]
+pub fn private_memory() -> u64 {
+    mac_rusage().map_or(0, |r| r.ri_phys_footprint)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn private_memory() -> u64 {
     let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     s.lines()

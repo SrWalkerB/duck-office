@@ -35,7 +35,27 @@ pub fn process() -> Mem {
     Mem { current: kb("VmRSS:"), peak: kb("VmHWM:") }
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+pub fn process() -> Mem {
+    let mut info: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    // SAFETY: com RUSAGE_INFO_V4, `proc_pid_rusage` escreve um `rusage_info_v4`.
+    let rc = unsafe {
+        libc::proc_pid_rusage(std::process::id() as i32, libc::RUSAGE_INFO_V4, (&raw mut info).cast())
+    };
+    let current = if rc == 0 { info.ri_resident_size } else { 0 };
+    // No macOS, `ru_maxrss` vem em bytes (no Linux seria em KB).
+    let peak = rusage().map_or(0, |ru| ru.ru_maxrss as u64);
+    Mem { current, peak }
+}
+
+#[cfg(target_os = "macos")]
+fn rusage() -> Option<libc::rusage> {
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: `getrusage` só escreve no struct passado.
+    (unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) } == 0).then_some(ru)
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn process() -> Mem {
     Mem::default()
 }
@@ -71,7 +91,13 @@ pub fn cpu_seconds() -> f64 {
     (get(11) + get(12)) / tick
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+pub fn cpu_seconds() -> f64 {
+    let t = |v: libc::timeval| v.tv_sec as f64 + v.tv_usec as f64 / 1e6;
+    rusage().map_or(0.0, |ru| t(ru.ru_utime) + t(ru.ru_stime))
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn cpu_seconds() -> f64 {
     0.0
 }
