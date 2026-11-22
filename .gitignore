@@ -3,3 +3,7 @@
 bench.local.toml
 *.png
 !docs/**/*.png
+!site/img/*.png
+
+# Rascunhos visuais das sessões de brainstorming.
+.superpowers/
