@@ -13,6 +13,7 @@
 
 mod cond;
 pub mod csv;
+pub mod filter;
 mod package;
 mod parts;
 #[doc(hidden)]
@@ -237,6 +238,7 @@ impl Book {
                         sheet::load_sheet(&self.pkg, e, &m.name, chunk, limiter, opts).map(|(mut sh, rep)| {
                             sh.hidden = m.hidden;
                             parts::resolve_links(&self.pkg, &m.path, &mut sh.layout.links);
+                            filter::read_tables(&self.pkg, &m.path, &mut sh.layout.tables);
                             (sh, rep)
                         })
                     }

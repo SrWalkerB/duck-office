@@ -807,6 +807,17 @@ Pendências da F3: teste manual de teclado e mouse na janela; corpus com planilh
 
 Conferido com as opções de teste (`--novo`, `--edit mesclar…`, `--menu`): mesclar, ocultar, congelar, fontes, decimais e bordas salvos e relidos com 0 divergências no calamine; round-trip do arquivo de referência continua com 0 divergências.
 
+**Segunda parte: filtro, classificar e tabelas**
+
+- **Leitura**: `<autoFilter>` da aba e as partes `xl/tables/tableN.xml` (intervalo, cabeçalho, totais, filtro, colunas e estilo). Cada `<tableColumn>` fica guardado como está, para regravar sem perder fórmulas de coluna calculada e outros atributos.
+- **Filtro** (`apps/duck-sheets/src/filter.rs`): a lista de valores de uma coluna é o texto mostrado nas células (o que o Excel compara), calculado em pedaços de 8 mil linhas em paralelo e só com as linhas que passam nos filtros das outras colunas. Aplicar grava o critério (`Command::SetFilter`) e esconde as linhas que não passam (`Command::RowsHidden`), num passo de desfazer só.
+- **Ocultar em massa**: um filtro pode esconder centenas de milhares de linhas. `Sheet::set_rows_hidden` refaz a lista de linhas numa passada (antes, uma inserção ordenada por linha), e a tela é refeita de uma vez quando a mudança passa de 2 mil linhas (ajustar uma a uma refaz as somas de alturas a cada vez: quadrático). A tela agora só olha as linhas e colunas que o comando mudou, não todas as mudadas desde o último salvamento.
+- **Classificar** (`Command::SortRows`): as chaves são extraídas e ordenadas em paralelo (`par_sort_by`, estável) na ordem do Excel (números, textos sem diferenciar maiúsculas e acentos, lógicos, erros, vazias por último); a permutação é aplicada coluna por coluna em paralelo, direto nos blocos, sem marcar célula por célula. O desfazer é a permutação inversa. Ao salvar, a faixa ordenada é regravada linha a linha a partir do modelo (`Edits::rewrite`); as fórmulas andam com as linhas como modelos relativos, como no Excel.
+- **Tabelas**: o estilo (`TableStyleLight/Medium/DarkN`) vira cabeçalho, faixas e linha do cabeçalho com as cores do tema (`tablestyle.rs`), por baixo da formatação da própria célula e da condicional. Editar o texto do cabeçalho atualiza o nome da coluna; inserir/apagar linhas e colunas ajusta o intervalo e as colunas da tabela, e uma coluna nova ganha nome e cabeçalho (o Excel recusa a tabela se o cabeçalho e o nome divergirem).
+- **Gravador**: `<autoFilter>` da aba regravado no lugar do esquema; partes de tabela remendadas (intervalo, filtro, colunas); linhas classificadas regravadas inteiras.
+
+A vitrine ganhou uma tabela do Excel com filtro (aba "Recursos"), que entra no round-trip do CI.
+
 ---
 
 ## Questões em aberto

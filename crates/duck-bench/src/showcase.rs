@@ -132,7 +132,7 @@ pub fn write(path: &Path) -> std::io::Result<()> {
     put(
         &mut z,
         "[Content_Types].xml",
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet4.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet4.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/></Types>"#,
     )?;
     put(
         &mut z,
@@ -163,7 +163,12 @@ pub fn write(path: &Path) -> std::io::Result<()> {
     put(
         &mut z,
         "xl/worksheets/_rels/sheet4.xml.rels",
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/" TargetMode="External"/></Relationships>"#,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/" TargetMode="External"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/></Relationships>"#,
+    )?;
+    put(
+        &mut z,
+        "xl/tables/table1.xml",
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Tabela1" displayName="Estoque" ref="A21:D27" totalsRowShown="0"><autoFilter ref="A21:D27"/><tableColumns count="4"><tableColumn id="1" name="Produto"/><tableColumn id="2" name="Categoria"/><tableColumn id="3" name="Qtde"/><tableColumn id="4" name="Preço"/></tableColumns><tableStyleInfo name="TableStyleMedium2" showFirstColumn="0" showLastColumn="0" showRowStripes="1" showColumnStripes="0"/></table>"#,
     )?;
     let mut ss = format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="{0}" uniqueCount="{0}">"#,
@@ -326,7 +331,31 @@ fn recursos(st: &mut Strings) -> String {
     s(&mut x, st, "C18", 29, "https://example.com/");
     x.push_str(r#"</row><row r="19">"#);
     s(&mut x, st, "A19", 30, "Fonte tachada");
-    x.push_str("</row></sheetData>");
+    x.push_str("</row>");
+    // Tabela do Excel com filtro (estilo Médio 2, faixas alternadas).
+    x.push_str(r#"<row r="21">"#);
+    for (col, h) in ["A", "B", "C", "D"].iter().zip(["Produto", "Categoria", "Qtde", "Preço"]) {
+        s(&mut x, st, &format!("{col}21"), 0, h);
+    }
+    x.push_str("</row>");
+    let itens = [
+        ("Caneta", "Papelaria", 120.0, 2.5),
+        ("Caderno", "Papelaria", 45.0, 18.9),
+        ("Café", "Copa", 12.0, 24.0),
+        ("Açúcar", "Copa", 8.0, 6.75),
+        ("Grampeador", "Papelaria", 6.0, 32.0),
+        ("Copo", "Copa", 300.0, 0.35),
+    ];
+    for (k, (p, c, q, v)) in itens.iter().enumerate() {
+        let r = 22 + k;
+        let _ = write!(x, r#"<row r="{r}">"#);
+        s(&mut x, st, &format!("A{r}"), 0, p);
+        s(&mut x, st, &format!("B{r}"), 0, c);
+        n(&mut x, &format!("C{r}"), 0, *q);
+        n(&mut x, &format!("D{r}"), 0, *v);
+        x.push_str("</row>");
+    }
+    x.push_str("</sheetData>");
     x.push_str(r#"<conditionalFormatting sqref="A6:A15"><cfRule type="colorScale" priority="1"><colorScale><cfvo type="min"/><cfvo type="percentile" val="50"/><cfvo type="max"/><color rgb="FFF8696B"/><color rgb="FFFFEB84"/><color rgb="FF63BE7B"/></colorScale></cfRule></conditionalFormatting>"#);
     x.push_str(r#"<conditionalFormatting sqref="B6:B15"><cfRule type="dataBar" priority="2"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar></cfRule></conditionalFormatting>"#);
     x.push_str(r#"<conditionalFormatting sqref="C6:C15"><cfRule type="iconSet" priority="3"><iconSet iconSet="3Arrows"><cfvo type="percent" val="0"/><cfvo type="percent" val="33"/><cfvo type="percent" val="67"/></iconSet></cfRule></conditionalFormatting>"#);
@@ -334,7 +363,7 @@ fn recursos(st: &mut Strings) -> String {
     x.push_str(r#"<conditionalFormatting sqref="E6:E15"><cfRule type="expression" dxfId="1" priority="5"><formula>MOD(ROW(),2)=0</formula></cfRule></conditionalFormatting>"#);
     x.push_str(r#"<conditionalFormatting sqref="F6:F15"><cfRule type="duplicateValues" dxfId="0" priority="6"/></conditionalFormatting>"#);
     x.push_str(r#"<conditionalFormatting sqref="G6:G15"><cfRule type="top10" dxfId="2" priority="7" rank="3"/></conditionalFormatting>"#);
-    x.push_str(r#"<hyperlinks><hyperlink ref="A18" location="Vitrine!D5" display="Ir para Vitrine!D5"/><hyperlink ref="C18" r:id="rId1" tooltip="Site de exemplo"/></hyperlinks></worksheet>"#);
+    x.push_str(r#"<hyperlinks><hyperlink ref="A18" location="Vitrine!D5" display="Ir para Vitrine!D5"/><hyperlink ref="C18" r:id="rId1" tooltip="Site de exemplo"/></hyperlinks><tableParts count="1"><tablePart r:id="rId2"/></tableParts></worksheet>"#);
     x
 }
 

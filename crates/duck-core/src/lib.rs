@@ -27,7 +27,10 @@ use std::collections::HashMap;
 
 pub use cond::{CfApply, CfCtx, CfKind, CfOp, CfRule, CfState, Cfvo, CfvoKind, Period, TextOp};
 pub use edit::{CellChange, CellValue, Command, Edits, OpsHandle, RawCell};
-pub use layout::{CellRange, ColSpec, Hyperlink, Layout, Pane, RowSpec, SheetView};
+pub use layout::{
+    AutoFilter, CellRange, ColSpec, FilterColumn, FilterKind, Hyperlink, Layout, Pane, RowSpec, SheetView,
+    Table,
+};
 pub use numfmt::{Formatted, NumFmt};
 pub use shift::{Axis, FormulaOps, Shift};
 pub use styles::{
@@ -619,6 +622,39 @@ impl Column {
         for f in self.formulas[range.start.min(n)..range.end.min(n)].iter_mut().flatten() {
             f.pack();
         }
+    }
+
+    /// A linha `r0 + i` recebe o que estava em `r0 + perm[i]` (classificar).
+    fn permute(&mut self, r0: usize, perm: &[u32]) {
+        let n = perm.len();
+        let get = |c: &Column, r: usize| -> (u8, u16, u64, u32) {
+            let f = c.formula_id(r);
+            match c.get(r) {
+                Some((b, i)) => (b.kind(i), b.style(i), b.payload(i), f),
+                None => (0, 0, 0, f),
+            }
+        };
+        let old: Vec<(u8, u16, u64, u32)> = (0..n).map(|i| get(self, r0 + i)).collect();
+        if old.iter().all(|x| *x == (0, 0, 0, 0)) {
+            return;
+        }
+        let has_ids = old.iter().any(|x| x.3 != 0);
+        for (i, &p) in perm.iter().enumerate() {
+            let (k, s, pl, f) = old[p as usize];
+            let r = r0 + i;
+            let (bi, j) = (r / BLOCK_ROWS, r % BLOCK_ROWS);
+            let exists = self.blocks.get(bi).is_some_and(Option::is_some);
+            if exists || k != 0 || s != 0 {
+                let b = self.block_mut(bi);
+                b.kind[j] = k;
+                b.style[j] = s;
+                b.payload[j] = pl;
+            }
+            if has_ids && (f != 0 || matches!(self.formulas.get(bi), Some(Some(_)))) {
+                self.formula_block_mut(bi)[j] = f;
+            }
+        }
+        self.pack_range(r0 / BLOCK_ROWS..(r0 + n).div_ceil(BLOCK_ROWS));
     }
 
     /// Compacta os blocos (fim da montagem; ver [`Sheet::finish_with`]).

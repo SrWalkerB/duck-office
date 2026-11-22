@@ -305,6 +305,33 @@ pub fn parse_rows(
             pos = end;
             continue;
         }
+        if starts_tag(rest, b"autoFilter") {
+            let Some(end) = tag_end(buf, i) else { break };
+            let self_closing = buf[end - 2] == b'/';
+            let attrs = &buf[i + 11..if self_closing { end - 2 } else { end - 1 }];
+            let close = if self_closing {
+                end
+            } else {
+                memmem::find(&buf[end..], b"</autoFilter>").map_or(buf.len(), |x| end + x)
+            };
+            if part.layout.autofilter.is_none() {
+                part.layout.autofilter = crate::filter::parse_autofilter(attrs, &buf[end..close]);
+            }
+            pos = close;
+            continue;
+        }
+        if starts_tag(rest, b"tablePart") {
+            let Some(end) = tag_end(buf, i) else { break };
+            if let Some(id) = attr(&buf[i + 10..end - 1], b"r:id") {
+                // O caminho da parte é resolvido depois, pelos relacionamentos.
+                part.layout.tables.push(duck_core::Table {
+                    part: String::from_utf8_lossy(id).into_owned(),
+                    ..Default::default()
+                });
+            }
+            pos = end;
+            continue;
+        }
         if starts_tag(rest, b"dimension") {
             let Some(end) = tag_end(buf, i) else { break };
             part.layout.dimension = attr(&buf[i + 10..end - 1], b"ref").and_then(parse_range);

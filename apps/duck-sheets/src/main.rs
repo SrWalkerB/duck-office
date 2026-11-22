@@ -26,12 +26,14 @@ mod app;
 mod axis;
 mod draw;
 mod edit;
+mod filter;
 mod format;
 mod loader;
 mod look;
 mod menu;
 mod ribbon;
 mod search;
+mod tablestyle;
 
 use std::path::PathBuf;
 use std::time::Instant;

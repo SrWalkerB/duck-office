@@ -123,6 +123,17 @@ impl Book {
             small.insert(self.meta.path.clone(), force_full_calc(&wb));
             rep.full_calc = true;
         }
+        // Tabelas com filtro, intervalo ou colunas mudadas.
+        for s in sheets.iter().flatten() {
+            for &t in &s.edits().tables {
+                if let Some(table) = s.layout.tables.get(t as usize)
+                    && !table.part.is_empty()
+                    && let Ok(xml) = self.pkg.read(&table.part)
+                {
+                    small.insert(table.part.clone(), patch::patch_table(&xml, table));
+                }
+            }
+        }
         if new_styles && let Some(path) = &self.meta.styles {
             let xml = self.pkg.read(path)?;
             small.insert(path.clone(), styles::patch_styles(&xml, styles));

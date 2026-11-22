@@ -485,6 +485,8 @@ pub struct SheetsApp {
     pub ribbon_tab: crate::ribbon::Tab,
     /// Arquivos abertos recentemente (menu Arquivo).
     pub recent: Vec<PathBuf>,
+    /// Painel do filtro aberto.
+    pub filter_panel: Option<crate::filter::Panel>,
     /// Arquivo temporário da planilha nova (salvar pede o lugar).
     pub untitled_path: Option<PathBuf>,
     pub new_count: u32,
@@ -556,6 +558,7 @@ impl SheetsApp {
             recent: crate::actions::load_recent(),
             untitled_path: None,
             new_count: 0,
+            filter_panel: None,
             objects_ok: false,
         }
     }
@@ -1262,6 +1265,27 @@ impl SheetsApp {
             }
             return;
         }
+        // Painel do filtro.
+        if let Some(mut panel) = self.filter_panel.take() {
+            if !panel.rect.contains(x, y) {
+                return;
+            }
+            let a = panel.areas(g.s);
+            if a.ok.contains(x, y) {
+                self.filter_panel = Some(panel);
+                self.apply_filter_panel();
+            } else if a.cancel.contains(x, y) {
+            } else if a.sort_asc.contains(x, y) || a.sort_desc.contains(x, y) {
+                let desc = a.sort_desc.contains(x, y);
+                self.sort_filter(panel.active.clone(), panel.col, desc);
+            } else if a.list.contains(x, y) {
+                panel.click_list(g.s, y);
+                self.filter_panel = Some(panel);
+            } else {
+                self.filter_panel = Some(panel);
+            }
+            return;
+        }
         // Menu aberto: clique nele escolhe; fora, só fecha.
         if let Some(pp) = self.popup.take() {
             if let Some(act) = pp.hit(&g, x, y) {
@@ -1334,6 +1358,12 @@ impl SheetsApp {
             if g.grid.contains(x, y) && self.loader.is_none() {
                 self.pick_and_open(cx);
             }
+            return;
+        }
+        // Botão de filtro num cabeçalho.
+        if let Some((b, f, col)) = self.filter_buttons(&g).into_iter().find(|b| b.0.contains(x, y)) {
+            self.commit_edit();
+            self.open_filter_panel(f, col, b);
             return;
         }
         // Barras de rolagem.
@@ -1449,7 +1479,7 @@ impl SheetsApp {
         self.mouse = (x, y);
         let Some(drag) = self.drag else {
             let g = self.geom();
-            if self.popup.is_some() || self.prompt.is_some() {
+            if self.popup.is_some() || self.prompt.is_some() || self.filter_panel.is_some() {
                 return true;
             }
             let tool = if g.toolbar.contains(x, y) {
@@ -1693,6 +1723,20 @@ impl SheetsApp {
                 Key::Escape => self.prompt = None,
                 _ => {
                     p.input.key(&key, mods, text.as_deref(), cx.clipboard());
+                }
+            }
+            return true;
+        }
+        // Painel do filtro: Enter aplica, Esc fecha, o resto é a busca.
+        if let Some(panel) = &mut self.filter_panel {
+            match key {
+                Key::Enter => self.apply_filter_panel(),
+                Key::Escape => self.filter_panel = None,
+                _ => {
+                    let r = panel.search.key(&key, mods, text.as_deref(), cx.clipboard());
+                    if r.changed {
+                        panel.scroll = 0;
+                    }
                 }
             }
             return true;
@@ -2085,6 +2129,8 @@ impl App for SheetsApp {
                 if modifiers.ctrl {
                     let step = if dy > 0.0 { 10 } else { -10 };
                     self.set_zoom(self.zoom() + step);
+                } else if let Some(panel) = self.filter_panel.as_mut().filter(|p| p.rect.contains(mx, my)) {
+                    panel.scroll_by(if dy > 0.0 { -3 } else { 3 });
                 } else if g.tabs.contains(mx, my) {
                     self.tabbar.scroll_by(-(dy as f32) * g.s, g.tabs.w());
                 } else {

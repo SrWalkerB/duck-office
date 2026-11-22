@@ -327,7 +327,13 @@ pub fn tail(orig: &[u8], sheet: &Sheet, sheet_name: &str, shifts: &[Shift]) -> V
     out.extend_from_slice(&orig[pos..]);
     if !merges_done && !sheet.layout.merges.is_empty() {
         // Sem `<mergeCells>` no original: entra no lugar do esquema.
-        return super::patch::replace_merges(&out, &super::patch::merges_xml(sheet));
+        out = super::patch::replace_merges(&out, &super::patch::merges_xml(sheet));
+    }
+    if sheet.edits().filter {
+        out = super::patch::replace_autofilter(
+            &out,
+            &super::patch::autofilter_xml(sheet.layout.autofilter.as_ref()),
+        );
     }
     out
 }

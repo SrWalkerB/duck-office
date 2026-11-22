@@ -66,13 +66,17 @@ fn read_rels(pkg: &Package, part: &str) -> Result<Vec<Rel>, Error> {
     Ok(out)
 }
 
-/// A aba tem partes ligadas que dependem das posições das células
-/// (desenhos com gráficos e imagens, tabelas, tabelas dinâmicas)?
+/// (id, caminho) dos relacionamentos internos de uma parte.
+pub(crate) fn rel_targets(pkg: &Package, part: &str) -> Vec<(String, String)> {
+    read_rels(pkg, part).map(|v| v.into_iter().map(|r| (r.id, r.target)).collect()).unwrap_or_default()
+}
+
+/// A aba tem partes ligadas que dependem das posições das células e que o
+/// duck-sheets ainda não ajusta (desenhos com gráficos e imagens, tabelas
+/// dinâmicas)? As tabelas do Excel são ajustadas.
 pub fn sheet_objects(pkg: &Package, part: &str) -> bool {
     read_rels(pkg, part).is_ok_and(|rels| {
-        rels.iter().any(|r| {
-            r.kind.ends_with("/drawing") || r.kind.ends_with("/table") || r.kind.ends_with("/pivotTable")
-        })
+        rels.iter().any(|r| r.kind.ends_with("/drawing") || r.kind.ends_with("/pivotTable"))
     })
 }
 

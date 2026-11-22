@@ -2,7 +2,7 @@
 //! painéis congelados. Tudo em base 0 e com intervalos inclusivos.
 
 /// Intervalo retangular de células (inclusivo, base 0).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct CellRange {
     pub first_row: u32,
     pub first_col: u32,
@@ -95,6 +95,102 @@ pub struct Layout {
     pub cond: Vec<crate::CfRule>,
     /// Hiperlinks, em ordem de linha depois de [`Layout::finish`].
     pub links: Vec<Hyperlink>,
+    /// Filtro automático da aba (`<autoFilter>`).
+    pub autofilter: Option<AutoFilter>,
+    /// Tabelas do Excel (`xl/tables/tableN.xml`) desta aba.
+    pub tables: Vec<Table>,
+}
+
+/// Filtro automático: o intervalo (com a linha de cabeçalho) e os
+/// critérios por coluna.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct AutoFilter {
+    pub range: CellRange,
+    pub columns: Vec<FilterColumn>,
+}
+
+/// Critério de uma coluna do filtro (`col` = deslocamento dentro do intervalo).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FilterColumn {
+    pub col: u32,
+    pub kind: FilterKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FilterKind {
+    /// Lista de valores mostrados (como aparecem na célula) e se as vazias passam.
+    Values { values: Vec<String>, blank: bool },
+    /// Outro critério (personalizado, 10 maiores, por cor, por data...):
+    /// guardado como está no arquivo (XML do `<filterColumn>`), sem edição.
+    Other(String),
+}
+
+/// Uma tabela do Excel.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Table {
+    /// Caminho da parte no pacote (`xl/tables/table1.xml`).
+    pub part: String,
+    pub name: String,
+    pub range: CellRange,
+    /// Linhas de cabeçalho (0 ou 1) e de totais.
+    pub header_rows: u32,
+    pub totals_rows: u32,
+    /// Nome do estilo (`TableStyleMedium2`...), se houver.
+    pub style: Option<String>,
+    pub row_stripes: bool,
+    pub col_stripes: bool,
+    pub first_col: bool,
+    pub last_col: bool,
+    pub filter: Option<AutoFilter>,
+    /// Nomes das colunas.
+    pub columns: Vec<String>,
+    /// O `<tableColumn>` de cada coluna como está no arquivo (atributos e
+    /// fórmulas de coluna calculada ficam intactos ao regravar).
+    pub column_xml: Vec<String>,
+}
+
+impl Table {
+    /// Linha do cabeçalho, se houver.
+    pub fn header_row(&self) -> Option<u32> {
+        (self.header_rows > 0).then_some(self.range.first_row)
+    }
+
+    /// Troca o nome da coluna `k` (texto do cabeçalho), deixando único na tabela.
+    pub fn rename_column(&mut self, k: usize, name: &str) {
+        let mut name = if name.trim().is_empty() { format!("Coluna{}", k + 1) } else { name.to_string() };
+        let taken = |n: &str, cols: &[String]| {
+            cols.iter().enumerate().any(|(i, c)| i != k && c.eq_ignore_ascii_case(n))
+        };
+        let base = name.clone();
+        let mut i = 2;
+        while taken(&name, &self.columns) {
+            name = format!("{base}{i}");
+            i += 1;
+        }
+        if let Some(c) = self.columns.get_mut(k) {
+            *c = name.clone();
+        }
+        if let Some(x) = self.column_xml.get_mut(k) {
+            *x = set_xml_attr(x, "name", &name);
+        }
+    }
+}
+
+/// Troca o valor de um atributo numa tag XML simples (`<tableColumn id="1" name="A"/>`).
+pub fn set_xml_attr(tag: &str, key: &str, value: &str) -> String {
+    let esc = value.replace('&', "&amp;").replace('<', "&lt;").replace('"', "&quot;");
+    let pat = format!(" {key}=\"");
+    match tag.find(&pat) {
+        Some(i) => {
+            let start = i + pat.len();
+            let end = tag[start..].find('"').map_or(tag.len(), |e| start + e);
+            format!("{}{}{}", &tag[..start], esc, &tag[end..])
+        }
+        None => {
+            let at = tag.find(|c: char| c.is_whitespace() || c == '/' || c == '>').unwrap_or(tag.len());
+            format!("{} {key}=\"{esc}\"{}", &tag[..at], &tag[at..])
+        }
+    }
 }
 
 /// Um `<hyperlink>`: endereço externo (já resolvido pelos relacionamentos da
@@ -128,6 +224,8 @@ impl Layout {
         self.merges.extend(other.merges);
         self.cond.extend(other.cond);
         self.links.extend(other.links);
+        self.autofilter = self.autofilter.take().or(other.autofilter);
+        self.tables.extend(other.tables);
     }
 
     /// Ordena depois de juntar todos os pedaços.

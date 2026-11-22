@@ -48,10 +48,17 @@ impl<'a> Patcher<'a> {
         let e = sheet.edits();
         let mut rows: std::collections::BTreeMap<u32, Dirty> = std::collections::BTreeMap::new();
         for (&row, cols) in &e.cells {
-            rows.insert(row, Dirty { row, cols: cols.iter().copied().collect(), height: false });
+            rows.insert(row, Dirty { row, cols: cols.iter().copied().collect(), height: false, full: false });
         }
         for &row in &e.rows {
-            rows.entry(row).or_insert(Dirty { row, cols: Vec::new(), height: false }).height = true;
+            rows.entry(row).or_insert(Dirty { row, cols: Vec::new(), height: false, full: false }).height =
+                true;
+        }
+        for &(a, b) in &e.rewrite {
+            for row in a..=b {
+                rows.entry(row).or_insert(Dirty { row, cols: Vec::new(), height: false, full: false }).full =
+                    true;
+            }
         }
         let dirty = rows.into_values().collect();
         Self {
@@ -174,14 +181,26 @@ impl<'a> Patcher<'a> {
             } else {
                 let content_end = if self_closing { tend } else { end - 6 };
                 let d = dirty.unwrap_or_default();
-                self.row(r, attrs, &seg[tend..content_end], &d.cols, d.height, out);
+                if d.full {
+                    self.row_full(r, attrs, d.height, out);
+                } else {
+                    self.row(r, attrs, &seg[tend..content_end], &d.cols, d.height, out);
+                }
             }
             self.last_row = Some(r);
             pos = end;
         }
-        // Depois de `</sheetData>`: copia o resto (com as mesclagens novas).
-        if self.phase == Phase::Tail && self.sheet.edits().merges {
-            out.extend_from_slice(&replace_merges(&seg[pos..], &merges_xml(self.sheet)));
+        // Depois de `</sheetData>`: copia o resto (com mesclagens e filtro novos).
+        let e = self.sheet.edits();
+        if self.phase == Phase::Tail && (e.merges || e.filter) {
+            let mut tail = seg[pos..].to_vec();
+            if e.merges {
+                tail = replace_merges(&tail, &merges_xml(self.sheet));
+            }
+            if e.filter {
+                tail = replace_autofilter(&tail, &autofilter_xml(self.sheet.layout.autofilter.as_ref()));
+            }
+            out.extend_from_slice(&tail);
         } else {
             out.extend_from_slice(&seg[pos..]);
         }
@@ -216,6 +235,11 @@ impl<'a> Patcher<'a> {
             }
             out.push(b'>');
             let before = out.len();
+            if d.full {
+                for c in 0..self.sheet.cols() {
+                    self.cell(d.row, c, b"", out);
+                }
+            }
             for c in d.cols {
                 self.cell(d.row, c, b"", out);
             }
@@ -231,6 +255,25 @@ impl<'a> Patcher<'a> {
     fn cell(&mut self, row: u32, col: u32, extra: &[u8], out: &mut Vec<u8>) {
         self.cells_written += 1;
         write_cell(out, self.sheet, self.shared, row, col, extra);
+    }
+
+    /// Uma linha que existia, escrita inteira a partir do modelo (o `<row>`
+    /// original fica, sem `spans`).
+    fn row_full(&mut self, r: u32, attrs: &[u8], height: bool, out: &mut Vec<u8>) {
+        out.extend_from_slice(b"<row");
+        let mut skip: Vec<&[u8]> = vec![b"spans"];
+        if height {
+            skip.extend([&b"ht"[..], b"customHeight", b"hidden"]);
+        }
+        push_attrs_except(attrs, &skip, out);
+        if height {
+            self.push_height(r, out);
+        }
+        out.push(b'>');
+        for c in 0..self.sheet.cols() {
+            self.cell(r, c, b"", out);
+        }
+        out.extend_from_slice(b"</row>");
     }
 
     /// Uma linha que existia, com células editadas (`cols`) ou reescrita inteira.
@@ -495,23 +538,131 @@ const AFTER_MERGES: [&[u8]; 23] = [
 /// O fim da aba (depois de `</sheetData>`) com `<mergeCells>` trocado por
 /// `merges` (que pode ser vazio), no lugar certo do esquema.
 pub fn replace_merges(tail: &[u8], merges: &[u8]) -> Vec<u8> {
+    replace_element(tail, b"mergeCells", merges, &AFTER_MERGES)
+}
+
+/// Como [`replace_merges`], para `<autoFilter>` (que vem antes de `<mergeCells>`).
+pub fn replace_autofilter(tail: &[u8], xml: &[u8]) -> Vec<u8> {
+    let mut after: Vec<&[u8]> = vec![b"sortState", b"dataConsolidate", b"customSheetViews", b"mergeCells"];
+    after.extend(AFTER_MERGES);
+    replace_element(tail, b"autoFilter", xml, &after)
+}
+
+/// Tira o elemento `name` (o primeiro, no nível de cima) e põe `new` antes
+/// do primeiro dos elementos de `after` que existir (ou antes do fechamento).
+fn replace_element(tail: &[u8], name: &[u8], new: &[u8], after: &[&[u8]]) -> Vec<u8> {
     let mut t = tail.to_vec();
-    if let Some(tag) = crate::xml::find_tag(&t, 0, b"mergeCells") {
+    if let Some(tag) = crate::xml::find_tag(&t, 0, name) {
         let end = if tag.self_closing {
             tag.end
         } else {
-            memmem::find(&t[tag.end..], b"</mergeCells>").map_or(t.len(), |x| tag.end + x + 13)
+            let mut close = b"</".to_vec();
+            close.extend_from_slice(name);
+            close.push(b'>');
+            memmem::find(&t[tag.end..], &close).map_or(t.len(), |x| tag.end + x + close.len())
         };
         t.drain(tag.start..end);
     }
-    let at = AFTER_MERGES
+    if new.is_empty() {
+        return t;
+    }
+    let at = after
         .iter()
         .filter_map(|n| crate::xml::find_tag(&t, 0, n).map(|x| x.start))
         .min()
         .or_else(|| memmem::rfind(&t, b"</"))
         .unwrap_or(t.len());
-    t.splice(at..at, merges.iter().copied());
+    t.splice(at..at, new.iter().copied());
     t
+}
+
+/// `<autoFilter>` do modelo (vazio se não houver).
+pub fn autofilter_xml(af: Option<&duck_core::AutoFilter>) -> Vec<u8> {
+    let mut out = Vec::new();
+    let Some(af) = af else { return out };
+    let r = af.range;
+    out.extend_from_slice(b"<autoFilter ref=\"");
+    cell_ref(r.first_row, r.first_col, &mut out);
+    out.push(b':');
+    cell_ref(r.last_row, r.last_col, &mut out);
+    out.push(b'"');
+    if af.columns.is_empty() {
+        out.extend_from_slice(b"/>");
+        return out;
+    }
+    out.push(b'>');
+    for c in &af.columns {
+        match &c.kind {
+            duck_core::FilterKind::Values { values, blank } => {
+                out.extend_from_slice(b"<filterColumn colId=\"");
+                super::cellxml::push_u32(&mut out, c.col);
+                out.extend_from_slice(b"\"><filters");
+                if *blank {
+                    out.extend_from_slice(b" blank=\"1\"");
+                }
+                if values.is_empty() {
+                    out.extend_from_slice(b"/>");
+                } else {
+                    out.push(b'>');
+                    for v in values {
+                        out.extend_from_slice(b"<filter val=\"");
+                        super::cellxml::escape_attr(v, &mut out);
+                        out.extend_from_slice(b"\"/>");
+                    }
+                    out.extend_from_slice(b"</filters>");
+                }
+                out.extend_from_slice(b"</filterColumn>");
+            }
+            duck_core::FilterKind::Other(raw) => out.extend_from_slice(raw.as_bytes()),
+        }
+    }
+    out.extend_from_slice(b"</autoFilter>");
+    out
+}
+
+/// A parte de uma tabela com o intervalo, o filtro e as colunas do modelo.
+pub fn patch_table(xml: &[u8], t: &duck_core::Table) -> Vec<u8> {
+    let Some(tag) = crate::xml::find_tag(xml, 0, b"table") else { return xml.to_vec() };
+    let mut out = Vec::with_capacity(xml.len() + 256);
+    out.extend_from_slice(&xml[..tag.start]);
+    let mut range = Vec::new();
+    cell_ref(t.range.first_row, t.range.first_col, &mut range);
+    range.push(b':');
+    cell_ref(t.range.last_row, t.range.last_col, &mut range);
+    out.extend_from_slice(b"<table");
+    crate::xml::for_each_attr(tag.attrs, |k, whole| {
+        out.push(b' ');
+        if k == b"ref" {
+            out.extend_from_slice(b"ref=\"");
+            out.extend_from_slice(&range);
+            out.push(b'"');
+        } else {
+            out.extend_from_slice(whole);
+        }
+    });
+    out.push(b'>');
+    // Corpo: filtro novo primeiro, colunas do modelo, o resto como está.
+    let body = &xml[tag.end..];
+    let mut rest = body.to_vec();
+    rest = replace_element(&rest, b"autoFilter", b"", &[]);
+    if let Some(c) = crate::xml::find_tag(&rest, 0, b"tableColumns") {
+        let end = if c.self_closing {
+            c.end
+        } else {
+            memmem::find(&rest[c.end..], b"</tableColumns>").map_or(rest.len(), |x| c.end + x + 15)
+        };
+        let mut cols = b"<tableColumns count=\"".to_vec();
+        super::cellxml::push_u32(&mut cols, t.column_xml.len() as u32);
+        cols.extend_from_slice(b"\">");
+        for x in &t.column_xml {
+            cols.extend_from_slice(x.as_bytes());
+        }
+        cols.extend_from_slice(b"</tableColumns>");
+        rest.splice(c.start..end, cols);
+    }
+    out.extend_from_slice(&autofilter_xml(t.filter.as_ref()));
+    out.extend_from_slice(&rest);
+    out
 }
 
 /// O começo da aba com o `<pane>` do primeiro `<sheetView>` trocado pelos
@@ -608,6 +759,8 @@ struct Dirty {
     cols: Vec<u32>,
     /// A altura mudou.
     height: bool,
+    /// A linha inteira é escrita a partir do modelo (classificar).
+    full: bool,
 }
 
 /// Copia os atributos (` k="v"`), menos os de `skip`.
@@ -718,6 +871,50 @@ mod tests {
         assert_eq!(back.col_width(0), Some(9.0));
         assert_eq!(back.row_height(4), Some(12.75));
         assert_eq!(back.row_height(1), None);
+    }
+
+    #[test]
+    fn filter_sort_and_table() {
+        let xml = concat!(
+            r#"<worksheet><sheetData>"#,
+            r#"<row r="1"><c r="A1" t="inlineStr"><is><t>UF</t></is></c><c r="B1" t="inlineStr"><is><t>Valor</t></is></c></row>"#,
+            r#"<row r="2"><c r="A2" t="inlineStr"><is><t>SP</t></is></c><c r="B2"><v>3</v></c></row>"#,
+            r#"<row r="3"><c r="A3" t="inlineStr"><is><t>RJ</t></is></c><c r="B3"><v>1</v></c></row>"#,
+            r#"<row r="4"><c r="A4" t="inlineStr"><is><t>MG</t></is></c></row>"#,
+            r#"</sheetData><autoFilter ref="A1:B4"/><pageMargins left="0.7"/></worksheet>"#,
+        );
+        let mut sheet = crate::parse_sheet_xml(xml.as_bytes());
+        assert!(sheet.layout.autofilter.is_some());
+        let mut af = sheet.layout.autofilter.clone().unwrap();
+        af.columns.push(duck_core::FilterColumn {
+            col: 0,
+            kind: duck_core::FilterKind::Values { values: vec!["SP".into(), "RJ".into()], blank: false },
+        });
+        duck_core::Command::SetFilter { table: None, filter: Some(af) }.apply(&mut sheet);
+        duck_core::Command::RowsHidden(vec![(3, true)]).apply(&mut sheet);
+        // Ordena as linhas 2..4 pela coluna B: RJ(1), SP(3), MG(vazia).
+        duck_core::Command::SortRows { r0: 1, c0: 0, c1: 1, perm: vec![1, 0, 2] }.apply(&mut sheet);
+        let sh = StringTable::new();
+        let mut p = Patcher::new(&sheet, &sh, false);
+        let mut out = Vec::new();
+        p.feed(xml.as_bytes(), &mut out);
+        p.finish(&mut out);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains(r#"<autoFilter ref="A1:B4"><filterColumn colId="0"><filters><filter val="SP"/><filter val="RJ"/></filters></filterColumn></autoFilter><pageMargins"#), "{out}");
+        let back = crate::parse_sheet_xml(out.as_bytes());
+        assert_eq!(back.cell(1, 0, &sh).value, duck_core::Value::Text("RJ"));
+        assert_eq!(back.cell(2, 1, &sh).value, duck_core::Value::Number(3.0));
+        assert!(back.row_hidden(3));
+        assert_eq!(back.layout.autofilter, sheet.layout.autofilter);
+
+        // Parte da tabela: intervalo, filtro e coluna renomeada.
+        let table_xml = br#"<table xmlns="x" id="1" name="T" displayName="T" ref="A1:B4"><autoFilter ref="A1:B4"/><tableColumns count="2"><tableColumn id="1" name="UF"/><tableColumn id="2" name="Valor"/></tableColumns><tableStyleInfo name="TableStyleLight1" showRowStripes="1"/></table>"#;
+        let mut t = crate::filter::parse_table(table_xml).unwrap();
+        t.range.last_row = 9;
+        t.rename_column(1, "Total");
+        t.filter = Some(duck_core::AutoFilter { range: t.range, columns: Vec::new() });
+        let patched = String::from_utf8(patch_table(table_xml, &t)).unwrap();
+        assert!(patched.contains(r#"ref="A1:B10"><autoFilter ref="A1:B10"/><tableColumns count="2"><tableColumn id="1" name="UF"/><tableColumn id="2" name="Total"/></tableColumns><tableStyleInfo"#), "{patched}");
     }
 
     #[test]

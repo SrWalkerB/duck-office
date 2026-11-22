@@ -53,6 +53,12 @@ pub enum Act {
     ColWidth,
     RowHeight,
     Autofit,
+    /// Classificar pela coluna da célula ativa (`true` = Z a A).
+    Sort(bool),
+    /// Liga/desliga o filtro.
+    Filter,
+    ClearFilter,
+    Reapply,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +106,7 @@ pub enum Tab {
     #[default]
     Home,
     Insert,
+    Data,
     View,
 }
 
@@ -309,12 +316,36 @@ const QUICK: &[Item] = &[
     b(Act::Redo, "Refazer", "Refazer (Ctrl+Y)"),
 ];
 
-const TAB_NAMES: [(&str, Option<Tab>); 4] = [
+const TAB_NAMES: [(&str, Option<Tab>); 5] = [
     ("Arquivo", None),
     ("Página Inicial", Some(Tab::Home)),
     ("Inserir", Some(Tab::Insert)),
+    ("Dados", Some(Tab::Data)),
     ("Exibir", Some(Tab::View)),
 ];
+
+const DATA: &[Group] = &[Group {
+    title: "Classificar e filtrar",
+    rows: [
+        &[
+            b(
+                Act::Sort(false),
+                "Classificar A→Z",
+                "Classificar pela coluna da célula ativa, do menor ao maior",
+            ),
+            b(
+                Act::Sort(true),
+                "Classificar Z→A",
+                "Classificar pela coluna da célula ativa, do maior ao menor",
+            ),
+        ],
+        &[
+            b(Act::Filter, "Filtro", "Ligar ou desligar o filtro (setas nos cabeçalhos)"),
+            b(Act::ClearFilter, "Limpar", "Tirar os critérios do filtro e mostrar todas as linhas"),
+            b(Act::Reapply, "Reaplicar", "Aplicar o filtro de novo depois de editar os dados"),
+        ],
+    ],
+}];
 
 /// Um botão posicionado.
 pub struct Laid {
@@ -343,6 +374,7 @@ fn groups(tab: Tab) -> &'static [Group] {
     match tab {
         Tab::Home => HOME,
         Tab::Insert => INSERT,
+        Tab::Data => DATA,
         Tab::View => VIEW,
     }
 }

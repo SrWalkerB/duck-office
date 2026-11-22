@@ -434,6 +434,26 @@ impl Sheet {
 
         // 3. Layout.
         shift_layout(&mut self.layout, s);
+        // Colunas novas dentro de uma tabela: o cabeçalho recebe o nome da
+        // coluna (o Excel exige o texto do cabeçalho igual ao nome).
+        if s.axis == Axis::Cols && s.insert {
+            let heads: Vec<(u32, u32, String)> = self
+                .layout
+                .tables
+                .iter()
+                .filter_map(|t| Some((t, t.header_row()?)))
+                .flat_map(|(t, hr)| {
+                    (s.at..s.at + s.n)
+                        .filter(|c| (t.range.first_col..=t.range.last_col).contains(c))
+                        .filter_map(move |c| {
+                            Some((hr, c, t.columns.get((c - t.range.first_col) as usize)?.clone()))
+                        })
+                })
+                .collect();
+            for (r, c, name) in heads {
+                self.set_cell(r, c, crate::CellValue::Text(name), None, None);
+            }
+        }
 
         // 4. Tamanho e o que o gravador precisa saber.
         let count = match s.axis {
@@ -445,6 +465,8 @@ impl Sheet {
         }
         self.edits.structure = true;
         self.edits.shifts.push(s);
+        self.edits.filter |= self.layout.autofilter.is_some();
+        self.edits.tables.extend(0..self.layout.tables.len() as u32);
         self.edits.values = true;
         self.edits.formulas = true;
         self.settle();
@@ -569,6 +591,56 @@ pub fn shift_layout(l: &mut Layout, s: Shift) {
         .filter_map(|h| s.range(h.range).map(|range| crate::Hyperlink { range, ..h.clone() }))
         .collect();
     l.dimension = l.dimension.and_then(|d| s.range(d));
+    let shift_filter = |f: &mut Option<crate::AutoFilter>| {
+        if let Some(af) = f.take() {
+            *f = s.range(af.range).map(|range| {
+                let mut af = af;
+                af.range = range;
+                af
+            });
+        }
+    };
+    shift_filter(&mut l.autofilter);
+    let mut tables = Vec::with_capacity(l.tables.len());
+    for mut t in std::mem::take(&mut l.tables) {
+        let Some(range) = s.range(t.range) else { continue };
+        if s.axis == Axis::Cols {
+            // Colunas inseridas/apagadas dentro da tabela: a lista de colunas acompanha.
+            let (c0, c1) = (t.range.first_col, t.range.last_col);
+            if s.insert && s.at > c0 && s.at <= c1 {
+                let k = (s.at - c0) as usize;
+                let next_id = t
+                    .column_xml
+                    .iter()
+                    .filter_map(|x| x.split("id=\"").nth(1)?.split('"').next()?.parse::<u32>().ok())
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                for j in 0..s.n as usize {
+                    let id = next_id + j as u32;
+                    t.columns.insert(k + j, String::new());
+                    t.column_xml.insert(k + j, format!("<tableColumn id=\"{id}\" name=\"\"/>"));
+                    t.rename_column(k + j, "");
+                }
+            } else if !s.insert {
+                let lo = s.at.max(c0);
+                let hi = (s.at + s.n - 1).min(c1);
+                if lo <= hi {
+                    let (a, b) = ((lo - c0) as usize, (hi - c0) as usize + 1);
+                    t.columns.drain(a..b.min(t.columns.len()));
+                    t.column_xml.drain(a..b.min(t.column_xml.len()));
+                }
+            }
+        }
+        t.range = range;
+        shift_filter(&mut t.filter);
+        if let Some(f) = &mut t.filter {
+            // O filtro da tabela cobre a tabela sem a linha de totais.
+            f.range = CellRange { last_row: range.last_row.saturating_sub(t.totals_rows), ..range };
+        }
+        tables.push(t);
+    }
+    l.tables = tables;
 }
 
 #[cfg(test)]

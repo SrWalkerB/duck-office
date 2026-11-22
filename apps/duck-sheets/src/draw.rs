@@ -54,6 +54,9 @@ struct Ctx<'a> {
     pad: f32,
     hits: &'a [(u32, u32)],
     cf: CfCtx<'a>,
+    /// Tabelas do Excel da aba: (intervalo, linhas de cabeçalho, de totais,
+    /// faixas ligadas, aparência).
+    tables: Vec<(CellRange, u32, u32, bool, crate::tablestyle::TableLook)>,
 }
 
 /// O que a formatação condicional muda numa célula (o que não vier fica do estilo).
@@ -72,6 +75,25 @@ struct Fx {
     icon: Option<(char, Rgba)>,
     /// Barra ou ícone sem o valor (`showValue="0"`).
     hide: bool,
+    /// Preenchimento do estilo da tabela: só vale se a célula não tiver um.
+    under: Option<Rgba>,
+}
+
+/// Junta a formatação condicional (por cima) com o estilo da tabela (por baixo).
+fn merge_fx(cf: Option<Fx>, t: Option<Fx>) -> Option<Fx> {
+    match (cf, t) {
+        (None, t) => t,
+        (c, None) => c,
+        (Some(mut c), Some(t)) => {
+            c.under = t.under;
+            c.color = c.color.or(t.color);
+            c.bold = c.bold.or(t.bold);
+            for (e, te) in c.edges.iter_mut().zip(t.edges) {
+                *e = e.or(te);
+            }
+            Some(c)
+        }
+    }
 }
 
 impl Ctx<'_> {
@@ -146,6 +168,29 @@ impl Ctx<'_> {
         any.then_some(fx)
     }
 
+    /// O que o estilo da tabela que contém a célula pinta nela.
+    fn table_fx(&self, r: u32, c: u32) -> Option<Fx> {
+        let &(range, header, totals, stripes, tl) = self.tables.iter().find(|t| t.0.contains(r, c))?;
+        let rgb_o = |c: Option<u32>| c.map(rgb);
+        let mut fx = Fx::default();
+        if header > 0 && r < range.first_row + header {
+            fx.under = rgb_o(tl.header_fill);
+            fx.color = rgb_o(tl.header_text);
+            fx.bold = tl.header_bold.then_some(true);
+            if let Some(line) = tl.header_line {
+                fx.edges[3] = Some(Edge { style: BorderStyle::Thin, color: rgb(line) });
+            }
+        } else if totals > 0 && r > range.last_row - totals {
+            fx.bold = Some(true);
+            fx.edges[2] = tl.header_line.map(|l| Edge { style: BorderStyle::Double, color: rgb(l) });
+        } else {
+            let k = r - (range.first_row + header);
+            fx.under = if stripes && k.is_multiple_of(2) { rgb_o(tl.band_fill) } else { rgb_o(tl.body_fill) };
+            fx.color = rgb_o(tl.body_text);
+        }
+        Some(fx)
+    }
+
     fn look_of(&self, style: u16, r: u32, c: u32) -> &Look {
         let s = if style == 0 { self.view.blank_style(r, c) } else { style };
         self.looks.get(s)
@@ -199,6 +244,7 @@ impl SheetsApp {
         let mut formula = String::new();
         self.formula_text(&mut formula);
         let active = self.active_format();
+        let filter_buttons = self.filter_buttons(&geom);
 
         let (vthumb, hthumb) = (self.vthumb(&geom), self.hthumb(&geom));
         let text = self.text.as_mut().expect("texto");
@@ -224,6 +270,15 @@ impl SheetsApp {
                     pad: (3.0 * geom.g).round().max(1.0),
                     hits,
                     cf: CfCtx { sheet, shared: &doc.strings, today: self.today },
+                    tables: sheet
+                        .layout
+                        .tables
+                        .iter()
+                        .map(|t| {
+                            let look = crate::tablestyle::table_look(t.style.as_deref(), &doc.styles);
+                            (t.range, t.header_rows, t.totals_rows, t.row_stripes, look)
+                        })
+                        .collect(),
                 };
                 // Fundo da grade.
                 p.fill(geom.grid, &geom.grid, WHITE);
@@ -453,6 +508,7 @@ impl SheetsApp {
             .popup
             .as_ref()
             .is_some_and(|m| m.owner == Some(crate::ribbon::Act::Drop(crate::ribbon::Drop::File)));
+        crate::filter::draw_buttons(&mut p, &geom, &filter_buttons, &theme);
         crate::ribbon::draw(
             &mut p,
             &geom,
@@ -465,6 +521,9 @@ impl SheetsApp {
         );
         if let Some(m) = &self.popup {
             m.draw(&mut p, &geom, ui, self.mouse, &theme);
+        }
+        if let Some(fp) = &self.filter_panel {
+            fp.draw(&mut p, &geom, ui, self.mouse, &theme);
         }
         if let Some(pr) = &self.prompt {
             pr.draw(&mut p, &geom, ui, &theme);
@@ -563,13 +622,21 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
         })
         .map(|(k, _)| k)
         .collect();
-    let fxs: Vec<Option<Fx>> = if active.is_empty() {
+    let view_rect = CellRange { first_row: r_first, first_col: c_first, last_row: r_last, last_col: c_last };
+    let tables_here = cx.tables.iter().any(|t| {
+        t.0.first_row <= view_rect.last_row
+            && view_rect.first_row <= t.0.last_row
+            && t.0.first_col <= view_rect.last_col
+            && view_rect.first_col <= t.0.last_col
+    });
+    let fxs: Vec<Option<Fx>> = if active.is_empty() && !tables_here {
         Vec::new()
     } else {
         let mut v = Vec::with_capacity(cells.len());
         for (ri, r) in rows.iter().enumerate() {
             for (ci, c) in cols.iter().enumerate() {
-                v.push(cx.fx(&active, r.i, c.i, cells[ri * nc + ci].value));
+                let t = if tables_here { cx.table_fx(r.i, c.i) } else { None };
+                v.push(merge_fx(cx.fx(&active, r.i, c.i, cells[ri * nc + ci].value), t));
             }
         }
         v
@@ -578,11 +645,14 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
     let merge_fx: Vec<Option<Fx>> = merges
         .iter()
         .map(|m| {
-            cx.fx(
-                &active,
-                m.first_row,
-                m.first_col,
-                cx.sheet.cell(m.first_row, m.first_col, cx.strings).value,
+            merge_fx(
+                cx.fx(
+                    &active,
+                    m.first_row,
+                    m.first_col,
+                    cx.sheet.cell(m.first_row, m.first_col, cx.strings).value,
+                ),
+                cx.table_fx(m.first_row, m.first_col),
             )
         })
         .collect();
@@ -605,7 +675,9 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
             }
             let cell = &cells[ri * nc + ci];
             let fx = fx_at(ri, ci);
-            if let Some(fill) = fx.and_then(|f| f.fill).or(cx.look_of(cell.style, r.i, c.i).fill) {
+            if let Some(fill) =
+                fx.and_then(|f| f.fill).or(cx.look_of(cell.style, r.i, c.i).fill).or(fx.and_then(|f| f.under))
+            {
                 p.fill(Rect::new(c.a - px, r.a - px, c.b, r.b), &clip, fill);
             }
             if let Some((frac, color)) = fx.and_then(|f| f.bar) {
@@ -621,7 +693,11 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
         if let Some((frac, color)) = fx.and_then(|f| f.bar) {
             data_bar(p, Rect::new(rect.x0, rect.y0, rect.x1 - px, rect.y1 - px), frac, color, px, &clip);
         }
-        match fx.and_then(|f| f.fill).or(cx.look_of(anchor.style, m.first_row, m.first_col).fill) {
+        match fx
+            .and_then(|f| f.fill)
+            .or(cx.look_of(anchor.style, m.first_row, m.first_col).fill)
+            .or(fx.and_then(|f| f.under))
+        {
             Some(fill) => p.fill(Rect::new(rect.x0 - px, rect.y0 - px, rect.x1, rect.y1), &clip, fill),
             // Sem preenchimento: apaga as linhas de grade de dentro.
             None => p.fill(Rect::new(rect.x0, rect.y0, rect.x1 - px, rect.y1 - px), &clip, WHITE),

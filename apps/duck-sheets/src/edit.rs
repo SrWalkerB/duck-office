@@ -52,12 +52,39 @@ pub struct History {
     pub redo: Vec<Step>,
 }
 
-/// O comando muda a estrutura (linhas/colunas inseridas ou apagadas)?
-fn structural(cmd: &Command) -> bool {
+/// O que um comando muda na tela (além das células).
+#[derive(Default)]
+pub struct Affected {
+    /// Refazer a visão inteira do layout (estrutura, ou mudanças grandes).
+    rebuild: bool,
+    rows: Vec<u32>,
+    cols: Vec<u32>,
+}
+
+/// Mais que isso de linhas/colunas com tamanho mudado: a visão é refeita de
+/// uma vez (ajustar uma a uma refaz as somas de alturas a cada vez).
+const REBUILD_OVER: usize = 2000;
+
+fn affected(cmd: &Command) -> Affected {
+    let mut a = Affected::default();
+    collect_affected(cmd, &mut a);
+    if a.rows.len() > REBUILD_OVER || a.cols.len() > REBUILD_OVER {
+        a.rebuild = true;
+        a.rows.clear();
+        a.cols.clear();
+    }
+    a
+}
+
+fn collect_affected(cmd: &Command, a: &mut Affected) {
     match cmd {
-        Command::Shift(..) => true,
-        Command::Group(v) => v.iter().any(structural),
-        _ => false,
+        Command::Shift(..) => a.rebuild = true,
+        Command::RowHeights(v) => a.rows.extend(v.iter().map(|x| x.0)),
+        Command::RowsHidden(v) => a.rows.extend(v.iter().map(|x| x.0)),
+        Command::ColWidths(v) => a.cols.extend(v.iter().map(|x| x.0)),
+        Command::ColsHidden(v) => a.cols.extend(v.iter().map(|x| x.0)),
+        Command::Group(v) => v.iter().for_each(|c| collect_affected(c, a)),
+        _ => {}
     }
 }
 
@@ -149,12 +176,26 @@ impl SheetsApp {
             self.message = "A aba está em uso; tente de novo".into();
             return false;
         };
+        let aff = affected(&cmd);
         let inverse = cmd.apply(sheet);
         doc.history.undo.push(vec![(idx, inverse)]);
         doc.history.redo.clear();
         doc.dirty = true;
-        self.after_change(idx, false);
+        self.after_change(idx, aff);
         true
+    }
+
+    /// Junta os dois últimos passos de desfazer num só (ex.: gravar o filtro
+    /// e esconder as linhas).
+    pub fn merge_last_steps(&mut self) {
+        let Some(doc) = &mut self.doc else { return };
+        let h = &mut doc.history.undo;
+        if h.len() >= 2 {
+            let mut last = h.pop().unwrap_or_default();
+            let prev = h.pop().unwrap_or_default();
+            last.extend(prev);
+            h.push(last);
+        }
     }
 
     /// Aplica vários comandos (em abas diferentes) como um passo só.
@@ -172,7 +213,7 @@ impl SheetsApp {
         let mut inverse = Vec::with_capacity(step.len());
         let mut touched = Vec::new();
         for (idx, cmd) in step {
-            let st = structural(&cmd);
+            let st = affected(&cmd);
             let Some(sheet) = doc.sheets.get_mut(idx).and_then(sheet_mut) else { continue };
             inverse.push((idx, cmd.apply(sheet)));
             touched.push((idx, st));
@@ -234,7 +275,7 @@ impl SheetsApp {
         let mut inverse = Vec::with_capacity(step.len());
         let mut touched = Vec::new();
         for (idx, cmd) in step {
-            let st = structural(&cmd);
+            let st = affected(&cmd);
             let sheet = doc.sheets.get_mut(idx).and_then(sheet_mut).expect("aba livre");
             inverse.push((idx, cmd.apply(sheet)));
             touched.push((idx, st));
@@ -254,12 +295,12 @@ impl SheetsApp {
 
     /// Depois de mudar a aba `idx`: tamanhos na tela, formatação condicional
     /// (os dados calculados das regras ficam velhos), estatísticas e título.
-    fn after_change(&mut self, idx: usize, structural: bool) {
+    fn after_change(&mut self, idx: usize, aff: Affected) {
         self.stats = None;
         let Some(doc) = &mut self.doc else { return };
         let mdw = doc.mdw;
         let slot = &mut doc.sheets[idx];
-        if structural {
+        if aff.rebuild {
             // Linhas/colunas andaram: a visão (tamanhos, mesclagens, estilos
             // de linha e coluna) é refeita do layout novo.
             if let (Some(sheet), Some(mut v)) = (slot.data.as_ref(), slot.view.take()) {
@@ -282,10 +323,9 @@ impl SheetsApp {
             v.scroll_y = v.scroll_y.max(v.rows.offset(fr) as f64);
             v.scroll_x = v.scroll_x.max(v.cols.offset(fc) as f64);
         }
-        let e = sheet.edits();
         let def_col = v.cols.default_size();
         let def_row = v.rows.default_size();
-        for &c in &e.cols {
+        for &c in &aff.cols {
             if c < v.cols.len() {
                 let px = if sheet.col_hidden(c) {
                     0
@@ -297,7 +337,7 @@ impl SheetsApp {
                 }
             }
         }
-        for &r in &e.rows {
+        for &r in &aff.rows {
             if r < v.rows.len() {
                 let px = if sheet.row_hidden(r) { 0 } else { sheet.row_height(r).map_or(def_row, row_px) };
                 if v.rows.size(r) != px {
@@ -522,6 +562,42 @@ impl SheetsApp {
                     v.cur = (r1, c1);
                 }
                 self.apply_fmt(f);
+                continue;
+            }
+            // `filtro:A1` (liga/desliga), `classificar:B2`, `classificar-desc:B2`,
+            // `filtrar=SP|RJ:B5` (critério da coluna de B5, no filtro que a contém).
+            if let Some((op, arg)) = e.split_once(':')
+                && (matches!(op, "filtro" | "classificar" | "classificar-desc") || op.starts_with("filtrar="))
+            {
+                let Some(((r0, c0), (r1, c1))) = crate::app::parse_range(arg) else { continue };
+                self.go_to(r0, c0);
+                if let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) {
+                    v.anchor = (r1, c1);
+                    v.cur = (r0, c0);
+                }
+                match op {
+                    "filtro" => self.toggle_filter(),
+                    "classificar" => self.sort_here(false),
+                    "classificar-desc" => self.sort_here(true),
+                    o => {
+                        let want: Vec<String> =
+                            o["filtrar=".len()..].split('|').map(|s| s.to_lowercase()).collect();
+                        let g = self.geom();
+                        let found = self.doc.as_ref().and_then(|d| d.current()).and_then(|(s, _)| {
+                            crate::filter::filters(s).into_iter().find(|f| f.filter.range.contains(r0, c0))
+                        });
+                        if let Some(f) = found {
+                            self.open_filter_panel(f, c0, duck_ui::Rect::new(0.0, 0.0, g.w, g.grid.y0));
+                            if let Some(p) = &mut self.filter_panel {
+                                for it in &mut p.items {
+                                    it.checked = want.contains(&it.text.to_lowercase());
+                                }
+                                p.blank = p.blank.map(|_| want.iter().any(|w| w == "(vazias)"));
+                            }
+                            self.apply_filter_panel();
+                        }
+                    }
+                }
                 continue;
             }
             // `mesclar:A1:B2`, `ocultar-linhas:A3:A4`, `congelar:B2`, `largura=12:C1`...

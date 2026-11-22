@@ -89,6 +89,10 @@ impl SheetsApp {
             Act::Freeze(f) => self.freeze(f),
             Act::Hide { rows, hide } => self.hide(rows, hide),
             Act::ColWidth | Act::RowHeight => self.ask_size(act == Act::ColWidth),
+            Act::Sort(desc) => self.sort_here(desc),
+            Act::Filter => self.toggle_filter(),
+            Act::ClearFilter => self.clear_filters(),
+            Act::Reapply => self.reapply_filter(),
             Act::Autofit => {
                 let Some((_, v)) = self.doc.as_ref().and_then(|d| d.current()) else { return };
                 let (_, c0, _, c1) = v.sel();
@@ -268,6 +272,10 @@ impl SheetsApp {
             Item::sep(),
             Item::new("Limpar conteúdo", Act::Clear(Clear::Contents)).key("Delete"),
             Item::new("Limpar formatos", Act::Clear(Clear::Formats)),
+            Item::sep(),
+            Item::new("Classificar A→Z", Act::Sort(false)),
+            Item::new("Classificar Z→A", Act::Sort(true)),
+            Item::new("Filtro", Act::Filter),
             Item::sep(),
         ];
         items.push(if merged {
@@ -546,12 +554,22 @@ impl SheetsApp {
         if let Some(t) = self.opts.ribbon.take() {
             self.ribbon_tab = match t.as_str() {
                 "inserir" => Tab::Insert,
+                "dados" => Tab::Data,
                 "exibir" => Tab::View,
                 _ => Tab::Home,
             };
         }
         let Some(m) = self.opts.menu.take() else { return };
         let g = self.geom();
+        if m == "filtro" {
+            let cur = self.doc.as_ref().and_then(|d| d.current()).map(|(_, v)| v.cur);
+            if let Some((_, c)) = cur
+                && let Some((b, f, col)) = self.filter_buttons(&g).into_iter().find(|x| x.2 == c)
+            {
+                self.open_filter_panel(f, col, b);
+            }
+            return;
+        }
         if m == "contexto" {
             let Some(cell) = self
                 .doc

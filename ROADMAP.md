@@ -2,7 +2,7 @@
 
 Onde o projeto está, o que já foi feito e o que falta. Os detalhes de cada decisão e as medições completas ficam em [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-**Fase atual: F3.5** (a casca do app). A primeira parte está feita: faixa de opções, menu Arquivo, clique direito, planilha nova, mesclar, ocultar, congelar painéis e "Abrir com". Falta a segunda parte (filtro e classificação) e o teste manual de teclado e mouse. Depois vem o motor de cálculo (F4).
+**Fase atual: fim da F3.5** (a casca do app): faixa de opções, menu Arquivo, clique direito, planilha nova, mesclar, ocultar, congelar painéis, "Abrir com", filtro automático, classificar e tabelas do Excel. Falta o teste manual de teclado e mouse. A próxima fase é o motor de cálculo (F4).
 
 | Fase | Entrega | Status |
 |---|---|---|
@@ -10,8 +10,8 @@ Onde o projeto está, o que já foi feito e o que falta. Os detalhes de cada dec
 | **F1** | Leitura paralela de `.xlsx`/`.xlsm` e benchmark | ✅ Concluída (metas de 16+ núcleos em aberto) |
 | **F2** | Visualizador `duck-sheets` | ✅ Concluída |
 | **F3** | Edição e salvar com round-trip | ✅ Concluída (teste manual pendente) |
-| **F3.5** | Casca do app: faixa de opções, menu Arquivo, clique direito, novo arquivo, "Abrir com"; filtro e classificação | 🔶 Em andamento (1ª parte feita) |
-| **F4** | Motor de cálculo | ⏳ Planejada |
+| **F3.5** | Casca do app: faixa de opções, menu Arquivo, clique direito, novo arquivo, "Abrir com"; filtro e classificação | ✅ Concluída (teste manual pendente) |
+| **F4** | Motor de cálculo | ⏳ Próxima |
 | **F5+** | Gráficos, pivôs, slicers, VBA, formato nativo, docs e slides | ⏳ Planejada |
 
 ---
@@ -127,9 +127,9 @@ Sem isso o editor só é usável por atalhos. O objetivo é que tudo o que a F3 
 
 Segunda parte (aba **Dados**):
 
-- [ ] **Filtro automático**: as setas nos cabeçalhos (`autoFilter` da aba e das tabelas do Excel), lista de valores com busca e marcar/desmarcar, filtros de texto e número; o resultado esconde as linhas como no Excel e é salvo no arquivo. Hoje as linhas que o filtro esconde já aparecem escondidas (o Excel grava o resultado), mas as setas e a lista ainda não existem.
-- [ ] **Classificar** a seleção ou a tabela por uma ou mais colunas (crescente/decrescente), com desfazer.
-- [ ] Desenho das **tabelas do Excel** (faixas de cor, cabeçalho) a partir do estilo da tabela.
+- [x] **Filtro automático**: as setas nos cabeçalhos (`autoFilter` da aba e das tabelas do Excel), lista de valores com busca e marcar/desmarcar (calculada em paralelo, só com as linhas que passam nos filtros das outras colunas); o resultado esconde as linhas como no Excel e é salvo no arquivo. Critérios que o Excel grava e o duck-sheets ainda não edita (personalizado, 10 maiores, por cor, por data) ficam guardados como estão.
+- [x] **Classificar** pela coluna da célula ativa (crescente/decrescente), dentro do filtro, da tabela ou da região de dados, em paralelo e com desfazer. Classificar por várias colunas ao mesmo tempo fica para depois.
+- [x] Desenho das **tabelas do Excel** (cabeçalho, faixas alternadas) a partir do estilo da tabela e das cores do tema; editar o cabeçalho atualiza o nome da coluna, e inserir/apagar linhas e colunas ajusta a tabela (o Excel exige os dois em dia).
 
 Critério de pronto: dá para abrir, editar, formatar, filtrar e salvar uma planilha só com o mouse.
 
@@ -148,7 +148,7 @@ Critério de pronto: recalcular o arquivo de referência sem travar a janela.
 - [ ] Tabelas dinâmicas interativas, segmentação de dados (slicers) e linhas do tempo (timelines).
 - [ ] VBA (hoje só preservado).
 - [ ] Formato de arquivo nativo (ADR-013, em discussão).
-- [ ] macOS.
+- [x] macOS: compila, roda e passa no CI (Metal); o pacote `.app` assinado ainda não existe.
 - [ ] `duck-docs` e `duck-slides` sobre a mesma camada `platform/`.
 
 ## Questões em aberto

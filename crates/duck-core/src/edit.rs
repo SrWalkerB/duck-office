@@ -60,6 +60,12 @@ pub struct Edits {
     pub merges: bool,
     /// Painéis congelados mudados (`<pane>` do `<sheetView>`).
     pub pane: bool,
+    /// Filtro da aba mudado (`<autoFilter>`).
+    pub filter: bool,
+    /// Tabelas com o filtro mudado (índice em `layout.tables`).
+    pub tables: BTreeSet<u32>,
+    /// Faixas de linhas `[a, b]` reescritas inteiras (classificar).
+    pub rewrite: Vec<(u32, u32)>,
 }
 
 impl Edits {
@@ -72,6 +78,9 @@ impl Edits {
             && !self.structure
             && !self.merges
             && !self.pane
+            && !self.filter
+            && self.tables.is_empty()
+            && self.rewrite.is_empty()
     }
 
     fn mark(&mut self, row: u32, col: u32) {
@@ -150,6 +159,9 @@ impl Sheet {
         if old.formula != cell.formula || (old.kind ^ cell.kind) & kind::FORMULA != 0 {
             self.edits.formulas = true;
         }
+        if !self.layout.tables.is_empty() {
+            self.sync_table_header(row, col);
+        }
     }
 
     /// Grava um valor (e uma fórmula, sem o `=`). `style = None` mantém o
@@ -198,6 +210,35 @@ impl Sheet {
         let mut raw = self.raw(row, col);
         raw.style = style;
         self.set_raw(row, col, raw);
+    }
+
+    /// Se a célula é cabeçalho de uma tabela, o nome da coluna acompanha o
+    /// texto (o Excel exige os dois iguais).
+    fn sync_table_header(&mut self, row: u32, col: u32) {
+        let Some(t) = self.layout.tables.iter().position(|t| {
+            t.header_row() == Some(row) && (t.range.first_col..=t.range.last_col).contains(&col)
+        }) else {
+            return;
+        };
+        let text = match self.raw(row, col) {
+            r if r.kind & kind::TYPE_MASK == kind::EMPTY => String::new(),
+            _ => {
+                let empty = StringTable::new();
+                match self.cell(row, col, &empty).value {
+                    crate::Value::Text(s) => s.to_string(),
+                    crate::Value::Number(x) => {
+                        let mut s = String::new();
+                        crate::numfmt::format_general(x, 15, &mut s);
+                        s
+                    }
+                    crate::Value::Bool(b) => (if b { "VERDADEIRO" } else { "FALSO" }).into(),
+                    _ => String::new(),
+                }
+            }
+        };
+        let k = (col - self.layout.tables[t].range.first_col) as usize;
+        self.layout.tables[t].rename_column(k, &text);
+        self.edits.tables.insert(t as u32);
     }
 
     /// Recompacta os blocos tocados desde a última chamada (fim de um comando).
@@ -276,6 +317,69 @@ impl Sheet {
 
     pub fn set_col_hidden(&mut self, col: u32, hidden: bool) {
         self.change_col(col, |c| c.hidden = hidden);
+    }
+
+    /// Oculta ou reexibe muitas linhas de uma vez (filtro): uma passada na
+    /// lista de linhas, em vez de uma inserção por linha.
+    pub fn set_rows_hidden(&mut self, list: &[(u32, bool)]) {
+        if list.len() < 64 {
+            for &(r, h) in list {
+                self.set_row_hidden(r, h);
+            }
+            return;
+        }
+        let want: std::collections::HashMap<u32, bool> = list.iter().copied().collect();
+        let mut rows: Vec<crate::RowSpec> = Vec::with_capacity(self.layout.rows.len() + list.len());
+        for spec in self.layout.rows.drain(..) {
+            let mut s = spec;
+            if let Some(&h) = want.get(&s.row) {
+                s.hidden = h;
+            }
+            if s.hidden || s.height.is_some() || s.style.is_some() {
+                rows.push(s);
+            }
+        }
+        let present: std::collections::HashSet<u32> = rows.iter().map(|s| s.row).collect();
+        for &(r, h) in list {
+            if h && !present.contains(&r) {
+                rows.push(crate::RowSpec { row: r, height: None, hidden: true, style: None });
+            }
+        }
+        rows.sort_by_key(|s| s.row);
+        rows.dedup_by_key(|s| s.row);
+        self.layout.rows = rows;
+        self.edits.rows.extend(list.iter().map(|x| x.0));
+    }
+
+    /// Reordena linhas (ver [`Command::SortRows`]): colunas em paralelo,
+    /// direto nos blocos, sem marcar célula por célula (a faixa inteira é
+    /// regravada ao salvar).
+    pub fn permute_rows(&mut self, r0: u32, c0: u32, c1: u32, perm: &[u32]) {
+        let n = perm.len();
+        if n == 0 {
+            return;
+        }
+        let ncols = self.columns.len();
+        let end = (c1 as usize + 1).min(ncols);
+        if (c0 as usize) < end {
+            let cols = &mut self.columns[c0 as usize..end];
+            let threads = std::thread::available_parallelism().map_or(4, |x| x.get()).min(16);
+            let chunk = cols.len().div_ceil(threads).max(1);
+            std::thread::scope(|sc| {
+                for group in cols.chunks_mut(chunk) {
+                    sc.spawn(move || {
+                        for col in group {
+                            col.permute(r0 as usize, perm);
+                        }
+                    });
+                }
+            });
+        }
+        let last = r0 + n as u32 - 1;
+        self.rows = self.rows.max(last + 1);
+        self.edits.rewrite.push((r0, last));
+        self.edits.values = true;
+        self.edits.formulas = true;
     }
 
     /// A linha está oculta.
@@ -402,6 +506,19 @@ pub enum Command {
     ColsHidden(Vec<(u32, bool)>),
     /// Painéis congelados (`None` = sem).
     Pane(Option<crate::Pane>),
+    /// Filtro da aba (`table = None`) ou de uma tabela.
+    SetFilter {
+        table: Option<u32>,
+        filter: Option<crate::AutoFilter>,
+    },
+    /// Reordena as linhas `r0..r0+perm.len()` nas colunas `c0..=c1`: a linha
+    /// `r0 + i` passa a ter o que estava em `r0 + perm[i]` (classificar).
+    SortRows {
+        r0: u32,
+        c0: u32,
+        c1: u32,
+        perm: Vec<u32>,
+    },
     /// Inserir ou apagar linhas/colunas.
     Shift(crate::Shift, OpsHandle),
     /// O layout inteiro de volta (desfazer de uma mudança de estrutura).
@@ -472,13 +589,33 @@ impl Command {
                 Command::Merges { add: remove, remove: add }
             }
             Command::RowsHidden(list) => {
-                let mut old = Vec::with_capacity(list.len());
-                for (r, h) in list {
-                    old.push((r, sheet.row_hidden(r)));
-                    sheet.set_row_hidden(r, h);
-                }
-                old.reverse();
+                let old: Vec<(u32, bool)> = list.iter().map(|&(r, _)| (r, sheet.row_hidden(r))).collect();
+                sheet.set_rows_hidden(&list);
                 Command::RowsHidden(old)
+            }
+            Command::SetFilter { table, filter } => {
+                let old = match table {
+                    None => {
+                        sheet.edits.filter = true;
+                        std::mem::replace(&mut sheet.layout.autofilter, filter)
+                    }
+                    Some(t) => match sheet.layout.tables.get_mut(t as usize) {
+                        Some(tb) => {
+                            sheet.edits.tables.insert(t);
+                            std::mem::replace(&mut tb.filter, filter)
+                        }
+                        None => None,
+                    },
+                };
+                Command::SetFilter { table, filter: old }
+            }
+            Command::SortRows { r0, c0, c1, perm } => {
+                sheet.permute_rows(r0, c0, c1, &perm);
+                let mut inv = vec![0u32; perm.len()];
+                for (i, &p) in perm.iter().enumerate() {
+                    inv[p as usize] = i as u32;
+                }
+                Command::SortRows { r0, c0, c1, perm: inv }
             }
             Command::ColsHidden(list) => {
                 let mut old = Vec::with_capacity(list.len());
@@ -576,6 +713,31 @@ mod tests {
         h.apply(&mut s);
         assert_eq!(s.row_height(3), None);
         assert!(s.edits().cols.contains(&2) && s.edits().rows.contains(&3));
+    }
+
+    #[test]
+    fn sort_rows_and_bulk_hide() {
+        let shared = StringTable::new();
+        let mut s = sample();
+        // Linhas 0..3000 da coluna A têm 0..2999; inverte a ordem de 0..2500.
+        let perm: Vec<u32> = (0..2500).rev().collect();
+        let undo = Command::SortRows { r0: 0, c0: 0, c1: 3, perm }.apply(&mut s);
+        assert_eq!(s.cell(0, 0, &shared).value, Value::Number(2499.0));
+        assert_eq!(s.cell(2499, 0, &shared).value, Value::Number(0.0));
+        assert_eq!(s.cell(2600, 0, &shared).value, Value::Number(2600.0));
+        // A fórmula de B6 foi para B2495 (2499 - 5).
+        assert!(s.formula(2494, 1).is_some());
+        assert_eq!(s.edits().rewrite, vec![(0, 2499)]);
+        undo.apply(&mut s);
+        assert_eq!(s.cell(0, 0, &shared).value, Value::Number(0.0));
+        assert!(s.formula(5, 1).is_some());
+
+        let list: Vec<(u32, bool)> = (100..1100).map(|r| (r, r % 2 == 0)).collect();
+        let back = Command::RowsHidden(list).apply(&mut s);
+        assert!(s.row_hidden(100) && !s.row_hidden(101) && s.row_hidden(1098));
+        assert_eq!(s.layout.rows.len(), 500);
+        back.apply(&mut s);
+        assert!(s.layout.rows.is_empty());
     }
 
     #[test]
