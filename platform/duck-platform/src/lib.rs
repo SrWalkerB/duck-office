@@ -205,6 +205,108 @@ pub fn open_url(url: &str) -> bool {
     r.is_ok()
 }
 
+/// Pasta de configuração do usuário para o app `app` (não é criada aqui):
+/// `%APPDATA%\app` no Windows, `$XDG_CONFIG_HOME/app` (ou `~/.config/app`)
+/// no Linux, `~/Library/Application Support/app` no macOS.
+pub fn config_dir(app: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let base = std::env::var_os("APPDATA").map(PathBuf::from);
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"));
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+    base.map(|b| b.join(app))
+}
+
+/// Registra o programa `exe` no "Abrir com" do sistema para as extensões
+/// `exts`, só para o usuário atual (o programa padrão não muda).
+///
+/// - Windows: `HKCU\Software\Classes` (ProgId `name.Arquivo`, `OpenWithProgids`
+///   de cada extensão e `Applications\<exe>`).
+/// - Linux: um `.desktop` em `~/.local/share/applications` com os tipos MIME.
+pub fn register_file_types(exe: &Path, name: &str, exts: &[&str]) -> Result<(), String> {
+    let exe = exe.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    {
+        let prog = format!("{name}.Arquivo");
+        let file = Path::new(&exe).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        let cmd = format!("\"{exe}\" \"%1\"");
+        let classes = r"HKCU\Software\Classes";
+        let mut calls: Vec<Vec<String>> = vec![
+            vec![format!(r"{classes}\{prog}"), "/ve".into(), "/d".into(), format!("Planilha ({name})")],
+            vec![format!(r"{classes}\{prog}\shell\open\command"), "/ve".into(), "/d".into(), cmd.clone()],
+            vec![
+                format!(r"{classes}\Applications\{file}\shell\open\command"),
+                "/ve".into(),
+                "/d".into(),
+                cmd,
+            ],
+        ];
+        for e in exts {
+            calls.push(vec![
+                format!(r"{classes}\.{e}\OpenWithProgids"),
+                "/v".into(),
+                prog.clone(),
+                "/t".into(),
+                "REG_NONE".into(),
+            ]);
+            calls.push(vec![
+                format!(r"{classes}\Applications\{file}\SupportedTypes"),
+                "/v".into(),
+                format!(".{e}"),
+                "/t".into(),
+                "REG_SZ".into(),
+                "/d".into(),
+                String::new(),
+            ]);
+        }
+        for args in calls {
+            let out = std::process::Command::new("reg")
+                .arg("add")
+                .args(&args)
+                .arg("/f")
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !out.status.success() {
+                return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+            }
+        }
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mime: Vec<&str> = exts
+            .iter()
+            .map(|e| match *e {
+                "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "xlsm" => "application/vnd.ms-excel.sheet.macroEnabled.12",
+                "csv" => "text/csv",
+                _ => "application/octet-stream",
+            })
+            .collect();
+        let dir = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+            .ok_or("pasta do usuário não encontrada")?
+            .join("applications");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let desktop = format!(
+            "[Desktop Entry]\nType=Application\nName={name}\nExec=\"{exe}\" %f\nMimeType={};\nTerminal=false\nCategories=Office;Spreadsheet;\n",
+            mime.join(";")
+        );
+        std::fs::write(dir.join(format!("{name}.desktop")), desktop).map_err(|e| e.to_string())?;
+        let _ = std::process::Command::new("update-desktop-database").arg(&dir).output();
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (exe, name, exts);
+        Err("no macOS o registro vem do pacote .app (ainda não existe)".into())
+    }
+}
+
 /// Mensagem simples numa caixa de diálogo nativa (erro ao abrir, por exemplo).
 pub fn message_box(title: &str, text: &str) {
     rfd::MessageDialog::new()

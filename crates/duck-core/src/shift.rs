@@ -208,8 +208,8 @@ impl Sheet {
                     }
                 } else if at < self.columns.len() {
                     let end = (at + s.n as usize).min(self.columns.len());
-                    for c in at..end {
-                        collect_cells(&self.columns[c], c as u32, &mut lost);
+                    for (k, col) in self.columns[at..end].iter().enumerate() {
+                        collect_cells(col, (at + k) as u32, &mut lost);
                     }
                     self.columns.drain(at..end);
                 }

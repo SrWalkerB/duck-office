@@ -4,6 +4,7 @@
 //! duck-sheets [ARQUIVO] [--sheet N] [--cell B12] [--zoom 80] [--find TEXTO]
 //!             [--bench] [--screenshot SAIDA.png]
 //!             [--edit A1=valor ...] [--undo N] [--save-to SAIDA.xlsx]
+//!             [--aba inicial|inserir|exibir] [--menu NOME] [--novo]
 //! ```
 //!
 //! Sem arquivo, abre o diálogo nativo. Teclas: setas (+Shift seleciona,
@@ -20,6 +21,7 @@
 //! inicial, depois de carregar tudo) e salvam numa cópia: para testar a
 //! edição e o salvamento sem mexer na janela.
 
+mod actions;
 mod app;
 mod axis;
 mod draw;
@@ -27,6 +29,8 @@ mod edit;
 mod format;
 mod loader;
 mod look;
+mod menu;
+mod ribbon;
 mod search;
 
 use std::path::PathBuf;
@@ -71,6 +75,14 @@ pub struct Opts {
     pub undo: usize,
     /// Salvar numa cópia depois das edições e sair.
     pub save_to: Option<PathBuf>,
+    /// Aba da faixa de opções (`inicial`, `inserir`, `exibir`).
+    pub ribbon: Option<String>,
+    /// Menu aberto depois de carregar (para screenshot): `arquivo`, `fonte`,
+    /// `tamanho`, `numero`, `bordas`, `cor`, `fundo`, `mesclar`, `inserir`,
+    /// `excluir`, `formatar`, `limpar`, `congelar`, `contexto`.
+    pub menu: Option<String>,
+    /// Começa com uma planilha nova em branco (`--novo`).
+    pub new_file: bool,
 }
 
 fn parse_args() -> Opts {
@@ -93,6 +105,9 @@ fn parse_args() -> Opts {
             "--edit" => o.edits.extend(val()),
             "--undo" => o.undo = val().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--save-to" => o.save_to = val().map(PathBuf::from),
+            "--aba" => o.ribbon = val(),
+            "--menu" => o.menu = val(),
+            "--novo" => o.new_file = true,
             _ if !a.starts_with("--") && o.path.is_none() => o.path = Some(PathBuf::from(a)),
             _ => eprintln!("opção desconhecida: {a}"),
         }

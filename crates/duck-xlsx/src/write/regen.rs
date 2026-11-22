@@ -291,7 +291,7 @@ pub fn tail(orig: &[u8], sheet: &Sheet, sheet_name: &str, shifts: &[Shift]) -> V
         match name {
             b"mergeCells" => {
                 pos = close_of(name);
-                merges(sheet, &mut out);
+                out.extend_from_slice(&super::patch::merges_xml(sheet));
                 merges_done = true;
             }
             // Elementos que somem se o intervalo sumiu.
@@ -326,29 +326,10 @@ pub fn tail(orig: &[u8], sheet: &Sheet, sheet_name: &str, shifts: &[Shift]) -> V
     }
     out.extend_from_slice(&orig[pos..]);
     if !merges_done && !sheet.layout.merges.is_empty() {
-        // Sem `<mergeCells>` no original: entra logo depois de `</sheetData>`.
-        let mut m = Vec::new();
-        merges(sheet, &mut m);
-        m.extend_from_slice(&out);
-        return m;
+        // Sem `<mergeCells>` no original: entra no lugar do esquema.
+        return super::patch::replace_merges(&out, &super::patch::merges_xml(sheet));
     }
     out
-}
-
-fn merges(sheet: &Sheet, out: &mut Vec<u8>) {
-    let m = &sheet.layout.merges;
-    if m.is_empty() {
-        return;
-    }
-    out.extend_from_slice(b"<mergeCells count=\"");
-    push_u32(out, m.len() as u32);
-    out.extend_from_slice(b"\">");
-    for r in m {
-        out.extend_from_slice(b"<mergeCell ref=\"");
-        out.extend_from_slice(range_text(*r).as_bytes());
-        out.extend_from_slice(b"\"/>");
-    }
-    out.extend_from_slice(b"</mergeCells>");
 }
 
 /// Dentro de um elemento: fórmulas (`<formula>`, `<formula1>`, `<formula2>`,

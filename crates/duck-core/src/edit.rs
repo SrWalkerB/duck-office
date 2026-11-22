@@ -56,6 +56,10 @@ pub struct Edits {
     /// `shifts` (em ordem).
     pub structure: bool,
     pub shifts: Vec<crate::Shift>,
+    /// Mesclagens mudadas (`<mergeCells>` é regravado).
+    pub merges: bool,
+    /// Painéis congelados mudados (`<pane>` do `<sheetView>`).
+    pub pane: bool,
 }
 
 impl Edits {
@@ -66,6 +70,8 @@ impl Edits {
             && !self.values
             && !self.formulas
             && !self.structure
+            && !self.merges
+            && !self.pane
     }
 
     fn mark(&mut self, row: u32, col: u32) {
@@ -260,6 +266,40 @@ impl Sheet {
 
     /// Muda a largura de uma coluna (caracteres; `None` = padrão da aba).
     pub fn set_col_width(&mut self, col: u32, width: Option<f32>) {
+        self.change_col(col, |c| c.width = width);
+    }
+
+    /// A coluna está oculta.
+    pub fn col_hidden(&self, col: u32) -> bool {
+        self.layout.cols.iter().find(|s| s.first <= col && col <= s.last).is_some_and(|s| s.hidden)
+    }
+
+    pub fn set_col_hidden(&mut self, col: u32, hidden: bool) {
+        self.change_col(col, |c| c.hidden = hidden);
+    }
+
+    /// A linha está oculta.
+    pub fn row_hidden(&self, row: u32) -> bool {
+        self.layout.row(row).is_some_and(|r| r.hidden)
+    }
+
+    pub fn set_row_hidden(&mut self, row: u32, hidden: bool) {
+        let rows = &mut self.layout.rows;
+        match rows.binary_search_by_key(&row, |r| r.row) {
+            Ok(i) => {
+                rows[i].hidden = hidden;
+                if !hidden && rows[i].height.is_none() && rows[i].style.is_none() {
+                    rows.remove(i);
+                }
+            }
+            Err(i) if hidden => rows.insert(i, crate::RowSpec { row, height: None, hidden, style: None }),
+            Err(_) => {}
+        }
+        self.edits.rows.insert(row);
+    }
+
+    /// Muda a especificação de uma coluna, separando-a do `<col>` que a cobre.
+    fn change_col(&mut self, col: u32, f: impl FnOnce(&mut crate::ColSpec)) {
         let cols = &mut self.layout.cols;
         match cols.iter().position(|s| s.first <= col && col <= s.last) {
             Some(i) => {
@@ -267,7 +307,7 @@ impl Sheet {
                 let mut mid = s;
                 mid.first = col;
                 mid.last = col;
-                mid.width = width;
+                f(&mut mid);
                 let mut repl = Vec::with_capacity(3);
                 if s.first < col {
                     repl.push(crate::ColSpec { last: col - 1, ..s });
@@ -280,7 +320,9 @@ impl Sheet {
             }
             None => {
                 let at = cols.partition_point(|s| s.first < col);
-                cols.insert(at, crate::ColSpec { first: col, last: col, width, hidden: false, style: 0 });
+                let mut spec = crate::ColSpec { first: col, last: col, width: None, hidden: false, style: 0 };
+                f(&mut spec);
+                cols.insert(at, spec);
             }
         }
         self.edits.cols.insert(col);
@@ -350,6 +392,16 @@ pub enum Command {
     RowHeights(Vec<(u32, Option<f32>)>),
     /// Estilos de células (formatação).
     SetStyles(Vec<(u32, u32, u16)>),
+    /// Mesclagens: as de `add` entram, as de `remove` saem.
+    Merges {
+        add: Vec<crate::CellRange>,
+        remove: Vec<crate::CellRange>,
+    },
+    /// Linhas ocultas (`true`) ou reexibidas.
+    RowsHidden(Vec<(u32, bool)>),
+    ColsHidden(Vec<(u32, bool)>),
+    /// Painéis congelados (`None` = sem).
+    Pane(Option<crate::Pane>),
     /// Inserir ou apagar linhas/colunas.
     Shift(crate::Shift, OpsHandle),
     /// O layout inteiro de volta (desfazer de uma mudança de estrutura).
@@ -406,6 +458,41 @@ impl Command {
                 let mut inv: Vec<Command> = list.into_iter().map(|c| c.apply(sheet)).collect();
                 inv.reverse();
                 Command::Group(inv)
+            }
+            Command::Merges { add, remove } => {
+                let m = &mut sheet.layout.merges;
+                m.retain(|r| !remove.contains(r));
+                for r in &add {
+                    if !m.contains(r) {
+                        m.push(*r);
+                    }
+                }
+                m.sort_by_key(|r| (r.first_row, r.first_col));
+                sheet.edits.merges = true;
+                Command::Merges { add: remove, remove: add }
+            }
+            Command::RowsHidden(list) => {
+                let mut old = Vec::with_capacity(list.len());
+                for (r, h) in list {
+                    old.push((r, sheet.row_hidden(r)));
+                    sheet.set_row_hidden(r, h);
+                }
+                old.reverse();
+                Command::RowsHidden(old)
+            }
+            Command::ColsHidden(list) => {
+                let mut old = Vec::with_capacity(list.len());
+                for (c, h) in list {
+                    old.push((c, sheet.col_hidden(c)));
+                    sheet.set_col_hidden(c, h);
+                }
+                old.reverse();
+                Command::ColsHidden(old)
+            }
+            Command::Pane(p) => {
+                let old = std::mem::replace(&mut sheet.layout.pane, p);
+                sheet.edits.pane = true;
+                Command::Pane(old)
             }
             Command::SetStyles(list) => {
                 let mut old = Vec::with_capacity(list.len());

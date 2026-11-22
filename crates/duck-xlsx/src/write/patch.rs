@@ -179,8 +179,12 @@ impl<'a> Patcher<'a> {
             self.last_row = Some(r);
             pos = end;
         }
-        // Depois de `</sheetData>`: copia o resto.
-        out.extend_from_slice(&seg[pos..]);
+        // Depois de `</sheetData>`: copia o resto (com as mesclagens novas).
+        if self.phase == Phase::Tail && self.sheet.edits().merges {
+            out.extend_from_slice(&replace_merges(&seg[pos..], &merges_xml(self.sheet)));
+        } else {
+            out.extend_from_slice(&seg[pos..]);
+        }
         let _ = eof;
     }
 
@@ -215,7 +219,7 @@ impl<'a> Patcher<'a> {
             for c in d.cols {
                 self.cell(d.row, c, b"", out);
             }
-            let height = d.height && self.sheet.row_height(d.row).is_some();
+            let height = d.height && self.sheet.layout.row(d.row).is_some();
             if out.len() == before && !height {
                 out.truncate(start);
             } else {
@@ -239,7 +243,7 @@ impl<'a> Patcher<'a> {
             skip.push(b"spans");
         }
         if height {
-            skip.extend([&b"ht"[..], b"customHeight"]);
+            skip.extend([&b"ht"[..], b"customHeight", b"hidden"]);
         }
         if skip.is_empty() {
             out.extend_from_slice(attrs);
@@ -304,12 +308,15 @@ impl<'a> Patcher<'a> {
         out.extend_from_slice(b"</row>");
     }
 
-    /// ` ht="…" customHeight="1"` com a altura da linha no modelo, se houver.
+    /// ` ht="…" customHeight="1"` e ` hidden="1"` com a linha no modelo.
     fn push_height(&self, r: u32, out: &mut Vec<u8>) {
         if let Some(h) = self.sheet.row_height(r) {
             out.extend_from_slice(b" ht=\"");
             super::cellxml::push_number(out, h as f64);
             out.extend_from_slice(b"\" customHeight=\"1\"");
+        }
+        if self.sheet.row_hidden(r) {
+            out.extend_from_slice(b" hidden=\"1\"");
         }
     }
 
@@ -320,6 +327,16 @@ impl<'a> Patcher<'a> {
     /// O que vem antes de `<sheetData>`, com o `<dimension>` e as larguras
     /// de coluna ajustados.
     fn head(&self, head: &[u8], out: &mut Vec<u8>) {
+        if self.sheet.edits().pane {
+            let mut tmp = Vec::with_capacity(head.len() + 256);
+            self.head_cols(head, &mut tmp);
+            out.extend_from_slice(&patch_pane(&tmp, self.sheet.layout.pane));
+        } else {
+            self.head_cols(head, out);
+        }
+    }
+
+    fn head_cols(&self, head: &[u8], out: &mut Vec<u8>) {
         if self.sheet.edits().cols.is_empty() {
             return self.head_dimension(head, out);
         }
@@ -359,7 +376,7 @@ impl<'a> Patcher<'a> {
             let mut keep = Vec::new();
             push_attrs_except(a, &[b"min", b"max"], &mut keep);
             let mut rest = Vec::new();
-            push_attrs_except(a, &[b"min", b"max", b"width", b"customWidth"], &mut rest);
+            push_attrs_except(a, &[b"min", b"max", b"width", b"customWidth", b"hidden"], &mut rest);
             let mut start = first;
             for &c in changed.range(first..=last) {
                 if c > start {
@@ -386,6 +403,9 @@ impl<'a> Patcher<'a> {
             out.extend_from_slice(b"\" max=\"");
             super::cellxml::push_u32(out, last + 1);
             out.push(b'"');
+            if edited && self.sheet.col_hidden(first) {
+                out.extend_from_slice(b" hidden=\"1\"");
+            }
             if edited && let Some(w) = self.sheet.col_width(first) {
                 out.extend_from_slice(b" width=\"");
                 super::cellxml::push_number(out, w as f64);
@@ -420,6 +440,164 @@ impl<'a> Patcher<'a> {
         out.extend_from_slice(b"\"/>");
         out.extend_from_slice(&head[tag.end..]);
     }
+}
+
+/// `<mergeCells>` com as mesclagens do modelo (vazio se não houver).
+pub fn merges_xml(sheet: &Sheet) -> Vec<u8> {
+    let m = &sheet.layout.merges;
+    let mut out = Vec::new();
+    if m.is_empty() {
+        return out;
+    }
+    out.extend_from_slice(b"<mergeCells count=\"");
+    super::cellxml::push_u32(&mut out, m.len() as u32);
+    out.extend_from_slice(b"\">");
+    for r in m {
+        out.extend_from_slice(b"<mergeCell ref=\"");
+        cell_ref(r.first_row, r.first_col, &mut out);
+        if (r.first_row, r.first_col) != (r.last_row, r.last_col) {
+            out.push(b':');
+            cell_ref(r.last_row, r.last_col, &mut out);
+        }
+        out.extend_from_slice(b"\"/>");
+    }
+    out.extend_from_slice(b"</mergeCells>");
+    out
+}
+
+/// Elementos que vêm depois de `<mergeCells>` na aba (ordem do esquema).
+const AFTER_MERGES: [&[u8]; 23] = [
+    b"phoneticPr",
+    b"conditionalFormatting",
+    b"dataValidations",
+    b"hyperlinks",
+    b"printOptions",
+    b"pageMargins",
+    b"pageSetup",
+    b"headerFooter",
+    b"rowBreaks",
+    b"colBreaks",
+    b"customProperties",
+    b"cellWatches",
+    b"ignoredErrors",
+    b"smartTags",
+    b"drawing",
+    b"legacyDrawing",
+    b"legacyDrawingHF",
+    b"picture",
+    b"oleObjects",
+    b"controls",
+    b"webPublishItems",
+    b"tableParts",
+    b"extLst",
+];
+
+/// O fim da aba (depois de `</sheetData>`) com `<mergeCells>` trocado por
+/// `merges` (que pode ser vazio), no lugar certo do esquema.
+pub fn replace_merges(tail: &[u8], merges: &[u8]) -> Vec<u8> {
+    let mut t = tail.to_vec();
+    if let Some(tag) = crate::xml::find_tag(&t, 0, b"mergeCells") {
+        let end = if tag.self_closing {
+            tag.end
+        } else {
+            memmem::find(&t[tag.end..], b"</mergeCells>").map_or(t.len(), |x| tag.end + x + 13)
+        };
+        t.drain(tag.start..end);
+    }
+    let at = AFTER_MERGES
+        .iter()
+        .filter_map(|n| crate::xml::find_tag(&t, 0, n).map(|x| x.start))
+        .min()
+        .or_else(|| memmem::rfind(&t, b"</"))
+        .unwrap_or(t.len());
+    t.splice(at..at, merges.iter().copied());
+    t
+}
+
+/// O começo da aba com o `<pane>` do primeiro `<sheetView>` trocado pelos
+/// painéis congelados do modelo (as seleções por painel saem: o Excel
+/// recria).
+pub fn patch_pane(head: &[u8], pane: Option<duck_core::Pane>) -> Vec<u8> {
+    let mut xml = Vec::new();
+    if let Some(p) = pane.filter(|p| p.frozen_rows > 0 || p.frozen_cols > 0) {
+        let active: &[u8] = match (p.frozen_rows > 0, p.frozen_cols > 0) {
+            (true, true) => b"bottomRight",
+            (true, false) => b"bottomLeft",
+            _ => b"topRight",
+        };
+        xml.extend_from_slice(b"<pane");
+        if p.frozen_cols > 0 {
+            xml.extend_from_slice(b" xSplit=\"");
+            super::cellxml::push_u32(&mut xml, p.frozen_cols);
+            xml.push(b'"');
+        }
+        if p.frozen_rows > 0 {
+            xml.extend_from_slice(b" ySplit=\"");
+            super::cellxml::push_u32(&mut xml, p.frozen_rows);
+            xml.push(b'"');
+        }
+        xml.extend_from_slice(b" topLeftCell=\"");
+        cell_ref(p.frozen_rows, p.frozen_cols, &mut xml);
+        xml.extend_from_slice(b"\" activePane=\"");
+        xml.extend_from_slice(active);
+        xml.extend_from_slice(b"\" state=\"frozen\"/>");
+    }
+    let Some(view) = crate::xml::find_tag(head, 0, b"sheetView") else {
+        // Sem `<sheetViews>`: entra antes de `<sheetFormatPr>`/`<cols>`, ou no fim.
+        if xml.is_empty() {
+            return head.to_vec();
+        }
+        let at = [&b"sheetFormatPr"[..], b"cols"]
+            .iter()
+            .filter_map(|n| crate::xml::find_tag(head, 0, n).map(|t| t.start))
+            .min()
+            .unwrap_or(head.len());
+        let mut out = head[..at].to_vec();
+        out.extend_from_slice(b"<sheetViews><sheetView workbookViewId=\"0\">");
+        out.extend_from_slice(&xml);
+        out.extend_from_slice(b"</sheetView></sheetViews>");
+        out.extend_from_slice(&head[at..]);
+        return out;
+    };
+    let mut out = head[..view.start].to_vec();
+    if view.self_closing {
+        out.extend_from_slice(&head[view.start..view.end - 2]);
+        if xml.is_empty() {
+            out.extend_from_slice(b"/>");
+        } else {
+            out.push(b'>');
+            out.extend_from_slice(&xml);
+            out.extend_from_slice(b"</sheetView>");
+        }
+        out.extend_from_slice(&head[view.end..]);
+        return out;
+    }
+    let close = memmem::find(&head[view.end..], b"</sheetView>").map_or(head.len(), |x| view.end + x);
+    out.extend_from_slice(&head[view.start..view.end]);
+    out.extend_from_slice(&xml);
+    // Filhos sem `<pane>` e `<selection>`.
+    let inner = &head[view.end..close];
+    let mut pos = 0;
+    while let Some(k) = memchr::memchr(b'<', &inner[pos..]) {
+        let i = pos + k;
+        out.extend_from_slice(&inner[pos..i]);
+        let end = tag_end(inner, i).unwrap_or(inner.len());
+        let name = &inner[i + 1..];
+        let drop = (name.starts_with(b"pane") && is_name_end(name[4]))
+            || (name.starts_with(b"selection") && is_name_end(name[9]));
+        if !drop {
+            out.extend_from_slice(&inner[i..end]);
+        } else if inner[end - 2] != b'/' {
+            // `<selection>…</selection>` (não acontece no Excel): pula até o fim.
+            let close_name: &[u8] = if name.starts_with(b"pane") { b"</pane>" } else { b"</selection>" };
+            pos = memmem::find(&inner[end..], close_name).map_or(inner.len(), |x| end + x + close_name.len());
+            continue;
+        }
+        pos = end;
+    }
+    out.extend_from_slice(&inner[pos..]);
+    out.extend_from_slice(&head[close..]);
+    out
 }
 
 /// Uma linha com algo a regravar.
@@ -540,6 +718,42 @@ mod tests {
         assert_eq!(back.col_width(0), Some(9.0));
         assert_eq!(back.row_height(4), Some(12.75));
         assert_eq!(back.row_height(1), None);
+    }
+
+    #[test]
+    fn merges_hidden_and_panes() {
+        let xml = concat!(
+            r#"<worksheet><sheetViews><sheetView workbookViewId="0"><selection activeCell="B2" sqref="B2"/></sheetView></sheetViews>"#,
+            r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
+            r#"<mergeCells count="1"><mergeCell ref="A1:B1"/></mergeCells><pageMargins left="0.7"/></worksheet>"#,
+        );
+        let mut sheet = crate::parse_sheet_xml(xml.as_bytes());
+        duck_core::Command::Merges {
+            add: vec![duck_core::CellRange { first_row: 2, first_col: 0, last_row: 3, last_col: 2 }],
+            remove: vec![duck_core::CellRange { first_row: 0, first_col: 0, last_row: 0, last_col: 1 }],
+        }
+        .apply(&mut sheet);
+        duck_core::Command::RowsHidden(vec![(0, true), (5, true)]).apply(&mut sheet);
+        duck_core::Command::ColsHidden(vec![(3, true)]).apply(&mut sheet);
+        duck_core::Command::Pane(Some(duck_core::Pane { frozen_rows: 1, frozen_cols: 0 })).apply(&mut sheet);
+        let sh = StringTable::new();
+        let mut p = Patcher::new(&sheet, &sh, false);
+        let mut out = Vec::new();
+        p.feed(xml.as_bytes(), &mut out);
+        p.finish(&mut out);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains(r#"<sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView>"#), "{out}");
+        assert!(out.contains(r#"<row r="1" hidden="1">"#), "{out}");
+        assert!(out.contains(r#"<row r="6" hidden="1"></row>"#), "{out}");
+        assert!(out.contains(r#"<col min="4" max="4" hidden="1"/>"#), "{out}");
+        assert!(
+            out.contains(r#"<mergeCells count="1"><mergeCell ref="A3:C4"/></mergeCells><pageMargins"#),
+            "{out}"
+        );
+        let back = crate::parse_sheet_xml(out.as_bytes());
+        assert_eq!(back.layout.merges, sheet.layout.merges);
+        assert!(back.row_hidden(0) && back.row_hidden(5) && back.col_hidden(3));
+        assert_eq!(back.layout.pane, sheet.layout.pane);
     }
 
     #[test]

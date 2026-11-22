@@ -272,12 +272,26 @@ impl SheetsApp {
         }
         let (Some(sheet), Some(v)) = (slot.data.as_ref(), slot.view.as_mut()) else { return };
         v.cf = sheet.layout.cond.iter().map(|_| CfState::default()).collect();
+        // Mesclagens e painéis congelados vêm do layout.
+        v.merges = crate::app::Merges::new(sheet.layout.merges.clone());
+        let pane = sheet.layout.pane.unwrap_or_default();
+        let (fr, fc) = (pane.frozen_rows.min(v.rows.len() - 1), pane.frozen_cols.min(v.cols.len() - 1));
+        if (fr, fc) != (v.frozen_rows, v.frozen_cols) {
+            v.frozen_rows = fr;
+            v.frozen_cols = fc;
+            v.scroll_y = v.scroll_y.max(v.rows.offset(fr) as f64);
+            v.scroll_x = v.scroll_x.max(v.cols.offset(fc) as f64);
+        }
         let e = sheet.edits();
         let def_col = v.cols.default_size();
         let def_row = v.rows.default_size();
         for &c in &e.cols {
             if c < v.cols.len() {
-                let px = sheet.col_width(c).map_or(def_col, |w| col_px(w, mdw));
+                let px = if sheet.col_hidden(c) {
+                    0
+                } else {
+                    sheet.col_width(c).map_or(def_col, |w| col_px(w, mdw))
+                };
                 if v.cols.size(c) != px {
                     v.resize_col(c, px);
                 }
@@ -285,7 +299,7 @@ impl SheetsApp {
         }
         for &r in &e.rows {
             if r < v.rows.len() {
-                let px = sheet.row_height(r).map_or(def_row, row_px);
+                let px = if sheet.row_hidden(r) { 0 } else { sheet.row_height(r).map_or(def_row, row_px) };
                 if v.rows.size(r) != px {
                     v.resize_row(r, px);
                 }
@@ -296,7 +310,11 @@ impl SheetsApp {
 
     pub fn update_title(&self) {
         let (Some(w), Some(doc)) = (&self.window, &self.doc) else { return };
-        let name = doc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = if self.untitled_path.as_deref() == Some(doc.path.as_path()) {
+            "Sem título".to_string()
+        } else {
+            doc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        };
         let dot = if doc.dirty { "• " } else { "" };
         w.set_title(&format!("{dot}{name} — duck-sheets"));
     }
@@ -506,6 +524,66 @@ impl SheetsApp {
                 self.apply_fmt(f);
                 continue;
             }
+            // `mesclar:A1:B2`, `ocultar-linhas:A3:A4`, `congelar:B2`, `largura=12:C1`...
+            if let Some((op, arg)) = e.split_once(':')
+                && (matches!(
+                    op,
+                    "mesclar"
+                        | "mesclar-centralizar"
+                        | "mesclar-atraves"
+                        | "desmesclar"
+                        | "ocultar-linhas"
+                        | "ocultar-colunas"
+                        | "reexibir-linhas"
+                        | "reexibir-colunas"
+                        | "congelar"
+                        | "descongelar"
+                        | "limpar-formatos"
+                        | "limpar-tudo"
+                ) || op.starts_with("largura=")
+                    || op.starts_with("altura="))
+            {
+                use crate::ribbon::{Clear, Freeze, Merge};
+                let Some(((r0, c0), (r1, c1))) = crate::app::parse_range(arg) else { continue };
+                self.go_to(r0, c0);
+                if let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) {
+                    v.anchor = (r0, c0);
+                    v.cur = (r1, c1);
+                }
+                if op == "congelar"
+                    && let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut())
+                {
+                    v.anchor = (r0, c0);
+                    v.cur = (r0, c0);
+                }
+                let num =
+                    |s: &str| s.split_once('=').and_then(|(_, v)| v.replace(',', ".").parse::<f32>().ok());
+                match op {
+                    "mesclar" => self.merge(Merge::Cells),
+                    "mesclar-centralizar" => self.merge(Merge::Center),
+                    "mesclar-atraves" => self.merge(Merge::Across),
+                    "desmesclar" => self.merge(Merge::Unmerge),
+                    "ocultar-linhas" => self.hide(true, true),
+                    "ocultar-colunas" => self.hide(false, true),
+                    "reexibir-linhas" => self.hide(true, false),
+                    "reexibir-colunas" => self.hide(false, false),
+                    "congelar" => self.freeze(Freeze::Here),
+                    "descongelar" => self.freeze(Freeze::Off),
+                    "limpar-formatos" => self.clear(Clear::Formats),
+                    "limpar-tudo" => self.clear(Clear::All),
+                    o if o.starts_with("largura=") => {
+                        if let Some(w) = num(o) {
+                            self.run_command(Command::ColWidths((c0..=c1).map(|c| (c, Some(w))).collect()));
+                        }
+                    }
+                    o => {
+                        if let Some(h) = num(o) {
+                            self.run_command(Command::RowHeights((r0..=r1).map(|r| (r, Some(h))).collect()));
+                        }
+                    }
+                }
+                continue;
+            }
             // `inserir:A5:A6`, `apagar:A5`, `inserir-colunas:C1:D1`, `apagar-colunas:C1`.
             if let Some((op, arg)) = e.split_once(':')
                 && matches!(op, "inserir" | "apagar" | "inserir-colunas" | "apagar-colunas")
@@ -552,6 +630,7 @@ impl SheetsApp {
         for _ in 0..std::mem::take(&mut self.opts.undo) {
             self.undo();
         }
+        self.scripted_ui();
         if let Some(dest) = self.opts.save_to.clone() {
             self.save_to(dest);
         }
@@ -573,11 +652,18 @@ impl SheetsApp {
         }
         let src = doc.path.clone();
         let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("xlsx").to_ascii_lowercase();
-        let dest = if save_as {
+        // Planilha nova: a primeira vez pede o lugar.
+        let untitled = self.untitled_path.as_deref() == Some(src.as_path());
+        let dest = if save_as || untitled {
             let Some(w) = &self.window else { return };
-            let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = if untitled {
+                "Planilha.xlsx".to_string()
+            } else {
+                src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            };
+            let dir = if untitled { None } else { src.parent() };
             let filter: &[(&str, &[&str])] = &[("Mesmo formato", &[ext.as_str()])];
-            let Some(mut d) = w.save_file("Salvar como", src.parent(), &name, filter) else { return };
+            let Some(mut d) = w.save_file("Salvar como", dir, &name, filter) else { return };
             if d.extension().is_none() {
                 d.set_extension(&ext);
             }
@@ -682,9 +768,11 @@ impl SheetsApp {
                         borders: st.borders.len(),
                     };
                     st.xf_base.clear();
-                    doc.path = job.dest;
+                    st.new_num_fmts.clear();
+                    doc.path = job.dest.clone();
                     doc.dirty = false;
                 }
+                self.remember_recent(&job.dest);
                 self.message = format!(
                     "Salvo em {} ms ({} abas regravadas, conferido)",
                     job.started.elapsed().as_millis(),
@@ -796,9 +884,7 @@ impl SheetsApp {
         }
         let slot = doc.slot();
         if slot.info.objects && !self.objects_ok {
-            let Some(w) = &self.window else { return };
-            let ok = w.confirm(
-                "duck-sheets",
+            let ok = self.ask(
                 "Esta aba tem gráficos, imagens, tabelas ou tabelas dinâmicas. O duck-sheets ainda não \
                  ajusta a posição deles ao inserir ou apagar linhas e colunas. Continuar?",
             );

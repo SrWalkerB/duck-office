@@ -2,7 +2,7 @@
 
 Onde o projeto está, o que já foi feito e o que falta. Os detalhes de cada decisão e as medições completas ficam em [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-**Fase atual: fim da F3.** O duck-sheets edita e salva `.xlsx`/`.xlsm`/`.csv` sem perder o que não entende, com round-trip conferido no arquivo de referência; falta o teste manual de teclado e mouse (F2 e F3). A próxima fase é a **F4** (motor de cálculo).
+**Fase atual: F3.5** (a casca do app). A primeira parte está feita: faixa de opções, menu Arquivo, clique direito, planilha nova, mesclar, ocultar, congelar painéis e "Abrir com". Falta a segunda parte (filtro e classificação) e o teste manual de teclado e mouse. Depois vem o motor de cálculo (F4).
 
 | Fase | Entrega | Status |
 |---|---|---|
@@ -10,7 +10,8 @@ Onde o projeto está, o que já foi feito e o que falta. Os detalhes de cada dec
 | **F1** | Leitura paralela de `.xlsx`/`.xlsm` e benchmark | ✅ Concluída (metas de 16+ núcleos em aberto) |
 | **F2** | Visualizador `duck-sheets` | ✅ Concluída |
 | **F3** | Edição e salvar com round-trip | ✅ Concluída (teste manual pendente) |
-| **F4** | Motor de cálculo | ⏳ Próxima |
+| **F3.5** | Casca do app: faixa de opções, menu Arquivo, clique direito, novo arquivo, "Abrir com"; filtro e classificação | 🔶 Em andamento (1ª parte feita) |
+| **F4** | Motor de cálculo | ⏳ Planejada |
 | **F5+** | Gráficos, pivôs, slicers, VBA, formato nativo, docs e slides | ⏳ Planejada |
 
 ---
@@ -104,6 +105,34 @@ Limites desta versão:
 - texto rico de células reescritas vira texto simples; quebra de linha dentro da célula (Alt+Enter) ainda não existe;
 - os nomes das funções são os do arquivo (inglês, separador `,`).
 
+## ⏳ F3.5 · Casca do app
+
+Sem isso o editor só é usável por atalhos. O objetivo é que tudo o que a F3 já faz esteja à vista, como num editor de planilhas comum, e que o duck-sheets se integre ao sistema.
+
+- [x] **Faixa de opções** com abas (Página Inicial, Inserir, Exibir) e grupos, no lugar da barra de ferramentas atual; atalhos rápidos (salvar, desfazer, refazer) no canto.
+- [x] **Página Inicial**:
+  - Área de transferência: colar, recortar, copiar;
+  - Fonte: família e tamanho (listas), aumentar/diminuir, negrito, itálico, sublinhado, tachado, bordas, cor do fundo, cor do texto;
+  - Alinhamento: cima/meio/baixo, esquerda/centro/direita, recuo, quebrar texto, mesclar e centralizar;
+  - Número: lista de formatos (Geral, Número, Moeda, Contábil, Data, Hora, Porcentagem, Texto), moeda, %, milhar, mais/menos casas decimais;
+  - Células: inserir e excluir (linhas, colunas), formatar (largura da coluna, altura da linha, ajustar, ocultar e reexibir);
+  - Edição: limpar (tudo, formatos, conteúdo), localizar, ir para.
+- [x] **Inserir**: linhas, colunas, mesclagem. **Exibir**: zoom, linhas de grade, cabeçalhos, congelar painéis (salvo no arquivo).
+- [x] **Menu Arquivo**: novo, abrir, arquivos recentes, salvar, salvar como, "Abrir com", sair.
+- [x] **Novo arquivo**: planilha em branco que pede onde salvar na primeira vez.
+- [x] **Menu de clique direito** na grade e nos cabeçalhos (recortar, copiar, colar, inserir, excluir, limpar, mesclar, largura/altura, ocultar).
+- [x] **Gravador**: mesclagens, linhas/colunas ocultas, formatos de número novos e painéis congelados também saem no arquivo salvo.
+- [x] **Integração com o sistema**: registrar o duck-sheets no "Abrir com" de `.xlsx`/`.xlsm`/`.csv` (Windows e Linux), feito só quando o usuário pedir pelo menu.
+- [ ] Teste manual de teclado e mouse na janela.
+
+Segunda parte (aba **Dados**):
+
+- [ ] **Filtro automático**: as setas nos cabeçalhos (`autoFilter` da aba e das tabelas do Excel), lista de valores com busca e marcar/desmarcar, filtros de texto e número; o resultado esconde as linhas como no Excel e é salvo no arquivo. Hoje as linhas que o filtro esconde já aparecem escondidas (o Excel grava o resultado), mas as setas e a lista ainda não existem.
+- [ ] **Classificar** a seleção ou a tabela por uma ou mais colunas (crescente/decrescente), com desfazer.
+- [ ] Desenho das **tabelas do Excel** (faixas de cor, cabeçalho) a partir do estilo da tabela.
+
+Critério de pronto: dá para abrir, editar, formatar, filtrar e salvar uma planilha só com o mouse.
+
 ## ⏳ F4 · Motor de cálculo
 
 - [ ] Parser de fórmulas e AST.
@@ -116,7 +145,7 @@ Critério de pronto: recalcular o arquivo de referência sem travar a janela.
 ## ⏳ F5+ · O resto da suíte
 
 - [ ] Gráficos, imagens e formas.
-- [ ] Tabelas dinâmicas interativas, slicers e timelines.
+- [ ] Tabelas dinâmicas interativas, segmentação de dados (slicers) e linhas do tempo (timelines).
 - [ ] VBA (hoje só preservado).
 - [ ] Formato de arquivo nativo (ADR-013, em discussão).
 - [ ] macOS.

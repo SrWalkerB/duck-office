@@ -49,6 +49,38 @@ pub fn patch_styles(xml: &[u8], st: &Styles) -> Vec<u8> {
         inserts.push((close, new.concat()));
         counts.push((tag, st.xfs.len()));
     }
+    // Formatos de número novos: no fim de `<numFmts>` (ou numa lista nova,
+    // que é o primeiro filho de `<styleSheet>`).
+    if !st.new_num_fmts.is_empty() {
+        let mut items = Vec::new();
+        for id in &st.new_num_fmts {
+            if let Some(code) = st.num_fmts.get(id) {
+                items.extend_from_slice(b"<numFmt numFmtId=\"");
+                push_u32(&mut items, *id as u32);
+                items.extend_from_slice(b"\" formatCode=\"");
+                super::cellxml::escape_attr(code, &mut items);
+                items.extend_from_slice(b"\"/>");
+            }
+        }
+        match find_tag(xml, 0, b"numFmts") {
+            Some(tag) if !tag.self_closing => {
+                let close = close_of(xml, &tag, b"numFmts");
+                let before = find_all(&xml[tag.end..close], b"numFmt");
+                inserts.push((close, items));
+                counts.push((tag, before + st.new_num_fmts.len()));
+            }
+            _ => {
+                if let Some(root) = find_tag(xml, 0, b"styleSheet") {
+                    let mut list = b"<numFmts count=\"".to_vec();
+                    push_u32(&mut list, st.new_num_fmts.len() as u32);
+                    list.extend_from_slice(b"\">");
+                    list.extend_from_slice(&items);
+                    list.extend_from_slice(b"</numFmts>");
+                    inserts.push((root.end, list));
+                }
+            }
+        }
+    }
     if inserts.is_empty() {
         return xml.to_vec();
     }
@@ -92,6 +124,17 @@ pub fn patch_styles(xml: &[u8], st: &Styles) -> Vec<u8> {
     }
     out.extend_from_slice(&xml[pos..]);
     out
+}
+
+/// Quantos elementos `<name>` há em `buf`.
+fn find_all(buf: &[u8], name: &[u8]) -> usize {
+    let mut n = 0;
+    let mut pos = 0;
+    while let Some(t) = find_tag(buf, pos, name) {
+        n += 1;
+        pos = t.end;
+    }
+    n
 }
 
 /// Posição do `</name>` que fecha a lista aberta em `tag`.
@@ -365,5 +408,12 @@ mod tests {
         let back = crate::parts::parse_styles(out.as_bytes());
         assert_eq!(back.xfs, st.xfs);
         assert_eq!(back.fonts, st.fonts);
+        // Formato de número novo: lista criada no começo do styleSheet.
+        let id = st.intern_num_fmt("0.000");
+        assert_eq!(id, 164);
+        assert_eq!(st.intern_num_fmt("0.00"), 2, "interno");
+        let out = patch_styles(XML.as_bytes(), &st);
+        let back = crate::parts::parse_styles(&out);
+        assert_eq!(back.num_fmts.get(&164).map(String::as_str), Some("0.000"));
     }
 }

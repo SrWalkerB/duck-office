@@ -795,6 +795,18 @@ O que a F3 ensinou:
 
 Pendências da F3: teste manual de teclado e mouse na janela; corpus com planilhas públicas variadas (por enquanto, a sintética, a vitrine e o arquivo de referência).
 
+### Status da F3.5 (22/11/2026): a casca do app, primeira parte
+
+- **Faixa de opções** (`apps/duck-sheets/src/ribbon.rs`): abas, grupos com rótulo e botões em duas fileiras, desenhados pelo próprio app (mesmo `Painter` da grade). Os botões ligados (negrito, alinhamento...) e as caixas (fonte, tamanho, formato de número) acompanham a célula ativa. Cada botão dispara uma `Act` (`actions.rs`), a mesma que os menus e o clique direito usam.
+- **Menus** (`menu.rs`): listas com atalhos e marca, paleta de cores, menu do clique direito e uma caixa de diálogo de um campo (largura da coluna, altura da linha). As perguntas de sim/não usam o diálogo nativo (`Window::confirm`).
+- **Formatos novos**: família e tamanho da fonte, aumentar/diminuir, alinhamento vertical, recuo, mais/menos casas decimais (o código do formato é ajustado seção a seção e vira um formato personalizado novo, gravado em `<numFmts>`), tipos de borda.
+- **Comandos novos** (`duck_core::Command`): `Merges`, `RowsHidden`/`ColsHidden`, `Pane`. O gravador regrava `<mergeCells>` no lugar certo do esquema (antes ia logo depois de `</sheetData>`, o que o Excel recusaria com `autoFilter` ou proteção na aba), escreve `hidden` nas linhas e colunas e troca o `<pane>` do primeiro `<sheetView>`.
+- **Planilha nova**: um pacote mínimo (`duck_xlsx::write::write_blank`) gravado num temporário e aberto como qualquer arquivo; o primeiro "salvar" pede o lugar.
+- **Arquivos recentes** em `%APPDATA%\duck-office\recentes.txt` (ou `~/.config/duck-office`).
+- **"Abrir com"**: no Windows, chaves em `HKCU\Software\Classes` (ProgId, `OpenWithProgids` e `Applications\duck-sheets.exe`); no Linux, um `.desktop` em `~/.local/share/applications`. Só quando o usuário pede pelo menu Arquivo, e o programa padrão não muda.
+
+Conferido com as opções de teste (`--novo`, `--edit mesclar…`, `--menu`): mesclar, ocultar, congelar, fontes, decimais e bordas salvos e relidos com 0 divergências no calamine; round-trip do arquivo de referência continua com 0 divergências.
+
 ---
 
 ## Questões em aberto

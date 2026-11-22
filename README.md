@@ -50,11 +50,13 @@ cargo run --release -p duck-sheets -- caminho/arquivo.xlsx
 
 Sem arquivo, abre o diálogo nativo (ou arraste o arquivo para a janela). Teclas: setas (+Shift seleciona, +Ctrl vai até a borda dos dados), PageUp/PageDown, Ctrl+Home/End, Ctrl+PageUp/PageDown (abas), Ctrl+C (copia a seleção), Ctrl+F e F3 (busca), Ctrl+G ou F5 (ir para), Ctrl+O (abrir), Ctrl+A, Ctrl + roda ou Ctrl +/−/0 (zoom).
 
+A faixa de opções em cima tem as abas **Arquivo** (novo, abrir, recentes, salvar, salvar como, "Abrir com" do sistema), **Página Inicial** (área de transferência, fonte, alinhamento, número, células, edição), **Inserir** (linhas, colunas, mesclagem) e **Exibir** (zoom, linhas de grade, cabeçalhos, congelar painéis). O clique direito na grade ou nos cabeçalhos abre um menu com as ações mais comuns.
+
 Edição: digitar substitui a célula; F2, duplo clique ou clique na barra de fórmulas editam o conteúdo; Enter/Tab confirmam e Esc cancela; Delete apaga a seleção; Ctrl+C, Ctrl+X e Ctrl+V copiam, recortam e colam (de outros programas também); Ctrl+Z e Ctrl+Y desfazem e refazem; Ctrl+S salva e Ctrl+Shift+S salva como. A barra de ferramentas tem negrito, itálico, sublinhado, tachado, cores, alinhamento, formatos de número, bordas e inserir/apagar linhas e colunas (também Ctrl+N/B, Ctrl+I, Ctrl+U, Ctrl+5, Ctrl+Shift+1/3/4/5/7 e Ctrl+Alt+= / Ctrl+Alt+-).
 
 O que se digita é lido como no Excel em português: `1.234,56`, `10%`, `R$ 10`, `22/11/2026`, `14:30`, `VERDADEIRO`, `=A1*2`. Fórmulas simples ganham valor na hora; as outras (com intervalos, como `SUM`) ficam sem valor até o motor de cálculo (F4), e o arquivo salvo pede ao Excel para recalcular ao abrir.
 
-Opções: `--sheet N` (aba inicial, 1 = primeira), `--cell B12`, `--zoom 80`, `--find texto`. Para testar a edição sem a janela: `--edit A1=valor` (também `copiar:A1:B2`, `colar:D5`, `inserir:A5:A6`, `formatar:negrito:A1:B2`...), `--undo N` e `--save-to cópia.xlsx`.
+Opções: `--sheet N` (aba inicial, 1 = primeira), `--cell B12`, `--zoom 80`, `--find texto`, `--novo` (planilha em branco). Para testar a edição sem a janela: `--edit A1=valor` (também `copiar:A1:B2`, `colar:D5`, `inserir:A5:A6`, `formatar:negrito:A1:B2`, `mesclar-centralizar:A1:C1`, `ocultar-linhas:A3:A4`, `congelar:B2`, `largura=20:C1`...), `--undo N`, `--save-to cópia.xlsx`; e, para screenshots, `--aba exibir` e `--menu bordas` (abre um menu).
 
 Medir (abre, rola a aba, mostra os tempos e sai) e screenshot (renderiza fora da tela depois de carregar tudo):
 

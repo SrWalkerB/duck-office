@@ -397,7 +397,7 @@ impl SheetsApp {
         p.fill(st, &st, HEADER_BG);
         p.fill(Rect::new(0.0, st.y0, geom.w, st.y0 + px), &st, BAR_LINE);
         let small = ui.with_px(12.0 * s);
-        let left = match (&self.hover_link, self.hover_tool) {
+        let left = match (&self.hover_link, self.hover_act) {
             (_, Some((_, tip))) => tip.to_string(),
             (Some(l), _) => format!("Ctrl+clique para abrir: {l}"),
             _ => self.message.clone(),
@@ -426,17 +426,49 @@ impl SheetsApp {
         }
         p.label(&buf, small, st, Align::Right, 10.0 * s, UI_MUTED);
 
-        // Barra de ferramentas por último: a paleta aberta fica por cima de tudo.
-        crate::format::draw(
+        // Faixa de opções, menus e caixa de diálogo por último: ficam por cima.
+        let theme = crate::ribbon::Theme {
+            bg: HEADER_BG,
+            body: WHITE,
+            line: BAR_LINE,
+            text: UI_TEXT,
+            muted: UI_MUTED,
+            hover: rgb(0xE8EAED),
+            on: HEADER_SEL,
+            accent: ACCENT,
+        };
+        let view = self.doc.as_ref().and_then(|d| d.current()).map(|(_, v)| (v.grid, v.headers));
+        let num_fmt_name = match (active.as_ref(), self.doc.as_ref()) {
+            (Some(a), Some(d)) => crate::format::format_name(&d.styles, a.num_fmt),
+            _ => "",
+        };
+        let state = crate::ribbon::State {
+            active: active.as_ref(),
+            grid: view.is_none_or(|v| v.0),
+            headers: view.is_none_or(|v| v.1),
+            colors: self.colors,
+            num_fmt_name,
+        };
+        let file_open = self
+            .popup
+            .as_ref()
+            .is_some_and(|m| m.owner == Some(crate::ribbon::Act::Drop(crate::ribbon::Drop::File)));
+        crate::ribbon::draw(
             &mut p,
             &geom,
+            self.ribbon_tab,
             ui,
-            active.as_ref(),
-            self.hover_tool.map(|t| t.0),
-            self.menu.as_ref(),
-            self.colors,
-            (HEADER_BG, BAR_LINE, UI_TEXT, rgb(0xE8EAED), HEADER_SEL),
+            &state,
+            self.hover_act.map(|t| t.0),
+            file_open,
+            &theme,
         );
+        if let Some(m) = &self.popup {
+            m.draw(&mut p, &geom, ui, self.mouse, &theme);
+        }
+        if let Some(pr) = &self.prompt {
+            pr.draw(&mut p, &geom, ui, &theme);
+        }
 
         self.instances = out;
         self.buf = buf;

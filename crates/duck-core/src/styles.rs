@@ -141,6 +141,8 @@ pub struct Styles {
     /// estilo do arquivo de que ele derivou (o gravador copia o `<xf>` dele
     /// e troca só o que mudou).
     pub xf_base: Vec<u16>,
+    /// Formatos de número criados na edição (ids em `num_fmts`).
+    pub new_num_fmts: Vec<u16>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -360,6 +362,21 @@ impl Styles {
         (self.xfs.len() - 1) as u16
     }
 
+    /// Id de um formato de número com o código `code`: um interno ou
+    /// personalizado igual, ou um novo (a partir de 164, como o Excel).
+    pub fn intern_num_fmt(&mut self, code: &str) -> u16 {
+        if let Some((&id, _)) = self.num_fmts.iter().find(|(_, c)| c.as_str() == code) {
+            return id;
+        }
+        if let Some(id) = (0..164u16).find(|&i| crate::numfmt::builtin(i) == Some(code)) {
+            return id;
+        }
+        let id = self.num_fmts.keys().copied().max().unwrap_or(163).max(163) + 1;
+        self.num_fmts.insert(id, code.to_string());
+        self.new_num_fmts.push(id);
+        id
+    }
+
     /// Índice de uma fonte igual a `f` (nova no fim da lista, se não houver).
     pub fn intern_font(&mut self, f: Font) -> u16 {
         match self.fonts.iter().position(|x| *x == f) {
@@ -393,7 +410,8 @@ impl Styles {
 
     /// Há estilos criados na edição.
     pub fn has_new(&self) -> bool {
-        self.xfs.len() > self.file_counts.xfs
+        !self.new_num_fmts.is_empty()
+            || self.xfs.len() > self.file_counts.xfs
             || self.fonts.len() > self.file_counts.fonts
             || self.fills.len() > self.file_counts.fills
             || self.borders.len() > self.file_counts.borders

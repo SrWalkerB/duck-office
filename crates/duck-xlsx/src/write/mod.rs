@@ -10,6 +10,7 @@
 //! - [`save_file`]: grava num temporário, **relê e confere** as abas
 //!   regravadas contra o modelo e só então substitui o destino.
 
+mod blank;
 mod cellxml;
 mod deflate;
 mod patch;
@@ -31,6 +32,7 @@ use crate::{Book, Error};
 use deflate::PartEncoder;
 use zipw::ZipWriter;
 
+pub use blank::write_blank;
 pub use deflate::compress_chunk;
 
 #[derive(Clone, Debug)]
@@ -191,7 +193,10 @@ impl Book {
         let shifts = &sheet.edits().shifts;
         zip.begin_part(&e.name, e.size >= 2 << 30)?;
         let mut enc = PartEncoder::new(opts.level, opts.chunk_bytes);
-        let h = regen::head(&head, sheet, shifts);
+        let mut h = regen::head(&head, sheet, shifts);
+        if sheet.edits().pane {
+            h = patch::patch_pane(&h, sheet.layout.pane);
+        }
         enc.write(zip, &h)?;
         let mut xml_out = h.len() as u64;
         let cells = regen::sheet_data(sheet, shared, &mut |b| {

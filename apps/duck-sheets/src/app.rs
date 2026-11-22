@@ -25,7 +25,7 @@ use crate::search::{self, SearchJob, SearchResult};
 // ---------------------------------------------------------------------------
 
 pub const UI_FONT_PX: f32 = 13.0;
-pub const TOOLBAR_H: f32 = 36.0;
+pub const TOOLBAR_H: f32 = crate::ribbon::TABS_H + crate::ribbon::BODY_H;
 pub const FBAR_H: f32 = 32.0;
 pub const NAMEBOX_W: f32 = 110.0;
 pub const HEADER_H: f32 = 20.0;
@@ -473,12 +473,21 @@ pub struct SheetsApp {
     pub saving: Option<crate::edit::SaveJob>,
     /// Última cópia feita no app (fórmulas e estilos para colar).
     pub clip: Option<crate::edit::Clip>,
-    /// Paleta de cores aberta na barra de ferramentas.
-    pub menu: Option<crate::format::Menu>,
+    /// Menu aberto (lista, paleta ou clique direito).
+    pub popup: Option<crate::menu::Popup>,
+    /// Caixa de diálogo aberta (largura, altura).
+    pub prompt: Option<crate::menu::Prompt>,
     /// Últimas cores de texto e de fundo escolhidas (RGB).
     pub colors: (u32, u32),
-    /// Botão da barra sob o mouse e a dica dele.
-    pub hover_tool: Option<(crate::format::Tool, &'static str)>,
+    /// Botão da faixa sob o mouse e a dica dele.
+    pub hover_act: Option<(crate::ribbon::Act, &'static str)>,
+    /// Aba da faixa de opções.
+    pub ribbon_tab: crate::ribbon::Tab,
+    /// Arquivos abertos recentemente (menu Arquivo).
+    pub recent: Vec<PathBuf>,
+    /// Arquivo temporário da planilha nova (salvar pede o lugar).
+    pub untitled_path: Option<PathBuf>,
+    pub new_count: u32,
     /// O usuário já aceitou mexer na estrutura de abas com gráficos/tabelas.
     pub objects_ok: bool,
 }
@@ -539,9 +548,14 @@ impl SheetsApp {
             editor: None,
             saving: None,
             clip: None,
-            menu: None,
+            popup: None,
+            prompt: None,
             colors: (0xFF0000, 0xFFFF00),
-            hover_tool: None,
+            hover_act: None,
+            ribbon_tab: Default::default(),
+            recent: crate::actions::load_recent(),
+            untitled_path: None,
+            new_count: 0,
             objects_ok: false,
         }
     }
@@ -614,6 +628,7 @@ impl SheetsApp {
             match m {
                 Msg::Opened { sheets, active, styles, strings, date1904, at } => {
                     self.note("arquivo aberto", at);
+                    self.remember_recent(&path);
                     let looks = Arc::new(Looks::new(&styles));
                     let mdw = self.measure_mdw(&looks);
                     self.doc = Some(Doc {
@@ -1050,7 +1065,7 @@ impl SheetsApp {
         self.clamp_scroll();
     }
 
-    fn zoom(&self) -> i32 {
+    pub(crate) fn zoom(&self) -> i32 {
         self.doc.as_ref().and_then(|d| d.current()).map_or(100, |(_, v)| v.zoom as i32)
     }
 
@@ -1155,7 +1170,7 @@ impl SheetsApp {
 
     // --- busca ----------------------------------------------------------------
 
-    fn open_find(&mut self) {
+    pub(crate) fn open_find(&mut self) {
         let f = self.find.get_or_insert_with(|| Find {
             input: TextInput::new(),
             job: None,
@@ -1233,7 +1248,48 @@ impl SheetsApp {
 
     fn mouse_down(&mut self, cx: &mut Context, x: f32, y: f32, mods: Modifiers, clicks: u8) {
         let g = self.geom();
-        if self.doc.as_ref().and_then(|d| d.current()).is_some() && self.toolbar_click(&g, x, y) {
+        // Caixa de diálogo aberta: só ela responde.
+        if self.prompt.is_some() {
+            let (_, input, ok, cancel) = crate::menu::prompt_rects(&g);
+            if ok.contains(x, y) {
+                self.prompt_ok();
+            } else if cancel.contains(x, y) {
+                self.prompt = None;
+            } else if input.contains(x, y)
+                && let Some(p) = &mut self.prompt
+            {
+                p.input.select_all();
+            }
+            return;
+        }
+        // Menu aberto: clique nele escolhe; fora, só fecha.
+        if let Some(pp) = self.popup.take() {
+            if let Some(act) = pp.hit(&g, x, y) {
+                self.run_act(cx, act);
+                return;
+            }
+            if pp.rect.contains(x, y) {
+                self.popup = Some(pp);
+            }
+            return;
+        }
+        if g.toolbar.contains(x, y) {
+            self.commit_edit();
+            let (Some(text), tab) = (self.text.as_mut(), self.ribbon_tab) else { return };
+            let ui = text.default_style();
+            let lay = crate::ribbon::layout(&g, tab, text, ui);
+            match lay.hit(x, y) {
+                Some(crate::ribbon::Hit::Tab(None)) => {
+                    let r = lay.file_tab();
+                    self.open_drop(crate::ribbon::Drop::File, r, &g);
+                }
+                Some(crate::ribbon::Hit::Tab(Some(t))) => self.set_ribbon_tab(t),
+                Some(crate::ribbon::Hit::Button(crate::ribbon::Act::Drop(d), r, _)) => {
+                    self.open_drop(d, r, &g)
+                }
+                Some(crate::ribbon::Hit::Button(act, ..)) => self.run_act(cx, act),
+                None => {}
+            }
             return;
         }
         // Barra de fórmulas: edita a célula ativa ali.
@@ -1393,9 +1449,23 @@ impl SheetsApp {
         self.mouse = (x, y);
         let Some(drag) = self.drag else {
             let g = self.geom();
-            let tool = self.toolbar_hover(&g, x, y);
-            if tool.map(|t| t.0) != self.hover_tool.map(|t| t.0) {
-                self.hover_tool = tool;
+            if self.popup.is_some() || self.prompt.is_some() {
+                return true;
+            }
+            let tool = if g.toolbar.contains(x, y) {
+                let tab = self.ribbon_tab;
+                self.text.as_mut().and_then(|text| {
+                    let ui = text.default_style();
+                    match crate::ribbon::layout(&g, tab, text, ui).hit(x, y) {
+                        Some(crate::ribbon::Hit::Button(a, _, tip)) => Some((a, tip)),
+                        _ => None,
+                    }
+                })
+            } else {
+                None
+            };
+            if tool.map(|t| t.0) != self.hover_act.map(|t| t.0) {
+                self.hover_act = tool;
                 return true;
             }
             let over_input = g.namebox.contains(x, y)
@@ -1548,7 +1618,7 @@ impl SheetsApp {
     }
 
     /// Ajusta a largura da coluna ao texto mais largo dela (até 20 mil células).
-    fn autofit_col(&mut self, col: u32) {
+    pub(crate) fn autofit_col(&mut self, col: u32) {
         let Some(doc) = &self.doc else { return };
         let Some((sheet, view)) = doc.current() else { return };
         let (sheet, looks, strings, date1904, mdw) =
@@ -1591,7 +1661,7 @@ impl SheetsApp {
             .unwrap_or_default()
     }
 
-    fn cell_ref_into_namebox(&mut self) {
+    pub(crate) fn cell_ref_into_namebox(&mut self) {
         let r = self.doc.as_ref().and_then(|d| d.current()).map(|(_, v)| v.cur);
         if let Some((r, c)) = r {
             let mut s = String::new();
@@ -1600,7 +1670,7 @@ impl SheetsApp {
         }
     }
 
-    fn pick_and_open(&mut self, cx: &mut Context) {
+    pub(crate) fn pick_and_open(&mut self, cx: &mut Context) {
         let Some(w) = &self.window else { return };
         let filters: &[(&str, &[&str])] = &[
             ("Planilhas", &["xlsx", "xlsm", "csv", "tsv", "txt"]),
@@ -1616,6 +1686,17 @@ impl SheetsApp {
 
     fn key(&mut self, cx: &mut Context, key: Key, mods: Modifiers, text: Option<String>) -> bool {
         let ctrl = mods.ctrl || mods.logo;
+        // Caixa de diálogo: Enter confirma, Esc fecha, o resto vai para o campo.
+        if let Some(p) = &mut self.prompt {
+            match key {
+                Key::Enter => self.prompt_ok(),
+                Key::Escape => self.prompt = None,
+                _ => {
+                    p.input.key(&key, mods, text.as_deref(), cx.clipboard());
+                }
+            }
+            return true;
+        }
         if let Some(handled) = self.editor_key(cx, &key, mods, text.as_deref()) {
             return handled;
         }
@@ -1707,7 +1788,7 @@ impl SheetsApp {
                 self.cell_ref_into_namebox();
                 self.namebox.select_all();
             }
-            Key::Escape if self.menu.is_some() => self.menu = None,
+            Key::Escape if self.popup.is_some() => self.popup = None,
             Key::Escape => {
                 if self.find.take().is_none()
                     && let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut())
@@ -1913,7 +1994,9 @@ impl App for SheetsApp {
         self.waker = Some(cx.waker());
         self.window = Some(window.clone());
         // A leitura começa já: corre junto com a GPU e as fontes.
-        if let Some(p) = self.opts.path.clone() {
+        if self.opts.new_file {
+            self.new_file();
+        } else if let Some(p) = self.opts.path.clone() {
             self.open(p, cx.waker());
         } else if self.opts.bench || self.opts.screenshot.is_some() {
             self.error = Some("informe o arquivo".into());
@@ -2017,6 +2100,13 @@ impl App for SheetsApp {
             }
             Event::MouseDown { button: MouseButton::Left, x, y, modifiers, clicks } => {
                 self.mouse_down(cx, x as f32, y as f32, modifiers, clicks);
+                true
+            }
+            Event::MouseDown { button: MouseButton::Right, x, y, .. } => {
+                self.popup = None;
+                if self.prompt.is_none() {
+                    self.context_menu(x as f32, y as f32);
+                }
                 true
             }
             Event::MouseUp { button: MouseButton::Left, .. } => match self.drag.take() {
