@@ -244,6 +244,11 @@ impl NumFmt {
         self.sections.first().is_some_and(|s| s.date)
     }
 
+    /// O formato mostra percentual.
+    pub fn is_percent(&self) -> bool {
+        self.sections.first().is_some_and(|s| s.percent > 0)
+    }
+
     /// Formata um número em `out` (anexa).
     pub fn format_number(&self, v: f64, date1904: bool, out: &mut String) -> Formatted {
         let start = out.len();

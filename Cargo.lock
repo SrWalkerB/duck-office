@@ -655,6 +655,7 @@ dependencies = [
 name = "duck-xlsx"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "duck-calc",
  "duck-core",
  "duck-deflate",

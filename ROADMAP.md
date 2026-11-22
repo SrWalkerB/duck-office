@@ -2,15 +2,15 @@
 
 Onde o projeto está, o que já foi feito e o que falta. Os detalhes de cada decisão e as medições completas ficam em [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-**Fase atual: fim da F2.** O visualizador está pronto e medido no Windows e no Linux; falta só o teste manual de teclado e mouse. A próxima fase é a **F3** (edição e salvar).
+**Fase atual: fim da F3.** O duck-sheets edita e salva `.xlsx`/`.xlsm`/`.csv` sem perder o que não entende, com round-trip conferido no arquivo de referência; falta o teste manual de teclado e mouse (F2 e F3). A próxima fase é a **F4** (motor de cálculo).
 
 | Fase | Entrega | Status |
 |---|---|---|
 | **F0** | Camada nativa (`platform/`) e grade de 1 milhão de linhas | ✅ Concluída |
 | **F1** | Leitura paralela de `.xlsx`/`.xlsm` e benchmark | ✅ Concluída (metas de 16+ núcleos em aberto) |
 | **F2** | Visualizador `duck-sheets` | ✅ Concluída |
-| **F3** | Edição e salvar com round-trip | ⏳ Próxima |
-| **F4** | Motor de cálculo | ⏳ Planejada |
+| **F3** | Edição e salvar com round-trip | ✅ Concluída (teste manual pendente) |
+| **F4** | Motor de cálculo | ⏳ Próxima |
 | **F5+** | Gráficos, pivôs, slicers, VBA, formato nativo, docs e slides | ⏳ Planejada |
 
 ---
@@ -77,16 +77,32 @@ Falta na F2:
 - [x] Hiperlinks (Ctrl+clique; externos só `http`, `https` e `mailto`).
 - [x] Abrir `.csv` (separador detectado, vírgula decimal com `;`).
 
-## ⏳ F3 · Edição e salvar
+## ✅ F3 · Edição e salvar
 
-- [ ] Camada de comandos (base para desfazer/refazer, edição e, no futuro, VBA).
-- [ ] Editar células: valores, texto, fórmulas (texto apenas; o cálculo vem na F4).
-- [ ] Inserir e apagar linhas e colunas; colar.
-- [ ] Mudar formatação básica (fonte, cor, preenchimento, formato de número, bordas, larguras).
-- [ ] **Escrita** de `.xlsx`/`.xlsm` em paralelo, preservando intactas as partes que não entendemos (VBA, pivôs, gráficos, slicers).
-- [ ] Teste de round-trip: abrir e salvar sem mudar nada deve dar um arquivo equivalente (conferido célula a célula).
+- [x] **Salvar por remendo** (ADR-014): partes intactas copiadas com os bytes comprimidos originais; numa aba editada, só as linhas e células mudadas são reescritas, o resto é copiado byte a byte; compressão em paralelo.
+- [x] **Conferência antes de substituir**: o arquivo é gravado num temporário, as abas regravadas são relidas e comparadas célula a célula com o modelo, e só então o original é trocado.
+- [x] Camada de comandos com desfazer/refazer (`duck_core::Command`), inclusive passos que mexem em várias abas.
+- [x] Editar células: na célula ou na barra de fórmulas; o que se digita é lido como no Excel em português (números, %, moeda, datas, horas, lógicos, fórmulas).
+- [x] Apagar, copiar, recortar e colar (de outros programas também); colar dentro do app leva fórmulas (deslocadas) e estilos.
+- [x] Formatação básica: negrito, itálico, sublinhado, tachado, cor do texto e do fundo, alinhamento, quebra de texto, formatos de número, bordas; larguras e alturas.
+- [x] Inserir e apagar linhas e colunas, com as fórmulas de todas as abas, os nomes definidos, mesclagens, formatação condicional, validação e links ajustados.
+- [x] `.csv` salvo com o mesmo separador e codificação.
+- [x] `duck-bench roundtrip` (cópia intacta, reescrita total, edições, estrutura) no CI e no arquivo de referência: **0 divergências**.
+- [ ] Teste manual de teclado e mouse na janela.
 
-Critério de pronto: round-trip verde num corpus de planilhas.
+Resultado no arquivo de referência (Windows, 16 threads):
+
+- salvar sem mudanças: **176–210 ms** (701 partes copiadas, idênticas byte a byte);
+- 500 edições na aba de 1,6 GB de XML: gravação em **1,5 s** e conferência em 0,9 s; o arquivo cai de 185 para 129 MB (o `calcChain.xml` sai e o deflate é o nível 6);
+- editar e salvar pelo app, abrindo o arquivo: **menos de 1 s** no total;
+- inserir ou apagar linhas/colunas na aba de 593 mil linhas: **~1 s** cada; regravar a aba (1,6 GB de XML gerados do modelo em paralelo): 1,9 s + 0,9 s de conferência.
+
+Limites desta versão:
+
+- fórmulas novas só têm valor se o avaliador simples entender (sem intervalos como `SUM`); as que dependem da célula editada não mudam. O motor de cálculo vem na F4, e o arquivo salvo pede ao Excel para recalcular ao abrir;
+- inserir/apagar linhas não move gráficos, imagens, tabelas e tabelas dinâmicas (o app avisa antes); na aba regravada, `cm`/`vm` das células e níveis de agrupamento das linhas não voltam;
+- texto rico de células reescritas vira texto simples; quebra de linha dentro da célula (Alt+Enter) ainda não existe;
+- os nomes das funções são os do arquivo (inglês, separador `,`).
 
 ## ⏳ F4 · Motor de cálculo
 

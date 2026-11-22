@@ -120,6 +120,108 @@ pub fn parse_csv(bytes: &[u8], name: &str) -> Sheet {
     sheet
 }
 
+/// Como um CSV foi gravado: separador e codificação (para salvar igual).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CsvFormat {
+    pub sep: u8,
+    pub bom: bool,
+    /// UTF-8 (senão, Windows-1252).
+    pub utf8: bool,
+}
+
+impl Default for CsvFormat {
+    fn default() -> Self {
+        Self { sep: b';', bom: true, utf8: true }
+    }
+}
+
+/// O formato de um CSV existente.
+pub fn detect_format(bytes: &[u8]) -> CsvFormat {
+    let bom = bytes.starts_with(b"\xEF\xBB\xBF");
+    let body = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+    let (utf8, text) = match std::str::from_utf8(body) {
+        Ok(s) => (true, std::borrow::Cow::Borrowed(s)),
+        Err(_) => (false, std::borrow::Cow::Owned(windows_1252(body))),
+    };
+    CsvFormat { sep: detect_separator(&text), bom, utf8 }
+}
+
+/// Grava a aba em CSV (valores, não fórmulas, como o Excel). Com `;` como
+/// separador, números com vírgula decimal. Grava num temporário e troca.
+pub fn write_csv(
+    path: &Path,
+    sheet: &Sheet,
+    shared: &duck_core::StringTable,
+    fmt: CsvFormat,
+) -> Result<(), Error> {
+    use duck_core::Value;
+    let sep = fmt.sep as char;
+    let mut out = String::with_capacity(sheet.rows() as usize * sheet.cols() as usize * 8);
+    for r in 0..sheet.rows() {
+        // Sem as colunas vazias do fim da linha.
+        let last = (0..sheet.cols()).rev().find(|&c| sheet.has_value(r, c));
+        if let Some(last) = last {
+            for c in 0..=last {
+                if c > 0 {
+                    out.push(sep);
+                }
+                match sheet.cell(r, c, shared).value {
+                    Value::Empty => {}
+                    Value::Number(x) => {
+                        let mut s = String::new();
+                        duck_core::numfmt::format_general(x, 15, &mut s);
+                        if fmt.sep == b';' {
+                            s = s.replace('.', ",");
+                        }
+                        out.push_str(&s);
+                    }
+                    Value::Text(t) => {
+                        if t.contains([sep, '"', '\n', '\r']) || t.starts_with(' ') || t.ends_with(' ') {
+                            out.push('"');
+                            out.push_str(&t.replace('"', "\"\""));
+                            out.push('"');
+                        } else {
+                            out.push_str(t);
+                        }
+                    }
+                    Value::Bool(b) => out.push_str(if b { "VERDADEIRO" } else { "FALSO" }),
+                    Value::Error(e) => out.push_str(e.as_str()),
+                }
+            }
+        }
+        out.push_str("\r\n");
+    }
+    let mut bytes = Vec::with_capacity(out.len() + 3);
+    if fmt.utf8 {
+        if fmt.bom {
+            bytes.extend_from_slice(b"\xEF\xBB\xBF");
+        }
+        bytes.extend_from_slice(out.as_bytes());
+    } else {
+        bytes.extend(out.chars().map(to_windows_1252));
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!("~{name}.duck-salvando"));
+    std::fs::write(&tmp, &bytes).map_err(Error::Io)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(Error::Io(e));
+    }
+    Ok(())
+}
+
+/// Um caractere em Windows-1252 (`?` se não existir lá).
+fn to_windows_1252(c: char) -> u8 {
+    const HIGH: [char; 32] = [
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8D}', 'Ž', '\u{8F}',
+        '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9D}', 'ž', 'Ÿ',
+    ];
+    match c as u32 {
+        0..=0x7F | 0xA0..=0xFF => c as u32 as u8,
+        _ => HIGH.iter().position(|&h| h == c).map_or(b'?', |i| 0x80 + i as u8),
+    }
+}
+
 /// O separador mais regular nas primeiras linhas (fora de aspas).
 fn detect_separator(text: &str) -> u8 {
     const CANDIDATES: [u8; 4] = *b";,\t|";
@@ -244,6 +346,30 @@ mod tests {
         assert_eq!(s.cell(1, 1, &sh).value, Value::Text("2,5"));
         let s = parse_csv(b"x\ty\n10\t20\n", "t");
         assert_eq!(s.cell(1, 1, &sh).value, Value::Number(20.0));
+    }
+
+    #[test]
+    fn write_and_read_back() {
+        let src = "Nome;Valor\r\nJoão;1,5\r\n\"a;b\";-3\r\n";
+        let mut s = parse_csv(src.as_bytes(), "t");
+        s.set_cell(2, 1, duck_core::CellValue::Number(1234.25), None, None);
+        let dir = std::env::temp_dir().join(format!("duck-csv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sh = StringTable::new();
+        for fmt in
+            [CsvFormat { sep: b';', bom: true, utf8: true }, CsvFormat { sep: b';', bom: false, utf8: false }]
+        {
+            let p = dir.join("t.csv");
+            write_csv(&p, &s, &sh, fmt).unwrap();
+            let bytes = std::fs::read(&p).unwrap();
+            assert_eq!(detect_format(&bytes), fmt);
+            let back = parse_csv(&bytes, "t");
+            assert_eq!(back.cell(1, 0, &sh).value, Value::Text("João"));
+            assert_eq!(back.cell(1, 1, &sh).value, Value::Number(1.5));
+            assert_eq!(back.cell(2, 0, &sh).value, Value::Text("a;b"));
+            assert_eq!(back.cell(2, 1, &sh).value, Value::Number(1234.25));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

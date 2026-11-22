@@ -20,6 +20,7 @@
 - [ADR-011 · Plataformas](#adr-011--plataformas)
 - [ADR-012 · Escalar com o hardware: paralelismo e SIMD](#adr-012--escalar-com-o-hardware-paralelismo-e-simd)
 - [ADR-013 · Formato de arquivo nativo (futuro, em discussão)](#adr-013--formato-de-arquivo-nativo-futuro-em-discussão)
+- [ADR-014 · Salvar por remendo, com conferência](#adr-014--salvar-por-remendo-com-conferência)
 - [Roadmap](#roadmap)
 - [Questões em aberto](#questões-em-aberto)
 
@@ -470,6 +471,29 @@ Tendência inicial: **container próprio com codificação de colunas inspirada 
 
 ---
 
+## ADR-014 · Salvar por remendo, com conferência
+
+**Contexto.** O modelo (ADR-004) guarda o que a tela e o cálculo precisam, não tudo o que está no XML: atributos como `cm`/`vm` (fórmulas dinâmicas, valores ricos), `spans` e `x14ac:dyDescent` das linhas, extensões em `extLst`, texto rico inline. Regerar a aba a partir do modelo perderia isso. E o arquivo de referência tem 185 MB comprimidos: recomprimir tudo a cada salvamento custaria segundos sem motivo.
+
+**Decisão.**
+
+- **Partes não tocadas** vão para o zip novo com os **bytes comprimidos originais** (mesmo CRC, sem descompactar).
+- **Aba editada**: o XML original é relido em fluxo (inflate paralelo nas grandes) e **remendado**: linhas sem edição são copiadas byte a byte (em blocos, sem olhar as células); numa linha editada, o `<row>` e os `<c>` não editados também; só as células editadas são escritas a partir do modelo, na posição certa. Texto novo vai como `inlineStr` (o `sharedStrings.xml` fica intacto).
+- **Estilos novos** entram no fim das listas do `styles.xml`, cada `<xf>` copiado do estilo do arquivo de que derivou, com só o que mudou trocado.
+- **Inserir/apagar linhas ou colunas** é a exceção: a aba é regravada inteira a partir do modelo (pedaços de linhas gerados em paralelo), e no resto do XML dela as referências (`ref`, `sqref`, fórmulas da formatação condicional e da validação, nomes definidos do workbook) andam com cada mudança, em ordem.
+- Valores mudados: `<calcPr fullCalcOnLoad="1">` (o Excel recalcula ao abrir até a F4 existir). Fórmulas mudadas: o `calcChain.xml` sai, com o relacionamento e o content type.
+- Partes regravadas são comprimidas **em paralelo**: pedaços de 4 MB independentes, cada um terminando num flush de sincronização, concatenados; CRCs combinados.
+- **Conferência antes de substituir**: grava num temporário ao lado do destino, relê as abas regravadas com o próprio leitor e compara célula a célula (valor, estilo, fórmula) e o layout com o modelo; só então troca o arquivo. Um defeito do gravador nunca destrói o original.
+
+**Alternativas rejeitadas.**
+
+- *Regerar o pacote a partir do modelo*: simples, mas perde o que o modelo não guarda e recomprime gigabytes.
+- *Escrever as edições num arquivo à parte* (diário de mudanças): rápido, mas o resultado não abriria no Excel.
+
+**Consequências.** Salvar sem mudanças é quase uma cópia (176–210 ms no arquivo de referência); o custo de salvar cresce com o tamanho das **abas editadas**, não do arquivo. A conferência custa uma releitura dessas abas (~0,9 s na de 1,6 GB). Mudanças de estrutura perdem, só na aba mudada, os atributos que o modelo não guarda; gráficos e tabelas que apontam para ela não são ajustados (o app avisa).
+
+---
+
 ## Roadmap
 
 | Fase | Entrega | Critério de pronto |
@@ -742,6 +766,34 @@ Pendências da F2:
 
 - **Teste manual de teclado e mouse** na janela. Seleção, Ctrl+setas, busca, cópia e referências têm teste de código; redimensionar e Ctrl+clique em link ainda não foram usados à mão.
 - Gráficos, imagens e slicers ficam para a F5.
+
+### Status da F3 (22/11/2026)
+
+Edição e salvar, com a gravação descrita no ADR-014.
+
+- **Gravador** (`duck-xlsx/src/write/`): escritor de zip (cópia de partes comprimidas, cabeçalhos corrigidos no fim, zip64 quando precisa), compressão paralela (`PartEncoder`), remendo de abas (`patch.rs`), regravação de abas com estrutura mudada (`regen.rs`), estilos novos (`styles.rs`), `save_file` com temporário, conferência e troca. CSV salvo com o mesmo separador e codificação.
+- **Modelo** (`duck-core`): `Sheet::set_cell`/`set_raw`/`set_style` escrevem nos blocos (o bloco é descompactado e recompactado no fim do comando), `Edits` registra o que mudou para o gravador, `Styles::derive_xf` cria estilos novos sem repetir. `Command` (células, estilos, larguras, alturas, inserir/apagar, grupos) devolve o próprio inverso: desfazer restaura cada célula exatamente (tabelas de strings e fórmulas só crescem).
+- **Inserir/apagar** (`duck-core/src/shift.rs` + `duck_calc::adjust_refs`): as células andam coluna por coluna em paralelo; cada fórmula é conferida pelo modelo relativo dela (só as que realmente mudam são refeitas pelo texto), grupos compartilhados viram modelos, `#REF!` e intervalos encolhidos guardam a fórmula antiga para o desfazer. Fórmulas de outras abas que apontam para a aba mudada entram no mesmo passo de desfazer.
+- **Entrada pt-BR** (`duck_core::input`): `1.234,56`, `10%`, `R$`, científico, datas e horas, `VERDADEIRO`/`FALSO`, erros, `=fórmula`, `'texto`; o formato sugerido entra como no Excel (data e % trocam o formato de outro tipo; o resto só numa célula "Geral"). Fórmulas digitadas ganham valor pelo avaliador da formatação condicional quando ele entende.
+- **App**: editor na célula e na barra de fórmulas, Delete, copiar/recortar/colar (TSV de outros programas, ou células com fórmulas e estilos quando a cópia veio do app; bloco repetido na seleção), Ctrl+Z/Ctrl+Y, Ctrl+S/Ctrl+Shift+S numa thread, "•" no título e pergunta antes de fechar ou abrir outro arquivo, barra de ferramentas com paleta de cores, inserir/apagar linhas e colunas. `--edit`, `--undo` e `--save-to` fazem tudo isso pela linha de comando (testes sem a janela).
+
+Medido no arquivo de referência (Windows, 16 threads), com `duck-bench roundtrip`:
+
+| Caso | Gravação | Conferência | Resultado |
+|---|---|---|---|
+| Sem mudanças | 176–210 ms | 14 ms | 701 partes idênticas byte a byte |
+| 500 edições na aba de 1,6 GB | 1,5 s (nível 6), 1,2 s (nível 1) | 0,9 s | 129 MB (nível 6), 194 MB (nível 1); 0 divergências |
+| Toda célula reescrita pelo remendo (`--rewrite-all`) | 8,8 s | 1,2 s | 25,6 milhões de células; 0 divergências |
+| Inserir/apagar linhas e colunas (`--estrutura`) | 1,9 s | 0,9 s | 4 mudanças em 3,8 s; 0 divergências (23,6 milhões de células, 10,1 milhões de fórmulas) |
+
+O que a F3 ensinou:
+
+- **O nível do deflate pesa no tamanho, quase nada no tempo** (com 16 threads): nível 6 deu 129 MB contra 194 MB do nível 1, com 0,3 s a mais. Fica o 6.
+- **Refazer o texto de toda fórmula ao inserir uma linha** custava 16 s e 2,4 GB na aba de 10 milhões de fórmulas. Quase todas usam um modelo relativo que continua valendo depois de andar: conferindo só os deslocamentos das referências, a mudança caiu para ~1 s e o pico para 771 MB.
+- **O leitor próprio é tolerante demais para conferir o gravador sozinho**: uma declaração `<?xml … ?>` sem o `?` final passou na conferência e foi pega pelo calamine no round-trip. O CI roda os dois.
+- **Geradores de planilha nem sempre gravam as células em ordem** (a vitrine tinha `B19` depois de `D19`): o remendo descarta o `<c>` original de uma célula já escrita, em vez de duplicar.
+
+Pendências da F3: teste manual de teclado e mouse na janela; corpus com planilhas públicas variadas (por enquanto, a sintética, a vitrine e o arquivo de referência).
 
 ---
 

@@ -19,6 +19,8 @@ use crate::Error;
 pub enum Method {
     Stored,
     Deflated,
+    /// Método que não lemos (ou parte criptografada): só copiada ao salvar.
+    Other(u16),
 }
 
 #[derive(Clone, Debug)]
@@ -40,6 +42,20 @@ impl Entry {
 
     pub fn compressed_size(&self) -> usize {
         self.compressed
+    }
+
+    /// Código do método de compressão no zip.
+    pub fn method_code(&self) -> u16 {
+        match self.method {
+            Method::Stored => 0,
+            Method::Deflated => 8,
+            Method::Other(m) => m,
+        }
+    }
+
+    /// A parte pode ser lida (não é de um método desconhecido nem criptografada).
+    pub fn readable(&self) -> bool {
+        !matches!(self.method, Method::Other(_))
     }
 }
 
@@ -65,16 +81,16 @@ impl Package {
         for i in 0..archive.len() {
             let f = archive.by_index_raw(i).map_err(|e| Error::Zip(e.to_string()))?;
             let name = f.name().map_err(|e| Error::Zip(e.to_string()))?.into_owned();
+            // Métodos raros (bzip2, zstd...) e partes criptografadas não são
+            // lidos, mas ficam na lista para serem copiados ao salvar.
+            let header = f.header_start() as usize;
+            let code = || mmap.get(header + 8..header + 10).map_or(99, |b| u16::from_le_bytes([b[0], b[1]]));
             let method = match f.compression() {
+                _ if f.encrypted() => Method::Other(code()),
                 CompressionMethod::Stored => Method::Stored,
                 CompressionMethod::Deflated => Method::Deflated,
-                // Métodos raros (bzip2, zstd...) não aparecem em planilhas do Office.
-                _ => continue,
+                _ => Method::Other(code()),
             };
-            if f.encrypted() {
-                continue;
-            }
-            let header = f.header_start() as usize;
             let data_offset = local_data_offset(&mmap, header)
                 .ok_or_else(|| Error::Zip(format!("cabeçalho local inválido em {name}")))?;
             let compressed = f.compressed_size() as usize;
@@ -97,9 +113,19 @@ impl Package {
         self.entries.values()
     }
 
+    /// As partes na ordem em que estão no arquivo.
+    pub fn entries_in_order(&self) -> Vec<&Entry> {
+        let mut v: Vec<&Entry> = self.entries.values().collect();
+        v.sort_by_key(|e| e.data_offset);
+        v
+    }
+
     /// Lê uma parte inteira (para partes pequenas: workbook, rels, estilos...).
     pub fn read(&self, name: &str) -> Result<Vec<u8>, Error> {
         let e = self.entries.get(name).ok_or_else(|| Error::Missing(name.to_string()))?;
+        if !e.readable() {
+            return Err(Error::Zip(format!("parte {name} usa compressão ou criptografia não suportada")));
+        }
         let mut out = Vec::with_capacity(e.size.min(1 << 30) as usize);
         let mut inf = self.inflater(e);
         inf.read_into(&mut out, usize::MAX)?;

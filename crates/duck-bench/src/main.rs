@@ -6,6 +6,7 @@
 //! duck-bench verify [ARQUIVO]                                compara cada célula com o calamine
 //! duck-bench gen    SAIDA.xlsx [--rows N] [--cols M]         gera planilha sintética
 //! duck-bench preview [ARQUIVO] [--mb N]                      mede o caminho da primeira tela (F2)
+//! duck-bench roundtrip [ARQUIVO] [--rewrite-all] [--edit N] [--level L] [--keep]  salva numa cópia e confere (F3)
 //! duck-bench gen-showcase SAIDA.xlsx                         planilha de vitrine (formatos, bordas, painéis)
 //! ```
 //!
@@ -14,6 +15,7 @@
 
 mod generate;
 mod mem;
+mod roundtrip;
 mod showcase;
 mod verify;
 
@@ -70,6 +72,7 @@ fn main() {
         "inflate" => cmd_inflate(rest),
         "parse" => cmd_parse(rest),
         "preview" => cmd_preview(rest),
+        "roundtrip" => roundtrip::cmd(rest),
         "gen-showcase" => match rest.first() {
             Some(p) => showcase::write(Path::new(p))
                 .map_err(|e| e.to_string())
@@ -103,7 +106,10 @@ fn positional(args: &[String]) -> Option<String> {
             continue;
         }
         if a.starts_with("--") {
-            skip = !matches!(a.as_str(), "--quiet" | "--machine" | "--mem-trace");
+            skip = !matches!(
+                a.as_str(),
+                "--quiet" | "--machine" | "--mem-trace" | "--rewrite-all" | "--keep" | "--estrutura"
+            );
             continue;
         }
         return Some(a.clone());

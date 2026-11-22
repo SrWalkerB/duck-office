@@ -25,6 +25,7 @@ const HEADER_LINE: Rgba = rgb(0xD5D7DA);
 const HEADER_SEL: Rgba = rgb(0xD3E3FD);
 const HEADER_SEL_FULL: Rgba = rgb(0x0B57D0);
 const ACCENT: Rgba = rgb(0x0B57D0);
+const EDIT_BORDER: Rgba = ACCENT;
 const SEL_FILL: Rgba = [14, 101, 235, 26];
 const HIT_FILL: Rgba = [255, 213, 0, 110];
 const FROZEN_LINE: Rgba = rgb(0xBDC1C6);
@@ -197,6 +198,7 @@ impl SheetsApp {
         let stats = self.sel_stats();
         let mut formula = String::new();
         self.formula_text(&mut formula);
+        let active = self.active_format();
 
         let (vthumb, hthumb) = (self.vthumb(&geom), self.hthumb(&geom));
         let text = self.text.as_mut().expect("texto");
@@ -250,6 +252,20 @@ impl SheetsApp {
                 if view.headers {
                     draw_headers(&mut p, &cx, &geom, header_style, &mut buf);
                 }
+                // Editor sobre a célula.
+                if let Some(ed) = &self.editor
+                    && let Some(cell) = cell_screen_rect(&geom, view, ed.row, ed.col)
+                {
+                    let style = ui.with_px((11.0 * 96.0 / 72.0 * geom.g).round().max(6.0));
+                    let pad = (3.0 * geom.g).round().max(1.0);
+                    let need = p.text.measure_styled(&ed.input.text, style) + 2.0 * pad + 8.0 * geom.g;
+                    let r =
+                        Rect::new(cell.x0, cell.y0, (cell.x0 + need).max(cell.x1).min(geom.grid.x1), cell.y1);
+                    let colors =
+                        InputColors { focus: EDIT_BORDER, border: EDIT_BORDER, ..InputColors::default() };
+                    ed.input.draw(&mut p, r, style, pad, !ed.in_bar, &colors, "");
+                    p.stroke(r.inset(-px), &Rect::everything(), 2.0 * px, EDIT_BORDER);
+                }
                 draw_scrollbars(&mut p, vthumb, &geom, self.drag);
             }
             None => {
@@ -300,9 +316,17 @@ impl SheetsApp {
         let mut italic = ui;
         italic.italic = true;
         p.label("fx", italic, fx, Align::Center, 0.0, UI_MUTED);
-        // Uma linha só: quebras viram espaço.
-        let formula = formula.replace(['\n', '\r'], " ");
-        p.label(&formula, ui, geom.formula, Align::Left, 4.0 * s, UI_TEXT);
+        match &self.editor {
+            Some(ed) => {
+                let colors = InputColors { border: WHITE, focus: WHITE, ..InputColors::default() };
+                ed.input.draw(&mut p, geom.formula.inset(2.0 * s), ui, 2.0 * s, ed.in_bar, &colors, "");
+            }
+            None => {
+                // Uma linha só: quebras viram espaço.
+                let formula = formula.replace(['\n', '\r'], " ");
+                p.label(&formula, ui, geom.formula, Align::Left, 4.0 * s, UI_TEXT);
+            }
+        }
 
         // Busca.
         if let Some(f) = &self.find {
@@ -373,9 +397,10 @@ impl SheetsApp {
         p.fill(st, &st, HEADER_BG);
         p.fill(Rect::new(0.0, st.y0, geom.w, st.y0 + px), &st, BAR_LINE);
         let small = ui.with_px(12.0 * s);
-        let left = match &self.hover_link {
-            Some(l) => format!("Ctrl+clique para abrir: {l}"),
-            None => self.message.clone(),
+        let left = match (&self.hover_link, self.hover_tool) {
+            (_, Some((_, tip))) => tip.to_string(),
+            (Some(l), _) => format!("Ctrl+clique para abrir: {l}"),
+            _ => self.message.clone(),
         };
         p.label(&left, small, st, Align::Left, 10.0 * s, UI_MUTED);
         buf.clear();
@@ -401,10 +426,37 @@ impl SheetsApp {
         }
         p.label(&buf, small, st, Align::Right, 10.0 * s, UI_MUTED);
 
+        // Barra de ferramentas por último: a paleta aberta fica por cima de tudo.
+        crate::format::draw(
+            &mut p,
+            &geom,
+            ui,
+            active.as_ref(),
+            self.hover_tool.map(|t| t.0),
+            self.menu.as_ref(),
+            self.colors,
+            (HEADER_BG, BAR_LINE, UI_TEXT, rgb(0xE8EAED), HEADER_SEL),
+        );
+
         self.instances = out;
         self.buf = buf;
         self.buf2 = buf2;
     }
+}
+
+/// Retângulo na tela da célula (ou da mesclagem que começa nela), recortado
+/// ao painel em que ela aparece. `None` se não estiver visível.
+pub fn cell_screen_rect(g: &Geom, v: &crate::app::View, r: u32, c: u32) -> Option<Rect> {
+    let q = g.quads.iter().find(|q| {
+        !q.rect.is_empty() && (q.row_start..q.row_end).contains(&r) && (q.col_start..q.col_end).contains(&c)
+    })?;
+    let (r1, c1) = v.merges.at(r, c).map_or((r, c), |m| (m.last_row, m.last_col));
+    let x0 = pos(&v.cols, q.ox, c, q.rect.x0, g.g);
+    let x1 = pos(&v.cols, q.ox, c1 + 1, q.rect.x0, g.g);
+    let y0 = pos(&v.rows, q.oy, r, q.rect.y0, g.g);
+    let y1 = pos(&v.rows, q.oy, r1 + 1, q.rect.y0, g.g);
+    let rect = Rect::new(x0, y0, x1.max(x0 + 1.0), y1.max(y0 + 1.0)).intersect(&q.rect);
+    (!rect.is_empty()).then_some(rect)
 }
 
 /// Caixa de busca (canto superior direito da grade).

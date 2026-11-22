@@ -24,6 +24,9 @@ pub struct SheetMeta {
 }
 
 pub struct WorkbookMeta {
+    /// Caminho do `workbook.xml` no zip.
+    pub path: String,
+    pub calc_chain: Option<String>,
     pub sheets: Vec<SheetMeta>,
     /// Aba aberta quando o arquivo foi salvo (índice em `sheets`).
     pub active: usize,
@@ -61,6 +64,16 @@ fn read_rels(pkg: &Package, part: &str) -> Result<Vec<Rel>, Error> {
         out.push(Rel { id, kind, target: resolve(dir, &target) });
     });
     Ok(out)
+}
+
+/// A aba tem partes ligadas que dependem das posições das células
+/// (desenhos com gráficos e imagens, tabelas, tabelas dinâmicas)?
+pub fn sheet_objects(pkg: &Package, part: &str) -> bool {
+    read_rels(pkg, part).is_ok_and(|rels| {
+        rels.iter().any(|r| {
+            r.kind.ends_with("/drawing") || r.kind.ends_with("/table") || r.kind.ends_with("/pivotTable")
+        })
+    })
 }
 
 /// Troca o `r:id` dos hiperlinks de uma aba pelo endereço externo que está
@@ -154,6 +167,8 @@ pub fn read_workbook(pkg: &Package) -> Result<WorkbookMeta, Error> {
     let active = active.or_else(|| sheets.iter().position(|s| !s.hidden)).unwrap_or(0);
     let find = |suffix: &str| rels.iter().find(|r| r.kind.ends_with(suffix)).map(|r| r.target.clone());
     Ok(WorkbookMeta {
+        calc_chain: find("/calcChain"),
+        path: wb_path,
         sheets,
         active,
         date1904,
@@ -410,6 +425,12 @@ pub(crate) fn parse_styles(buf: &[u8]) -> Styles {
         }
         st.xfs.push(xf);
     });
+    st.file_counts = duck_core::FileCounts {
+        xfs: st.xfs.len(),
+        fonts: st.fonts.len(),
+        fills: st.fills.len(),
+        borders: st.borders.len(),
+    };
     st
 }
 

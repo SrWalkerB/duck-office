@@ -469,6 +469,22 @@ impl CfCtx<'_> {
         st
     }
 
+    /// Valor de uma fórmula digitada (sem o `=`) na célula `(row, col)`, se
+    /// for do tipo que este avaliador entende (aritmética, comparações,
+    /// referências a células da aba e as funções da lista). Enquanto o motor
+    /// de cálculo (F4) não existe, é o que dá valor às fórmulas novas.
+    pub fn eval_formula(&self, text: &str, row: u32, col: u32) -> Option<crate::CellValue> {
+        let e = parse(text)?;
+        Some(match self.eval(&e, Pos { row, col, dr: 0, dc: 0 })? {
+            V::Num(x) if x.is_finite() => crate::CellValue::Number(x),
+            V::Num(_) => crate::CellValue::Error(crate::CellError::Num),
+            V::Text(t) => crate::CellValue::Text(t.into_owned()),
+            V::Bool(b) => crate::CellValue::Bool(b),
+            V::Err => crate::CellValue::Error(crate::CellError::Value),
+            V::Empty => crate::CellValue::Number(0.0),
+        })
+    }
+
     fn eval(&self, e: &Expr, at: Pos) -> Option<V<'_>> {
         eval(e, self, at)
     }

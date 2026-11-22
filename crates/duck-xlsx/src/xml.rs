@@ -123,6 +123,36 @@ pub fn attr<'a>(attrs: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     None
 }
 
+/// Visita cada atributo: `f(nome, atributo inteiro)` (ex.: `cm`, `cm="1"`).
+pub fn for_each_attr<'a>(attrs: &'a [u8], mut f: impl FnMut(&'a [u8], &'a [u8])) {
+    let mut i = 0;
+    let n = attrs.len();
+    while i < n {
+        while i < n && attrs[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let k0 = i;
+        while i < n && attrs[i] != b'=' && !attrs[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let k1 = i;
+        while i < n && (attrs[i] == b'=' || attrs[i].is_ascii_whitespace()) {
+            i += 1;
+        }
+        if i >= n || k0 == k1 {
+            return;
+        }
+        let q = attrs[i];
+        if q != b'"' && q != b'\'' {
+            return;
+        }
+        let Some(len) = memchr(q, &attrs[i + 1..]) else { return };
+        let v1 = i + 1 + len;
+        f(&attrs[k0..k1], &attrs[k0..v1 + 1]);
+        i = v1 + 1;
+    }
+}
+
 /// Atributo decodificado como texto.
 pub fn attr_str(attrs: &[u8], key: &[u8]) -> Option<String> {
     attr(attrs, key).map(|v| {

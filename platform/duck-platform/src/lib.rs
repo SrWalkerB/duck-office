@@ -9,7 +9,7 @@
 //! nativos (`raw-window-handle`) para quem desenha (ex.: `duck-gfx`).
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -126,6 +126,66 @@ impl Window {
         }
         d.pick_file()
     }
+
+    /// Diálogo nativo "Salvar como" (modal). `name` = nome sugerido.
+    pub fn save_file(
+        &self,
+        title: &str,
+        dir: Option<&Path>,
+        name: &str,
+        filters: &[(&str, &[&str])],
+    ) -> Option<PathBuf> {
+        let mut d = rfd::FileDialog::new().set_title(title).set_parent(&*self.inner).set_file_name(name);
+        if let Some(dir) = dir {
+            d = d.set_directory(dir);
+        }
+        for (n, exts) in filters {
+            d = d.add_filter(*n, exts);
+        }
+        d.save_file()
+    }
+
+    /// Pergunta sim/não (modal). `true` = sim.
+    pub fn confirm(&self, title: &str, text: &str) -> bool {
+        rfd::MessageDialog::new()
+            .set_title(title)
+            .set_description(text)
+            .set_level(rfd::MessageLevel::Warning)
+            .set_parent(&*self.inner)
+            .set_buttons(rfd::MessageButtons::OkCancelCustom("Continuar".into(), "Cancelar".into()))
+            .show()
+            == rfd::MessageDialogResult::Custom("Continuar".into())
+    }
+
+    /// Pergunta "salvar as alterações?" com três respostas (modal).
+    pub fn ask_save(&self, title: &str, text: &str) -> SaveChoice {
+        let r = rfd::MessageDialog::new()
+            .set_title(title)
+            .set_description(text)
+            .set_level(rfd::MessageLevel::Warning)
+            .set_parent(&*self.inner)
+            .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
+                "Salvar".into(),
+                "Não salvar".into(),
+                "Cancelar".into(),
+            ))
+            .show();
+        match r {
+            rfd::MessageDialogResult::Yes => SaveChoice::Save,
+            rfd::MessageDialogResult::No => SaveChoice::Discard,
+            rfd::MessageDialogResult::Custom(s) if s == "Salvar" => SaveChoice::Save,
+            rfd::MessageDialogResult::Custom(s) if s == "Não salvar" => SaveChoice::Discard,
+            _ => SaveChoice::Cancel,
+        }
+    }
+}
+
+/// Resposta de [`Window::ask_save`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveChoice {
+    Save,
+    Discard,
+    Cancel,
 }
 
 /// Abre um endereço (`http`, `https`, `mailto`) no programa padrão do sistema.
@@ -347,6 +407,11 @@ pub trait App {
     fn event(&mut self, cx: &mut Context, event: Event);
     /// Hora de desenhar um frame (após [`Window::request_redraw`]).
     fn redraw(&mut self, cx: &mut Context);
+    /// O usuário pediu para fechar a janela. `false` cancela (ex.: há
+    /// alterações não salvas e ele escolheu "Cancelar").
+    fn close_requested(&mut self, _cx: &mut Context) -> bool {
+        true
+    }
 }
 
 /// Cria a janela e roda o loop de eventos até o app encerrar.
@@ -444,8 +509,11 @@ impl<A: App> ApplicationHandler<()> for Runner<'_, A> {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
-                self.dispatch(event_loop, Event::CloseRequested);
-                event_loop.exit();
+                let mut cx = Context { event_loop, clipboard: &mut self.clipboard, proxy: &self.proxy };
+                if self.app.close_requested(&mut cx) {
+                    self.dispatch(event_loop, Event::CloseRequested);
+                    event_loop.exit();
+                }
             }
             WindowEvent::RedrawRequested => {
                 let mut cx = Context { event_loop, clipboard: &mut self.clipboard, proxy: &self.proxy };

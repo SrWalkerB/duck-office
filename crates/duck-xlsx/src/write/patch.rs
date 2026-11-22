@@ -1,0 +1,571 @@
+//! Remendo de uma aba: o XML original passa por aqui em ordem e sai com só
+//! o que mudou reescrito (ADR-006).
+//!
+//! - Linhas sem edição são copiadas byte a byte (em blocos, sem olhar as
+//!   células, quando a próxima linha editada está além do pedaço).
+//! - Numa linha editada, o `<row>` e os `<c>` não editados também são
+//!   copiados; as células editadas são escritas a partir do modelo, na
+//!   posição certa (as que não existiam são inseridas em ordem).
+//! - Linhas editadas que não existiam entram entre as vizinhas.
+//! - Antes de `<sheetData>`, só o `<dimension>` é ajustado.
+//!
+//! Com `rewrite_all`, toda célula é escrita a partir do modelo (para testar
+//! o gravador no arquivo inteiro), mantendo os atributos que o modelo não
+//! guarda (`cm`, `vm`, `ph`). Fórmulas de tabela de dados (atributos que o
+//! modelo também não guarda) ficam como estavam.
+
+use memchr::memmem;
+
+use duck_core::{FormulaKind, Sheet, StringTable};
+
+use super::cellxml::{cell_ref, write_cell};
+use crate::sheet::{parse_ref, row_end};
+use crate::xml::{attr, is_name_end, parse_u32, tag_end};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Phase {
+    Head,
+    Rows,
+    Tail,
+}
+
+pub struct Patcher<'a> {
+    sheet: &'a Sheet,
+    shared: &'a StringTable,
+    rewrite_all: bool,
+    /// Linhas editadas, em ordem.
+    dirty: Vec<Dirty>,
+    next: usize,
+    phase: Phase,
+    last_row: Option<u32>,
+    carry: Vec<u8>,
+    /// Células escritas a partir do modelo (estatística).
+    pub cells_written: u64,
+}
+
+impl<'a> Patcher<'a> {
+    pub fn new(sheet: &'a Sheet, shared: &'a StringTable, rewrite_all: bool) -> Self {
+        let e = sheet.edits();
+        let mut rows: std::collections::BTreeMap<u32, Dirty> = std::collections::BTreeMap::new();
+        for (&row, cols) in &e.cells {
+            rows.insert(row, Dirty { row, cols: cols.iter().copied().collect(), height: false });
+        }
+        for &row in &e.rows {
+            rows.entry(row).or_insert(Dirty { row, cols: Vec::new(), height: false }).height = true;
+        }
+        let dirty = rows.into_values().collect();
+        Self {
+            sheet,
+            shared,
+            rewrite_all,
+            dirty,
+            next: 0,
+            phase: Phase::Head,
+            last_row: None,
+            carry: Vec::new(),
+            cells_written: 0,
+        }
+    }
+
+    /// Mais bytes do XML original (cortados em qualquer ponto).
+    pub fn feed(&mut self, bytes: &[u8], out: &mut Vec<u8>) {
+        let mut bytes = bytes;
+        if !self.carry.is_empty() {
+            let Some(f) = row_end(&self.carry, bytes) else {
+                self.carry.extend_from_slice(bytes);
+                return;
+            };
+            self.carry.extend_from_slice(&bytes[..f]);
+            let seg = std::mem::take(&mut self.carry);
+            self.segment(&seg, out, false);
+            bytes = &bytes[f..];
+        }
+        match memmem::rfind(bytes, b"</row>") {
+            Some(l) => {
+                self.segment(&bytes[..l + 6], out, false);
+                self.carry.extend_from_slice(&bytes[l + 6..]);
+            }
+            None => self.carry.extend_from_slice(bytes),
+        }
+    }
+
+    /// Fim do XML original.
+    pub fn finish(&mut self, out: &mut Vec<u8>) {
+        let seg = std::mem::take(&mut self.carry);
+        self.segment(&seg, out, true);
+    }
+
+    /// Um trecho com linhas inteiras (e o começo/fim do documento).
+    fn segment(&mut self, seg: &[u8], out: &mut Vec<u8>, eof: bool) {
+        let mut pos = 0;
+        if self.phase == Phase::Head {
+            let Some(tag) = crate::xml::find_tag(seg, 0, b"sheetData") else {
+                // Sem `<sheetData>` (não deveria acontecer): copia como está.
+                out.extend_from_slice(seg);
+                return;
+            };
+            self.head(&seg[..tag.start], out);
+            if tag.self_closing {
+                out.extend_from_slice(b"<sheetData>");
+                self.new_rows_before(u32::MAX, out);
+                out.extend_from_slice(b"</sheetData>");
+                self.phase = Phase::Tail;
+            } else {
+                out.extend_from_slice(&seg[tag.start..tag.end]);
+                self.phase = Phase::Rows;
+            }
+            pos = tag.end;
+        }
+        while self.phase == Phase::Rows {
+            let Some(k) = memchr::memchr(b'<', &seg[pos..]) else {
+                out.extend_from_slice(&seg[pos..]);
+                return;
+            };
+            let i = pos + k;
+            out.extend_from_slice(&seg[pos..i]);
+            let rest = &seg[i + 1..];
+            if rest.starts_with(b"/sheetData>") {
+                self.new_rows_before(u32::MAX, out);
+                out.extend_from_slice(b"</sheetData>");
+                pos = i + 12;
+                self.phase = Phase::Tail;
+                break;
+            }
+            if !(rest.starts_with(b"row") && rest.len() > 3 && is_name_end(rest[3])) {
+                // Algo inesperado entre linhas: copia até o próximo `<`.
+                out.push(b'<');
+                pos = i + 1;
+                continue;
+            }
+            // Bloco de linhas sem edição: copia tudo até a última linha do
+            // trecho que vem antes da próxima editada.
+            if !self.rewrite_all
+                && let Some((end, last)) = self.bulk_end(seg, i)
+            {
+                out.extend_from_slice(&seg[i..end]);
+                self.last_row = Some(last);
+                pos = end;
+                continue;
+            }
+            let Some(tend) = tag_end(seg, i) else {
+                out.extend_from_slice(&seg[i..]);
+                return;
+            };
+            let self_closing = seg[tend - 2] == b'/';
+            let attrs = &seg[i + 4..if self_closing { tend - 2 } else { tend - 1 }];
+            let r = match attr(attrs, b"r").and_then(parse_u32) {
+                Some(r) if r > 0 => r - 1,
+                _ => self.last_row.map_or(0, |r| r + 1),
+            };
+            let end = if self_closing {
+                tend
+            } else {
+                memmem::find(&seg[tend..], b"</row>").map_or(seg.len(), |x| tend + x + 6)
+            };
+            self.new_rows_before(r, out);
+            let dirty = if self.dirty.get(self.next).is_some_and(|d| d.row == r) {
+                self.next += 1;
+                Some(std::mem::take(&mut self.dirty[self.next - 1]))
+            } else {
+                None
+            };
+            if dirty.is_none() && !self.rewrite_all {
+                out.extend_from_slice(&seg[i..end]);
+            } else {
+                let content_end = if self_closing { tend } else { end - 6 };
+                let d = dirty.unwrap_or_default();
+                self.row(r, attrs, &seg[tend..content_end], &d.cols, d.height, out);
+            }
+            self.last_row = Some(r);
+            pos = end;
+        }
+        // Depois de `</sheetData>`: copia o resto.
+        out.extend_from_slice(&seg[pos..]);
+        let _ = eof;
+    }
+
+    /// Fim do bloco de linhas sem edição a partir da linha em `i`: a última
+    /// linha do trecho, se ela (e portanto todas antes dela, que estão em
+    /// ordem) vier antes da próxima linha editada.
+    fn bulk_end(&self, seg: &[u8], i: usize) -> Option<(usize, u32)> {
+        let close = memmem::rfind(&seg[i..], b"</row>")? + i + 6;
+        let start = memmem::rfind(&seg[i..close], b"<row")? + i;
+        let tend = tag_end(seg, start)?;
+        let r = attr(&seg[start + 4..tend - 1], b"r").and_then(parse_u32)?.checked_sub(1)?;
+        let next = self.dirty.get(self.next).map_or(u32::MAX, |d| d.row);
+        (r < next && self.last_row.is_none_or(|l| l < r)).then_some((close, r))
+    }
+
+    /// Escreve as linhas editadas que não existiam no original, antes de `r`.
+    fn new_rows_before(&mut self, r: u32, out: &mut Vec<u8>) {
+        while let Some(d) = self.dirty.get(self.next)
+            && d.row < r
+        {
+            let d = std::mem::take(&mut self.dirty[self.next]);
+            self.next += 1;
+            let start = out.len();
+            out.extend_from_slice(b"<row r=\"");
+            super::cellxml::push_u32(out, d.row + 1);
+            out.push(b'"');
+            if d.height {
+                self.push_height(d.row, out);
+            }
+            out.push(b'>');
+            let before = out.len();
+            for c in d.cols {
+                self.cell(d.row, c, b"", out);
+            }
+            let height = d.height && self.sheet.row_height(d.row).is_some();
+            if out.len() == before && !height {
+                out.truncate(start);
+            } else {
+                out.extend_from_slice(b"</row>");
+            }
+        }
+    }
+
+    fn cell(&mut self, row: u32, col: u32, extra: &[u8], out: &mut Vec<u8>) {
+        self.cells_written += 1;
+        write_cell(out, self.sheet, self.shared, row, col, extra);
+    }
+
+    /// Uma linha que existia, com células editadas (`cols`) ou reescrita inteira.
+    fn row(&mut self, r: u32, attrs: &[u8], content: &[u8], cols: &[u32], height: bool, out: &mut Vec<u8>) {
+        out.extend_from_slice(b"<row");
+        // `spans` é só uma dica de quais colunas a linha usa; com células
+        // novas pode ficar errado, então sai.
+        let mut skip: Vec<&[u8]> = Vec::new();
+        if !cols.is_empty() {
+            skip.push(b"spans");
+        }
+        if height {
+            skip.extend([&b"ht"[..], b"customHeight"]);
+        }
+        if skip.is_empty() {
+            out.extend_from_slice(attrs);
+        } else {
+            push_attrs_except(attrs, &skip, out);
+        }
+        if height {
+            self.push_height(r, out);
+        }
+        out.push(b'>');
+        // Colunas editadas já escritas: um `<c>` original fora de ordem
+        // (o Excel grava em ordem, outros geradores nem sempre) com uma
+        // delas é descartado, não duplicado.
+        let mut written = vec![false; cols.len()];
+        let mut next_pending = 0;
+        let mut pos = 0;
+        let mut next_col = 0u32;
+        while let Some(k) = memchr::memchr(b'<', &content[pos..]) {
+            let i = pos + k;
+            let rest = &content[i + 1..];
+            if !(rest.first() == Some(&b'c') && rest.len() > 1 && is_name_end(rest[1])) {
+                // Fim das células (`extLst`): o resto vai como está.
+                break;
+            }
+            let Some(tend) = tag_end(content, i) else { break };
+            let self_closing = content[tend - 2] == b'/';
+            let cattrs = &content[i + 2..if self_closing { tend - 2 } else { tend - 1 }];
+            let end = if self_closing {
+                tend
+            } else {
+                memmem::find(&content[tend..], b"</c>").map_or(content.len(), |x| tend + x + 4)
+            };
+            let col = attr(cattrs, b"r").and_then(parse_ref).map_or(next_col, |(c, _)| c);
+            while next_pending < cols.len() && cols[next_pending] < col {
+                if !written[next_pending] {
+                    written[next_pending] = true;
+                    self.cell(r, cols[next_pending], b"", out);
+                }
+                next_pending += 1;
+            }
+            if let Ok(k) = cols.binary_search(&col) {
+                if !written[k] {
+                    written[k] = true;
+                    self.cell(r, col, b"", out);
+                }
+            } else if self.rewrite_all && !self.is_data_table(r, col) {
+                let mut extra = Vec::new();
+                push_attrs_except(cattrs, &[b"r", b"s", b"t"], &mut extra);
+                self.cell(r, col, &extra, out);
+            } else {
+                out.extend_from_slice(&content[i..end]);
+            }
+            next_col = col + 1;
+            pos = end;
+        }
+        for (k, &c) in cols.iter().enumerate() {
+            if !written[k] {
+                self.cell(r, c, b"", out);
+            }
+        }
+        out.extend_from_slice(&content[pos..]);
+        out.extend_from_slice(b"</row>");
+    }
+
+    /// ` ht="…" customHeight="1"` com a altura da linha no modelo, se houver.
+    fn push_height(&self, r: u32, out: &mut Vec<u8>) {
+        if let Some(h) = self.sheet.row_height(r) {
+            out.extend_from_slice(b" ht=\"");
+            super::cellxml::push_number(out, h as f64);
+            out.extend_from_slice(b"\" customHeight=\"1\"");
+        }
+    }
+
+    fn is_data_table(&self, r: u32, c: u32) -> bool {
+        self.sheet.formula(r, c).is_some_and(|f| f.kind == FormulaKind::DataTable)
+    }
+
+    /// O que vem antes de `<sheetData>`, com o `<dimension>` e as larguras
+    /// de coluna ajustados.
+    fn head(&self, head: &[u8], out: &mut Vec<u8>) {
+        if self.sheet.edits().cols.is_empty() {
+            return self.head_dimension(head, out);
+        }
+        let mut tmp = Vec::with_capacity(head.len() + 256);
+        match crate::xml::find_tag(head, 0, b"cols") {
+            Some(tag) => {
+                let inner = crate::xml::inner(head, &tag, b"cols");
+                let end = if tag.self_closing { tag.end } else { tag.end + inner.len() + 7 };
+                tmp.extend_from_slice(&head[..tag.start]);
+                self.cols(inner, &mut tmp);
+                tmp.extend_from_slice(&head[end..]);
+            }
+            None => {
+                // `<cols>` fica logo antes de `<sheetData>` (fim do cabeçalho).
+                tmp.extend_from_slice(head);
+                self.cols(b"", &mut tmp);
+            }
+        }
+        self.head_dimension(&tmp, out);
+    }
+
+    /// `<cols>` com as colunas de largura mudada: os `<col>` originais que as
+    /// cobrem são divididos (mantendo os outros atributos), e as que não
+    /// tinham `<col>` ganham um.
+    fn cols(&self, inner: &[u8], out: &mut Vec<u8>) {
+        let changed = &self.sheet.edits().cols;
+        // (primeira, última, atributos a manter, mudada)
+        let mut items: Vec<(u32, u32, Vec<u8>, bool)> = Vec::new();
+        let mut covered = std::collections::BTreeSet::new();
+        crate::xml::for_each(inner, b"col", |a, _| {
+            let (Some(min), Some(max)) =
+                (attr(a, b"min").and_then(parse_u32), attr(a, b"max").and_then(parse_u32))
+            else {
+                return;
+            };
+            let (first, last) = (min.max(1) - 1, max.max(min) - 1);
+            let mut keep = Vec::new();
+            push_attrs_except(a, &[b"min", b"max"], &mut keep);
+            let mut rest = Vec::new();
+            push_attrs_except(a, &[b"min", b"max", b"width", b"customWidth"], &mut rest);
+            let mut start = first;
+            for &c in changed.range(first..=last) {
+                if c > start {
+                    items.push((start, c - 1, keep.clone(), false));
+                }
+                items.push((c, c, rest.clone(), true));
+                covered.insert(c);
+                start = c + 1;
+            }
+            if start <= last {
+                items.push((start, last, keep, false));
+            }
+        });
+        for &c in changed {
+            if !covered.contains(&c) {
+                items.push((c, c, Vec::new(), true));
+            }
+        }
+        items.sort_by_key(|i| i.0);
+        out.extend_from_slice(b"<cols>");
+        for (first, last, attrs, edited) in items {
+            out.extend_from_slice(b"<col min=\"");
+            super::cellxml::push_u32(out, first + 1);
+            out.extend_from_slice(b"\" max=\"");
+            super::cellxml::push_u32(out, last + 1);
+            out.push(b'"');
+            if edited && let Some(w) = self.sheet.col_width(first) {
+                out.extend_from_slice(b" width=\"");
+                super::cellxml::push_number(out, w as f64);
+                out.extend_from_slice(b"\" customWidth=\"1\"");
+            }
+            out.extend_from_slice(&attrs);
+            out.extend_from_slice(b"/>");
+        }
+        out.extend_from_slice(b"</cols>");
+    }
+
+    fn head_dimension(&self, head: &[u8], out: &mut Vec<u8>) {
+        let edited = !self.sheet.edits().cells.is_empty();
+        let Some(tag) = crate::xml::find_tag(head, 0, b"dimension").filter(|_| edited) else {
+            out.extend_from_slice(head);
+            return;
+        };
+        let old = attr(tag.attrs, b"ref").and_then(crate::sheet::parse_range);
+        let (r0, c0) = old.map_or((0, 0), |d| (d.first_row, d.first_col));
+        let (mut r1, mut c1) = old.map_or((0, 0), |d| (d.last_row, d.last_col));
+        if self.sheet.rows() > 0 {
+            r1 = r1.max(self.sheet.rows() - 1);
+            c1 = c1.max(self.sheet.cols().saturating_sub(1));
+        }
+        out.extend_from_slice(&head[..tag.start]);
+        out.extend_from_slice(b"<dimension ref=\"");
+        cell_ref(r0, c0, out);
+        if (r0, c0) != (r1, c1) {
+            out.push(b':');
+            cell_ref(r1, c1, out);
+        }
+        out.extend_from_slice(b"\"/>");
+        out.extend_from_slice(&head[tag.end..]);
+    }
+}
+
+/// Uma linha com algo a regravar.
+#[derive(Default)]
+struct Dirty {
+    row: u32,
+    /// Colunas editadas, em ordem.
+    cols: Vec<u32>,
+    /// A altura mudou.
+    height: bool,
+}
+
+/// Copia os atributos (` k="v"`), menos os de `skip`.
+fn push_attrs_except(attrs: &[u8], skip: &[&[u8]], out: &mut Vec<u8>) {
+    crate::xml::for_each_attr(attrs, |k, whole| {
+        if !skip.contains(&k) {
+            out.push(b' ');
+            out.extend_from_slice(whole);
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use duck_core::CellValue;
+
+    const XML: &str = concat!(
+        r#"<?xml version="1.0"?><worksheet><dimension ref="A1:C3"/><sheetData>"#,
+        r#"<row r="1" spans="1:3"><c r="A1" t="s"><v>0</v></c><c r="C1" vm="1"><v>5</v></c></row>"#,
+        r#"<row r="3"><c r="B3"><f>A1+1</f><v>2</v></c></row>"#,
+        r#"</sheetData><mergeCells count="1"><mergeCell ref="A5:B5"/></mergeCells></worksheet>"#,
+    );
+
+    fn patch(sheet: &Sheet, rewrite: bool, cut: usize) -> String {
+        let shared = shared();
+        let mut p = Patcher::new(sheet, &shared, rewrite);
+        let mut out = Vec::new();
+        for piece in XML.as_bytes().chunks(cut) {
+            p.feed(piece, &mut out);
+        }
+        p.finish(&mut out);
+        String::from_utf8(out).unwrap()
+    }
+
+    fn shared() -> StringTable {
+        let mut s = StringTable::new();
+        s.push("título");
+        s
+    }
+
+    #[test]
+    fn untouched_sheet_is_identical() {
+        let sheet = crate::parse_sheet_xml(XML.as_bytes());
+        for cut in [7, 50, 10_000] {
+            assert_eq!(patch(&sheet, false, cut), XML);
+        }
+    }
+
+    #[test]
+    fn edits_are_spliced_in_place() {
+        let mut sheet = crate::parse_sheet_xml(XML.as_bytes());
+        sheet.set_cell(0, 1, CellValue::Text("a<b".into()), None, None); // B1, nova, entre A1 e C1
+        sheet.set_cell(1, 0, CellValue::Number(0.5), None, Some(3)); // linha 2, nova
+        sheet.set_cell(2, 1, CellValue::Empty, None, Some(0)); // B3 apagada
+        sheet.set_cell(9, 2, CellValue::Bool(true), Some("1=1"), None); // depois do fim
+        sheet.settle();
+        let out = patch(&sheet, false, 13);
+        assert_eq!(
+            out,
+            concat!(
+                r#"<?xml version="1.0"?><worksheet><dimension ref="A1:C10"/><sheetData>"#,
+                r#"<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="inlineStr"><is><t xml:space="preserve">a&lt;b</t></is></c><c r="C1" vm="1"><v>5</v></c></row>"#,
+                r#"<row r="2"><c r="A2" s="3"><v>0.5</v></c></row>"#,
+                r#"<row r="3"></row>"#,
+                r#"<row r="10"><c r="C10" t="b"><f>1=1</f><v>1</v></c></row>"#,
+                r#"</sheetData><mergeCells count="1"><mergeCell ref="A5:B5"/></mergeCells></worksheet>"#,
+            )
+        );
+        // Relido, dá o mesmo modelo.
+        let back = crate::parse_sheet_xml(out.as_bytes());
+        let sh = shared();
+        for (r, c) in [(0, 0), (0, 1), (0, 2), (1, 0), (2, 1), (9, 2)] {
+            assert_eq!(back.cell(r, c, &sh), sheet.cell(r, c, &sh), "{r},{c}");
+        }
+    }
+
+    #[test]
+    fn heights_and_widths() {
+        let xml = concat!(
+            r#"<worksheet><cols><col min="1" max="5" width="9" style="2" customWidth="1"/></cols>"#,
+            r#"<sheetData><row r="2" ht="30" customHeight="1" x14ac:dyDescent="0.25"><c r="A2"><v>1</v></c></row></sheetData></worksheet>"#,
+        );
+        let mut sheet = crate::parse_sheet_xml(xml.as_bytes());
+        sheet.set_col_width(2, Some(20.5));
+        sheet.set_col_width(8, Some(3.0));
+        sheet.set_row_height(1, None);
+        sheet.set_row_height(4, Some(12.75));
+        let sh = StringTable::new();
+        let mut p = Patcher::new(&sheet, &sh, false);
+        let mut out = Vec::new();
+        p.feed(xml.as_bytes(), &mut out);
+        p.finish(&mut out);
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(
+            out,
+            concat!(
+                r#"<worksheet><cols><col min="1" max="2" width="9" style="2" customWidth="1"/>"#,
+                r#"<col min="3" max="3" width="20.5" customWidth="1" style="2"/>"#,
+                r#"<col min="4" max="5" width="9" style="2" customWidth="1"/>"#,
+                r#"<col min="9" max="9" width="3" customWidth="1"/></cols>"#,
+                r#"<sheetData><row r="2" x14ac:dyDescent="0.25"><c r="A2"><v>1</v></c></row>"#,
+                r#"<row r="5" ht="12.75" customHeight="1"></row></sheetData></worksheet>"#,
+            )
+        );
+        let back = crate::parse_sheet_xml(out.as_bytes());
+        assert_eq!(back.col_width(2), Some(20.5));
+        assert_eq!(back.col_width(0), Some(9.0));
+        assert_eq!(back.row_height(4), Some(12.75));
+        assert_eq!(back.row_height(1), None);
+    }
+
+    #[test]
+    fn out_of_order_cells_are_not_duplicated() {
+        let xml = r#"<worksheet><sheetData><row r="1"><c r="C1"><v>3</v></c><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#;
+        let mut sheet = crate::parse_sheet_xml(xml.as_bytes());
+        sheet.set_cell(0, 0, CellValue::Number(9.0), None, None);
+        let sh = StringTable::new();
+        let mut p = Patcher::new(&sheet, &sh, false);
+        let mut out = Vec::new();
+        p.feed(xml.as_bytes(), &mut out);
+        p.finish(&mut out);
+        let out = String::from_utf8(out).unwrap();
+        assert_eq!(out.matches("r=\"A1\"").count(), 1, "{out}");
+        assert_eq!(
+            crate::parse_sheet_xml(out.as_bytes()).cell(0, 0, &sh).value,
+            duck_core::Value::Number(9.0)
+        );
+    }
+
+    #[test]
+    fn rewrite_all_keeps_extra_attributes() {
+        let sheet = crate::parse_sheet_xml(XML.as_bytes());
+        let out = patch(&sheet, true, 9);
+        assert!(out.contains(r#"<c r="C1" vm="1"><v>5</v></c>"#), "{out}");
+        assert!(out.contains(r#"<c r="B3"><f>A1+1</f><v>2</v></c>"#), "{out}");
+        assert!(out.contains(r#"<row r="1" spans="1:3">"#), "{out}");
+    }
+}

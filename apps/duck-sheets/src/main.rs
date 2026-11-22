@@ -1,18 +1,30 @@
-//! `duck-sheets`: visualizador de planilhas `.xlsx` / `.xlsm` / `.csv` (F2).
+//! `duck-sheets`: editor de planilhas `.xlsx` / `.xlsm` / `.csv` (F2, F3).
 //!
 //! ```text
 //! duck-sheets [ARQUIVO] [--sheet N] [--cell B12] [--zoom 80] [--find TEXTO]
 //!             [--bench] [--screenshot SAIDA.png]
+//!             [--edit A1=valor ...] [--undo N] [--save-to SAIDA.xlsx]
 //! ```
 //!
 //! Sem arquivo, abre o diálogo nativo. Teclas: setas (+Shift seleciona,
 //! +Ctrl vai até a borda dos dados), PageUp/PageDown, Ctrl+Home/End,
 //! Ctrl+PageUp/PageDown (abas), Ctrl+C (copia a seleção), Ctrl+F (busca),
 //! Ctrl+G (ir para), Ctrl+O (abrir), Ctrl+A, Ctrl + roda / Ctrl +/−/0 (zoom).
+//!
+//! Edição: digitar substitui a célula; F2, duplo clique ou clique na barra
+//! de fórmulas editam o conteúdo; Enter/Tab confirmam, Esc cancela; Delete
+//! apaga a seleção; Ctrl+Z/Ctrl+Y desfazem e refazem; Ctrl+S salva e
+//! Ctrl+Shift+S salva como.
+//!
+//! `--edit`, `--undo` e `--save-to` fazem edições como se digitadas (na aba
+//! inicial, depois de carregar tudo) e salvam numa cópia: para testar a
+//! edição e o salvamento sem mexer na janela.
 
 mod app;
 mod axis;
 mod draw;
+mod edit;
+mod format;
 mod loader;
 mod look;
 mod search;
@@ -53,6 +65,12 @@ pub struct Opts {
     pub find: Option<String>,
     pub bench: bool,
     pub screenshot: Option<PathBuf>,
+    /// `REF=texto`, aplicados em ordem como se digitados.
+    pub edits: Vec<String>,
+    /// Desfazer N vezes depois das edições.
+    pub undo: usize,
+    /// Salvar numa cópia depois das edições e sair.
+    pub save_to: Option<PathBuf>,
 }
 
 fn parse_args() -> Opts {
@@ -72,6 +90,9 @@ fn parse_args() -> Opts {
             "--find" => o.find = val(),
             "--bench" => o.bench = true,
             "--screenshot" => o.screenshot = val().map(PathBuf::from),
+            "--edit" => o.edits.extend(val()),
+            "--undo" => o.undo = val().and_then(|v| v.parse().ok()).unwrap_or(0),
+            "--save-to" => o.save_to = val().map(PathBuf::from),
             _ if !a.starts_with("--") && o.path.is_none() => o.path = Some(PathBuf::from(a)),
             _ => eprintln!("opção desconhecida: {a}"),
         }

@@ -25,6 +25,7 @@ use crate::search::{self, SearchJob, SearchResult};
 // ---------------------------------------------------------------------------
 
 pub const UI_FONT_PX: f32 = 13.0;
+pub const TOOLBAR_H: f32 = 36.0;
 pub const FBAR_H: f32 = 32.0;
 pub const NAMEBOX_W: f32 = 110.0;
 pub const HEADER_H: f32 = 20.0;
@@ -161,6 +162,10 @@ pub struct Doc {
     pub mdw: f32,
     pub loaded: usize,
     pub finished: Option<Duration>,
+    /// Desfazer/refazer (F3).
+    pub history: crate::edit::History,
+    /// Há alterações não salvas.
+    pub dirty: bool,
 }
 
 impl Doc {
@@ -192,7 +197,7 @@ pub fn row_px(pt: f32) -> u32 {
     (pt * 96.0 / 72.0).round().max(0.0) as u32
 }
 
-fn build_view(sheet: &Sheet, mdw: f32, prev: Option<View>, opts_zoom: Option<u16>) -> View {
+pub(crate) fn build_view(sheet: &Sheet, mdw: f32, prev: Option<View>, opts_zoom: Option<u16>) -> View {
     let l = &sheet.layout;
     let sv = l.view.unwrap_or_default();
     let dim = l.dimension;
@@ -298,6 +303,8 @@ pub struct Geom {
     pub s: f32,
     pub g: f32,
     pub w: f32,
+    /// Barra de ferramentas (formatação).
+    pub toolbar: Rect,
     pub fbar: Rect,
     pub namebox: Rect,
     pub formula: Rect,
@@ -424,7 +431,7 @@ pub struct SheetsApp {
     fonts_loading: Option<std::thread::JoinHandle<TextSystem>>,
     /// Resto das fontes do sistema, lido depois da primeira tela.
     font_scan: Option<std::sync::mpsc::Receiver<FontSet>>,
-    waker: Option<duck_platform::Waker>,
+    pub(crate) waker: Option<duck_platform::Waker>,
     pub scale: f32,
     pub doc: Option<Doc>,
     pub loader: Option<Loader>,
@@ -460,6 +467,20 @@ pub struct SheetsApp {
     pub today: f64,
     /// Destino do hiperlink sob o mouse (barra de status).
     pub hover_link: Option<String>,
+    /// Célula sendo editada (F3).
+    pub editor: Option<crate::edit::Editor>,
+    /// Salvamento em andamento.
+    pub saving: Option<crate::edit::SaveJob>,
+    /// Última cópia feita no app (fórmulas e estilos para colar).
+    pub clip: Option<crate::edit::Clip>,
+    /// Paleta de cores aberta na barra de ferramentas.
+    pub menu: Option<crate::format::Menu>,
+    /// Últimas cores de texto e de fundo escolhidas (RGB).
+    pub colors: (u32, u32),
+    /// Botão da barra sob o mouse e a dica dele.
+    pub hover_tool: Option<(crate::format::Tool, &'static str)>,
+    /// O usuário já aceitou mexer na estrutura de abas com gráficos/tabelas.
+    pub objects_ok: bool,
 }
 
 impl SheetsApp {
@@ -515,6 +536,13 @@ impl SheetsApp {
             trace: std::env::var_os("DUCK_TRACE").is_some(),
             today: duck_core::cond::today_serial(),
             hover_link: None,
+            editor: None,
+            saving: None,
+            clip: None,
+            menu: None,
+            colors: (0xFF0000, 0xFFFF00),
+            hover_tool: None,
+            objects_ok: false,
         }
     }
 
@@ -551,6 +579,10 @@ impl SheetsApp {
     // --- abrir e carregar ---------------------------------------------------
 
     pub fn open(&mut self, path: PathBuf, waker: duck_platform::Waker) {
+        if !self.confirm_discard() {
+            return;
+        }
+        self.editor = None;
         if let Some(l) = self.loader.take() {
             l.cancel();
         }
@@ -598,6 +630,8 @@ impl SheetsApp {
                         mdw,
                         loaded: 0,
                         finished: None,
+                        history: Default::default(),
+                        dirty: false,
                     });
                     self.font_key = (0, 0);
                 }
@@ -617,6 +651,7 @@ impl SheetsApp {
                         d.finished = Some(at);
                     }
                     self.message = format!("Pronto em {} ms", at.as_millis());
+                    self.scripted_edits();
                 }
                 Msg::Failed(e) => {
                     self.start_font_scan();
@@ -739,6 +774,7 @@ impl SheetsApp {
         let s = self.scale;
         let zoom = self.doc.as_ref().and_then(|d| d.current()).map_or(100, |(_, v)| v.zoom);
         let g = s * zoom as f32 / 100.0;
+        let tb_h = (TOOLBAR_H * s).round();
         let fbar_h = (FBAR_H * s).round();
         let status_h = (STATUS_H * s).round();
         let tabs_h = (TABS_H * s).round();
@@ -756,16 +792,17 @@ impl SheetsApp {
         } else {
             0.0
         };
-        let fbar = Rect::new(0.0, 0.0, w, fbar_h);
-        let namebox = Rect::new(0.0, 0.0, (NAMEBOX_W * s).round(), fbar_h);
-        let formula = Rect::new(namebox.x1 + (34.0 * s).round(), 0.0, w, fbar_h);
-        let gy0 = fbar_h + hh;
+        let toolbar = Rect::new(0.0, 0.0, w, tb_h);
+        let fbar = Rect::new(0.0, tb_h, w, tb_h + fbar_h);
+        let namebox = Rect::new(0.0, fbar.y0, (NAMEBOX_W * s).round(), fbar.y1);
+        let formula = Rect::new(namebox.x1 + (34.0 * s).round(), fbar.y0, w, fbar.y1);
+        let gy0 = fbar.y1 + hh;
         let status = Rect::new(0.0, h - status_h, w, h);
         let tabs_y0 = status.y0 - tabs_h;
         let grid = Rect::new(rw, gy0, (w - sb).max(rw + 1.0), tabs_y0.max(gy0 + 1.0));
-        let colhdr = Rect::new(rw, fbar_h, grid.x1, gy0);
+        let colhdr = Rect::new(rw, fbar.y1, grid.x1, gy0);
         let rowhdr = Rect::new(0.0, gy0, rw, grid.y1);
-        let corner = Rect::new(0.0, fbar_h, rw, gy0);
+        let corner = Rect::new(0.0, fbar.y1, rw, gy0);
         let vscroll = Rect::new(grid.x1, gy0, w, grid.y1);
         let tabs_w = (w * 0.6).round();
         let tabs = Rect::new(0.0, tabs_y0, tabs_w, status.y0);
@@ -819,6 +856,7 @@ impl SheetsApp {
             s,
             g,
             w,
+            toolbar,
             fbar,
             namebox,
             formula,
@@ -912,7 +950,7 @@ impl SheetsApp {
 
     // --- seleção e navegação -------------------------------------------------
 
-    fn move_cur(&mut self, dr: i32, dc: i32, extend: bool, jump: bool) {
+    pub(crate) fn move_cur(&mut self, dr: i32, dc: i32, extend: bool, jump: bool) {
         let Some(doc) = &mut self.doc else { return };
         let slot = &mut doc.sheets[doc.active];
         let (Some(sheet), Some(v)) = (slot.data.clone(), slot.view.as_mut()) else { return };
@@ -1026,19 +1064,29 @@ impl SheetsApp {
         (r0, c0, r1, c1)
     }
 
-    fn copy(&mut self, cx: &mut Context) {
-        let Some(doc) = &self.doc else { return };
-        let Some((sheet, v)) = doc.current() else { return };
+    /// Copia a seleção (texto como aparece, separado por tab) e guarda as
+    /// células para colar aqui com fórmulas e estilos. `cut` = recortar.
+    fn copy(&mut self, cx: &mut Context, cut: bool) {
+        if let Some(out) = self.copy_text(cut) {
+            cx.clipboard().set_text(&out);
+        }
+    }
+
+    /// O texto da seleção para o clipboard (e guarda as células; ver `copy`).
+    pub(crate) fn copy_text(&mut self, cut: bool) -> Option<String> {
+        let doc = self.doc.as_ref()?;
+        let (sheet, v) = doc.current()?;
         let (r0, c0, r1, c1) = Self::data_sel(sheet, v);
         let cells = (r1 - r0 + 1) as u64 * (c1 - c0 + 1) as u64;
         const MAX_COPY: u64 = 5_000_000;
         if cells > MAX_COPY {
             self.message = format!("Seleção grande demais para copiar ({} células)", fmt_int(cells));
-            return;
+            return None;
         }
         let out = selection_tsv(sheet, &doc.strings, &doc.looks, doc.date1904, (r0, c0, r1, c1));
-        cx.clipboard().set_text(&out);
         self.message = format!("{} células copiadas", fmt_int(cells));
+        self.remember_clip(out.clone(), cut);
+        Some(out)
     }
 
     /// Estatísticas da seleção (contagem, soma, média), calculadas em paralelo
@@ -1185,6 +1233,22 @@ impl SheetsApp {
 
     fn mouse_down(&mut self, cx: &mut Context, x: f32, y: f32, mods: Modifiers, clicks: u8) {
         let g = self.geom();
+        if self.doc.as_ref().and_then(|d| d.current()).is_some() && self.toolbar_click(&g, x, y) {
+            return;
+        }
+        // Barra de fórmulas: edita a célula ativa ali.
+        if g.formula.contains(x, y) && self.doc.as_ref().and_then(|d| d.current()).is_some() {
+            match &mut self.editor {
+                Some(ed) => ed.in_bar = true,
+                None => self.start_edit(None, true),
+            }
+            if let Some(ed) = &mut self.editor {
+                ed.enter_mode = false;
+            }
+            return;
+        }
+        // Clique fora do editor confirma o que foi digitado.
+        self.commit_edit();
         // Barra de fórmulas: caixa de nome.
         if g.namebox.contains(x, y) {
             self.namebox_focus = true;
@@ -1259,6 +1323,7 @@ impl SheetsApp {
                     if clicks >= 2 {
                         let d = v.rows.default_size();
                         v.resize_row(row, d);
+                        self.commit_row_size(row, true);
                     } else {
                         self.drag = Some(Drag::ResizeRow { row, size: v.rows.size(row), y });
                     }
@@ -1316,6 +1381,10 @@ impl SheetsApp {
             if !mods.shift {
                 v.anchor = (r, c);
             }
+            if clicks >= 2 && !mods.shift {
+                self.start_edit(None, false);
+                return;
+            }
             self.drag = Some(Drag::Select);
         }
     }
@@ -1324,6 +1393,11 @@ impl SheetsApp {
         self.mouse = (x, y);
         let Some(drag) = self.drag else {
             let g = self.geom();
+            let tool = self.toolbar_hover(&g, x, y);
+            if tool.map(|t| t.0) != self.hover_tool.map(|t| t.0) {
+                self.hover_tool = tool;
+                return true;
+            }
             let over_input = g.namebox.contains(x, y)
                 || self.find.as_ref().is_some_and(|_| crate::draw::find_rect(&g).contains(x, y));
             let current = self.doc.as_ref().and_then(|d| d.current());
@@ -1506,6 +1580,7 @@ impl SheetsApp {
         if let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) {
             v.resize_col(col, size);
         }
+        self.commit_col_size(col);
     }
 
     /// Índices (no workbook) das abas visíveis, na ordem das guias.
@@ -1541,6 +1616,9 @@ impl SheetsApp {
 
     fn key(&mut self, cx: &mut Context, key: Key, mods: Modifiers, text: Option<String>) -> bool {
         let ctrl = mods.ctrl || mods.logo;
+        if let Some(handled) = self.editor_key(cx, &key, mods, text.as_deref()) {
+            return handled;
+        }
         // Campo de busca com foco.
         if let Some(f) = &mut self.find
             && f.focused
@@ -1585,8 +1663,18 @@ impl SheetsApp {
         }
         let shift = mods.shift;
         match key {
+            // Ctrl+Alt+= / Ctrl+Alt+-: inserir / apagar linhas ou colunas.
+            Key::Char(ref k) if ctrl && mods.alt && matches!(k.as_str(), "=" | "+") => {
+                self.shift_selection(true, None)
+            }
+            Key::Char(ref k) if ctrl && mods.alt && k == "-" => self.shift_selection(false, None),
             Key::Char(ref k) if ctrl => match k.to_lowercase().as_str() {
-                "c" => self.copy(cx),
+                "c" => self.copy(cx, false),
+                "x" => self.copy(cx, true),
+                "v" => self.paste(cx),
+                "z" => self.undo(),
+                "y" => self.redo(),
+                "s" => self.save(shift),
                 "f" => self.open_find(),
                 "g" => {
                     self.namebox_focus = true;
@@ -1600,17 +1688,26 @@ impl SheetsApp {
                         v.cur = (v.rows.len() - 1, v.cols.len() - 1);
                     }
                 }
-                "+" | "=" => self.set_zoom(self.zoom() + 10),
-                "-" => self.set_zoom(self.zoom() - 10),
-                "0" => self.set_zoom(100),
-                _ => return false,
+                "+" | "=" if !shift => self.set_zoom(self.zoom() + 10),
+                "-" if !shift => self.set_zoom(self.zoom() - 10),
+                "0" if !shift => self.set_zoom(100),
+                other => {
+                    let other = other.to_string();
+                    if !self.format_shortcut(&other, shift) {
+                        return false;
+                    }
+                }
             },
             Key::F(3) => self.find_next(cx.waker(), shift),
+            Key::F(2) => self.start_edit(None, false),
+            Key::Delete => self.clear_selection(),
+            Key::Backspace => self.start_edit(Some(""), false),
             Key::F(5) => {
                 self.namebox_focus = true;
                 self.cell_ref_into_namebox();
                 self.namebox.select_all();
             }
+            Key::Escape if self.menu.is_some() => self.menu = None,
             Key::Escape => {
                 if self.find.take().is_none()
                     && let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut())
@@ -1658,6 +1755,13 @@ impl SheetsApp {
                 let r = self.doc.as_ref().and_then(|d| d.current()).map_or(0, |(_, v)| v.cur.0);
                 self.set_cur(r, 0, shift);
                 self.ensure_visible();
+            }
+            // Digitar por cima da célula ativa.
+            _ if !ctrl
+                && !mods.alt
+                && text.as_deref().is_some_and(|t| !t.is_empty() && !t.chars().any(char::is_control)) =>
+            {
+                self.start_edit(text.as_deref(), false);
             }
             _ => return false,
         }
@@ -1848,7 +1952,15 @@ impl App for SheetsApp {
                 }
                 let fonts = self.poll_fonts();
                 let a = self.poll_loader() || fonts;
-                let b = self.poll_search();
+                let saved = self.poll_save(false);
+                if saved.is_some() && self.opts.save_to.is_some() && self.opts.screenshot.is_none() {
+                    if saved == Some(false) {
+                        self.error = Some("falha ao salvar".into());
+                    }
+                    cx.exit();
+                    return;
+                }
+                let b = self.poll_search() | saved.is_some();
                 if a && let Some(q) = self.opts.find.take() {
                     // `--find`: busca assim que a aba ativa chegar.
                     if self.doc.as_ref().is_some_and(|d| d.slot().data.is_some() && !d.slot().preview) {
@@ -1907,7 +2019,17 @@ impl App for SheetsApp {
                 self.mouse_down(cx, x as f32, y as f32, modifiers, clicks);
                 true
             }
-            Event::MouseUp { button: MouseButton::Left, .. } => self.drag.take().is_some(),
+            Event::MouseUp { button: MouseButton::Left, .. } => match self.drag.take() {
+                Some(Drag::ResizeCol { col, .. }) => {
+                    self.commit_col_size(col);
+                    true
+                }
+                Some(Drag::ResizeRow { row, .. }) => {
+                    self.commit_row_size(row, false);
+                    true
+                }
+                d => d.is_some(),
+            },
             Event::MouseMove { x, y } => self.mouse_move(x as f32, y as f32),
             Event::Key { key, pressed: true, modifiers, text, .. } => {
                 if key == Key::F(12) && self.loader.is_none() && self.doc.is_none() {
@@ -1923,6 +2045,10 @@ impl App for SheetsApp {
             self.clamp_scroll();
             self.redraw_later();
         }
+    }
+
+    fn close_requested(&mut self, _cx: &mut Context) -> bool {
+        self.confirm_discard()
     }
 
     fn redraw(&mut self, cx: &mut Context) {
@@ -1942,8 +2068,10 @@ impl App for SheetsApp {
         // Screenshot: depois de todas as abas, de todas as fontes e de uma
         // busca pedida (`--find`).
         let searching = self.opts.find.is_some() || self.find.as_ref().is_some_and(|f| f.job.is_some());
-        let done =
-            self.doc.as_ref().is_some_and(|d| d.finished.is_some()) && !searching && text.fonts_complete();
+        let done = self.doc.as_ref().is_some_and(|d| d.finished.is_some())
+            && !searching
+            && self.saving.is_none()
+            && text.fonts_complete();
         if self.screenshot_pending && done && !atlas_reset {
             let (w, h, rgba) = gfx.render_to_rgba(&self.instances, crate::draw::WHITE);
             let path = self.opts.screenshot.clone().unwrap();

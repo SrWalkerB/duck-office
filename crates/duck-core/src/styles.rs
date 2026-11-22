@@ -133,6 +133,22 @@ pub struct Styles {
     pub theme: Theme,
     /// Formatos diferenciais (`<dxfs>`), usados pela formatação condicional.
     pub dxfs: Vec<Dxf>,
+    /// Quantos `xfs`, `fonts`, `fills` e `borders` vieram do arquivo: os
+    /// seguintes foram criados na edição e o gravador os acrescenta ao
+    /// `styles.xml` (F3).
+    pub file_counts: FileCounts,
+    /// Para cada estilo criado na edição (`xfs[file_counts.xfs + k]`), o
+    /// estilo do arquivo de que ele derivou (o gravador copia o `<xf>` dele
+    /// e troca só o que mudou).
+    pub xf_base: Vec<u16>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FileCounts {
+    pub xfs: usize,
+    pub fonts: usize,
+    pub fills: usize,
+    pub borders: usize,
 }
 
 /// Formato diferencial: só o que muda em relação ao estilo da célula.
@@ -185,6 +201,26 @@ impl BorderStyle {
             b"mediumDashDotDot" => Self::MediumDashDotDot,
             b"slantDashDot" => Self::SlantDashDot,
             _ => Self::None,
+        }
+    }
+
+    /// Nome no `styles.xml` (inverso de [`BorderStyle::parse`]).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Thin => "thin",
+            Self::Medium => "medium",
+            Self::Thick => "thick",
+            Self::Double => "double",
+            Self::Hair => "hair",
+            Self::Dotted => "dotted",
+            Self::Dashed => "dashed",
+            Self::MediumDashed => "mediumDashed",
+            Self::DashDot => "dashDot",
+            Self::MediumDashDot => "mediumDashDot",
+            Self::DashDotDot => "dashDotDot",
+            Self::MediumDashDotDot => "mediumDashDotDot",
+            Self::SlantDashDot => "slantDashDot",
         }
     }
 
@@ -295,6 +331,72 @@ impl Styles {
                 Some(argb & 0xFF_FFFF)
             }
         }
+    }
+
+    /// Estilo igual a `base` com as mudanças de `change`: um já existente,
+    /// se houver igual, ou um novo no fim de `xfs`.
+    pub fn derive_xf(&mut self, base: u16, change: impl FnOnce(&mut CellXf)) -> u16 {
+        let mut xf = self.xfs.get(base as usize).copied().unwrap_or_default();
+        change(&mut xf);
+        if self.xfs.get(base as usize) == Some(&xf) {
+            return base;
+        }
+        if let Some(i) = self.xfs.iter().position(|x| *x == xf) {
+            return i as u16;
+        }
+        // O `<xf>` de origem precisa vir do arquivo (os criados aqui não têm XML).
+        let root = if (base as usize) < self.file_counts.xfs {
+            base
+        } else {
+            self.xf_base.get(base as usize - self.file_counts.xfs).copied().unwrap_or(0)
+        };
+        if self.xfs.is_empty() {
+            // Arquivo sem estilos (ex.: CSV): o 0 é o padrão.
+            self.xfs.push(CellXf::default());
+            self.file_counts.xfs = self.file_counts.xfs.max(1);
+        }
+        self.xfs.push(xf);
+        self.xf_base.push(root);
+        (self.xfs.len() - 1) as u16
+    }
+
+    /// Índice de uma fonte igual a `f` (nova no fim da lista, se não houver).
+    pub fn intern_font(&mut self, f: Font) -> u16 {
+        match self.fonts.iter().position(|x| *x == f) {
+            Some(i) => i as u16,
+            None => {
+                self.fonts.push(f);
+                (self.fonts.len() - 1) as u16
+            }
+        }
+    }
+
+    pub fn intern_fill(&mut self, f: Fill) -> u16 {
+        match self.fills.iter().position(|x| *x == f) {
+            Some(i) => i as u16,
+            None => {
+                self.fills.push(f);
+                (self.fills.len() - 1) as u16
+            }
+        }
+    }
+
+    pub fn intern_border(&mut self, b: Border) -> u16 {
+        match self.borders.iter().position(|x| *x == b) {
+            Some(i) => i as u16,
+            None => {
+                self.borders.push(b);
+                (self.borders.len() - 1) as u16
+            }
+        }
+    }
+
+    /// Há estilos criados na edição.
+    pub fn has_new(&self) -> bool {
+        self.xfs.len() > self.file_counts.xfs
+            || self.fonts.len() > self.file_counts.fonts
+            || self.fills.len() > self.file_counts.fills
+            || self.borders.len() > self.file_counts.borders
     }
 
     /// Código do formato de número `id` (personalizado ou interno).

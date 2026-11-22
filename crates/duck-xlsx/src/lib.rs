@@ -17,6 +17,7 @@ mod package;
 mod parts;
 #[doc(hidden)]
 pub mod sheet;
+pub mod write;
 pub mod xml;
 
 use std::path::Path;
@@ -28,6 +29,7 @@ use duck_par::InFlight;
 
 pub use package::Package;
 pub use sheet::SheetReport;
+pub use write::{SaveOptions, SaveReport, save_file};
 
 #[derive(Debug)]
 pub enum Error {
@@ -121,6 +123,9 @@ pub struct SheetInfo {
     pub hidden: bool,
     /// Tamanho do XML descompactado.
     pub xml_bytes: u64,
+    /// A aba tem gráficos, imagens, tabelas ou tabelas dinâmicas (partes
+    /// ligadas a ela que o duck-sheets ainda não ajusta ao inserir linhas).
+    pub objects: bool,
 }
 
 /// Um pacote aberto, para leitura em etapas (carga progressiva): primeiro o
@@ -147,6 +152,7 @@ impl Book {
                 name: m.name.clone(),
                 hidden: m.hidden,
                 xml_bytes: self.pkg.entry(&m.path).map(|e| e.size).unwrap_or(0),
+                objects: parts::sheet_objects(&self.pkg, &m.path),
             })
             .collect()
     }

@@ -11,6 +11,7 @@ duck-calc = { version = "0.1.0", path = "../duck-calc" }
 duck-core = { version = "0.1.0", path = "../duck-core" }
 duck-deflate = { version = "0.1.0", path = "../duck-deflate" }
 duck-par = { version = "0.1.0", path = "../duck-par" }
+crc32fast = "1.5.5"
 fast-float2 = "0.2.4"
 flate2 = { version = "1.1.11", default-features = false, features = ["zlib-rs"] }
 memchr = "2.8.3"

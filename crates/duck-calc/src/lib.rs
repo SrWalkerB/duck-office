@@ -12,8 +12,9 @@
 //! O motor de cálculo (F4) vai crescer a partir daqui.
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
-use duck_core::{FormulaKind, Sheet};
+use duck_core::{Axis, FormulaKind, FormulaOps, Sheet, Shift};
 
 /// Maior coluna (XFD) e linha do Excel, base 1.
 const MAX_COL: i64 = 16_384;
@@ -330,6 +331,235 @@ pub fn shift(formula: &str, drow: i64, dcol: i64) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Inserir e apagar linhas e colunas (F3.5)
+// ---------------------------------------------------------------------------
+
+/// Nome da aba que qualifica a referência, pelo texto logo antes dela
+/// (`Plan1!`, `'Minha Aba'!`). `Some(None)` = sem nome (a aba da fórmula);
+/// `None` = referência que não se ajusta (outro arquivo, várias abas).
+fn qualifier(before: &str) -> Option<Option<String>> {
+    let Some(head) = before.strip_suffix('!') else { return Some(None) };
+    if let Some(q) = head.strip_suffix('\'') {
+        // Nome entre aspas, com aspas dobradas dentro.
+        let b = q.as_bytes();
+        let mut i = b.len();
+        while i > 0 {
+            i -= 1;
+            if b[i] == b'\'' {
+                if i > 0 && b[i - 1] == b'\'' {
+                    i -= 1;
+                    continue;
+                }
+                let name = q[i + 1..].replace("''", "'");
+                return (!name.contains([']', ':'])).then_some(Some(name));
+            }
+        }
+        return None;
+    }
+    let start =
+        head.rfind(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '.' | '\\'))).map_or(0, |i| i + 1);
+    let name = &head[start..];
+    if name.is_empty() || head[..start].ends_with([']', ':']) {
+        return None;
+    }
+    Some(Some(name.to_string()))
+}
+
+/// Ajusta as referências de uma fórmula (A1) a uma mudança de estrutura na
+/// aba `sheet` (`own` = a fórmula é dessa aba, então referências sem nome de
+/// aba também contam). Devolve o texto novo, se mudar, e se algo se perdeu
+/// (`#REF!` ou intervalo encolhido).
+pub fn adjust_refs(formula: &str, s: Shift, own: bool, sheet: &str) -> Option<(String, bool)> {
+    let mut pieces = Vec::new();
+    walk(formula, |p| pieces.push(p));
+    if !pieces.iter().any(|p| !matches!(p, Piece::Text(_))) {
+        return None;
+    }
+    let mut out = String::with_capacity(formula.len() + 8);
+    let mut lossy = false;
+    let mut changed = false;
+    let mut i = 0;
+    let rows = s.axis == Axis::Rows;
+    while i < pieces.len() {
+        let p = pieces[i];
+        let prev_text = match i.checked_sub(1).map(|k| pieces[k]) {
+            Some(Piece::Text(t)) => t,
+            _ => "",
+        };
+        let applies = |prev: &str| match qualifier(prev) {
+            Some(Some(name)) => name.eq_ignore_ascii_case(sheet),
+            Some(None) => own,
+            None => false,
+        };
+        // Intervalo `X:Y` (duas referências separadas só por `:`).
+        let range_end = match (pieces.get(i + 1), pieces.get(i + 2)) {
+            (Some(Piece::Text(":")), Some(q)) if !matches!(q, Piece::Text(_)) => Some(*q),
+            _ => None,
+        };
+        match p {
+            Piece::Text(t) => {
+                out.push_str(t);
+                i += 1;
+                continue;
+            }
+            _ if !applies(prev_text) => {
+                // Copia como está (com o fim do intervalo, se houver).
+                push_raw(&mut out, p);
+                if let Some(q) = range_end {
+                    out.push(':');
+                    push_raw(&mut out, q);
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        // Coordenadas no eixo (base 0) do começo e do fim.
+        let axis_of = |p: Piece| -> Option<i64> {
+            match p {
+                Piece::Cell(r, _) => Some(if rows { r.row } else { r.col } - 1),
+                Piece::Col { col, .. } if !rows => Some(col - 1),
+                Piece::Row { row, .. } if rows => Some(row - 1),
+                _ => None,
+            }
+        };
+        let end = range_end.unwrap_or(p);
+        match (axis_of(p), axis_of(end)) {
+            (Some(a), Some(b)) => {
+                let (lo, hi) = (a.min(b) as u32, a.max(b) as u32);
+                let single = range_end.is_none();
+                let mapped = if single { s.index(lo).map(|x| (x, x)) } else { s.span(lo, hi) };
+                match mapped {
+                    None => {
+                        out.push_str("#REF!");
+                        lossy = true;
+                        changed = true;
+                    }
+                    Some((na, nb)) => {
+                        if !single && !s.insert && (nb - na) != (hi - lo) {
+                            lossy = true;
+                        }
+                        let (na, nb) = if a <= b { (na, nb) } else { (nb, na) };
+                        changed |= na as i64 != a || nb as i64 != b;
+                        push_with(&mut out, p, na as i64 + 1, rows);
+                        if let Some(q) = range_end {
+                            out.push(':');
+                            push_with(&mut out, q, nb as i64 + 1, rows);
+                        }
+                    }
+                }
+            }
+            // Peça que o eixo não move (ex.: `A:C` ao inserir linhas).
+            _ => {
+                push_raw(&mut out, p);
+                if let Some(q) = range_end {
+                    out.push(':');
+                    push_raw(&mut out, q);
+                }
+            }
+        }
+        i += if range_end.is_some() { 3 } else { 1 };
+    }
+    changed.then_some((out, lossy))
+}
+
+fn push_raw(out: &mut String, p: Piece) {
+    match p {
+        Piece::Text(t) => out.push_str(t),
+        Piece::Cell(_, raw) => out.push_str(raw),
+        Piece::Col { raw, .. } | Piece::Row { raw, .. } => out.push_str(raw),
+    }
+}
+
+/// Escreve a peça com a coordenada do eixo trocada por `v` (base 1).
+fn push_with(out: &mut String, p: Piece, v: i64, rows: bool) {
+    match p {
+        Piece::Cell(r, _) => {
+            let (row, col) = if rows { (v, r.col) } else { (r.row, v) };
+            push_cell(out, col, row, r.abs_col, r.abs_row);
+        }
+        Piece::Col { abs, .. } => {
+            if abs {
+                out.push('$');
+            }
+            push_col(out, v);
+        }
+        Piece::Row { abs, .. } => {
+            if abs {
+                out.push('$');
+            }
+            out.push_str(&itoa(v));
+        }
+        Piece::Text(t) => out.push_str(t),
+    }
+}
+
+/// As operações de fórmula para uma mudança de estrutura na aba `sheet`
+/// (ver `duck_core::FormulaOps`).
+#[derive(Clone, Debug)]
+pub struct ShiftOps {
+    pub shift: Shift,
+    pub sheet: String,
+    /// As fórmulas ajustadas são da própria aba.
+    pub own: bool,
+}
+
+impl FormulaOps for ShiftOps {
+    fn adjust(&self, a1: &str) -> Option<(String, bool)> {
+        adjust_refs(a1, self.shift, self.own, &self.sheet)
+    }
+
+    fn make_template(&self, a1: &str, row: u32, col: u32) -> Option<String> {
+        to_template(a1, row, col)
+    }
+
+    fn expand_template(&self, template: &str, row: u32, col: u32) -> String {
+        from_template(template, row, col)
+    }
+
+    fn shift_a1(&self, a1: &str, drow: i64, dcol: i64) -> String {
+        shift(a1, drow, dcol)
+    }
+
+    fn with_shift(&self, s: Shift) -> Arc<dyn FormulaOps> {
+        Arc::new(ShiftOps { shift: s, ..self.clone() })
+    }
+
+    fn axis_refs(&self, template: &str, rows: bool) -> Vec<(bool, i64)> {
+        axis_refs(template, rows)
+    }
+}
+
+/// As referências de um modelo relativo num eixo: (absoluta, valor).
+pub fn axis_refs(template: &str, rows: bool) -> Vec<(bool, i64)> {
+    let mut out = Vec::new();
+    let mut rest = template;
+    while let Some(i) = rest.find([M_CELL, M_COL, M_ROW]) {
+        let marker = rest[i..].chars().next().unwrap();
+        let body_start = i + marker.len_utf8();
+        let Some(end) = rest[body_start..].find(M_END) else { break };
+        let body = &rest[body_start..body_start + end];
+        let part = match marker {
+            M_CELL => {
+                let (c, r) = body.split_once(M_SEP).unwrap_or((body, "0"));
+                Some(if rows { r } else { c })
+            }
+            M_COL if !rows => Some(body),
+            M_ROW if rows => Some(body),
+            _ => None,
+        };
+        if let Some(p) = part {
+            let (abs, v) = read_part(p, 0);
+            out.push((abs, v));
+        }
+        rest = &rest[body_start + end + M_END.len_utf8()..];
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Modelos relativos
 // ---------------------------------------------------------------------------
 
@@ -521,6 +751,32 @@ mod tests {
     }
 
     #[test]
+    fn structural_adjustments() {
+        let ins = Shift { axis: Axis::Rows, at: 4, n: 2, insert: true }; // antes da linha 5
+        let a = |f: &str, own: bool| adjust_refs(f, ins, own, "Dados").map(|x| x.0);
+        assert_eq!(a("A1+A5+$B$10", true).as_deref(), Some("A1+A7+$B$12"));
+        assert_eq!(a("SUM(A1:A10)", true).as_deref(), Some("SUM(A1:A12)"));
+        assert_eq!(a("SUM(A1:A4)", true), None);
+        assert_eq!(a("SUM(A:A)+SUM(5:6)", true).as_deref(), Some("SUM(A:A)+SUM(7:8)"));
+        assert_eq!(a("A10", false), None, "outra aba, sem nome: não muda");
+        assert_eq!(a("Dados!A10+'Outra'!A10", false).as_deref(), Some("Dados!A12+'Outra'!A10"));
+        assert_eq!(a("\"A10\"&A10", true).as_deref(), Some("\"A10\"&A12"));
+
+        let del = ins.inverse(); // apaga as linhas 5 e 6
+        let d = |f: &str| adjust_refs(f, del, true, "Dados");
+        assert_eq!(d("A5+A7"), Some(("#REF!+A5".into(), true)));
+        assert_eq!(d("SUM(A1:A10)"), Some(("SUM(A1:A8)".into(), true)));
+        assert_eq!(d("SUM(A5:A6)"), Some(("SUM(#REF!)".into(), true)));
+        assert_eq!(d("SUM(A7:A9)"), Some(("SUM(A5:A7)".into(), false)));
+
+        let cols = Shift { axis: Axis::Cols, at: 1, n: 1, insert: true }; // antes de B
+        let c = |f: &str| adjust_refs(f, cols, true, "Dados").map(|x| x.0);
+        assert_eq!(c("A1+B1+$C$2").as_deref(), Some("A1+C1+$D$2"));
+        assert_eq!(c("SUM(A:C)").as_deref(), Some("SUM(A:D)"));
+        assert_eq!(c("SUM(1:3)"), None);
+    }
+
+    #[test]
     fn copied_down_formulas_share_a_template() {
         let a = to_template("B2*2+$C$1+SUM(D:D)", 1, 0).unwrap();
         let b = to_template("B3*2+$C$1+SUM(D:D)", 2, 0).unwrap();
@@ -560,5 +816,88 @@ mod tests {
         // Fora do formato canônico: fica como texto.
         assert_eq!(to_template("a1+B2", 0, 0), None);
         assert_eq!(to_template("A01", 0, 0), None);
+    }
+
+    /// Aba de teste: A1..A3000 = números; B = A*2 (modelo); C2 = SUM(A1:A3000);
+    /// D1..D3 = grupo compartilhado A1+1.
+    fn shift_sheet() -> duck_core::Sheet {
+        use duck_core::{FormulaKind, SheetPart, kind};
+        let mut p = SheetPart::new();
+        for r in 0..3000u32 {
+            p.set(r, 0, kind::NUMBER, 0, (r as f64).to_bits());
+            p.set(r, 1, kind::NUMBER | kind::FORMULA, 0, (2.0 * r as f64).to_bits());
+            let t = to_template(&format!("A{}*2", r + 1), r, 1).unwrap();
+            p.set_formula_template(r, 1, &t);
+        }
+        p.set(1, 2, kind::NUMBER | kind::FORMULA, 0, 1.0f64.to_bits());
+        p.set_formula(1, 2, "SUM(A1:A3000)", FormulaKind::Normal);
+        p.set(0, 3, kind::NUMBER | kind::FORMULA, 0, 1.0f64.to_bits());
+        p.set_formula(0, 3, "A1+1", FormulaKind::Shared { si: 0 });
+        for r in 1..3 {
+            p.set(r, 3, kind::NUMBER | kind::FORMULA, 0, 1.0f64.to_bits());
+            p.set_shared_formula(r, 3, 0);
+        }
+        let mut s = duck_core::Sheet::new("Dados");
+        s.merge_part(p);
+        s.layout.merges.push(duck_core::CellRange { first_row: 9, first_col: 4, last_row: 11, last_col: 5 });
+        s.finish();
+        s
+    }
+
+    fn snapshot(s: &duck_core::Sheet) -> Vec<String> {
+        let sh = duck_core::StringTable::new();
+        (0..3010)
+            .flat_map(|r| (0..6).map(move |c| (r, c)))
+            .map(|(r, c)| format!("{:?} {:?}", s.cell(r, c, &sh), cell_formula(s, r, c)))
+            .collect()
+    }
+
+    #[test]
+    fn insert_and_delete_rows_in_the_model() {
+        use duck_core::{Command, OpsHandle};
+        let mut s = shift_sheet();
+        let before = snapshot(&s);
+        let sh = duck_core::StringTable::new();
+        let ops = |shift: Shift| OpsHandle(Arc::new(ShiftOps { shift, sheet: "Dados".into(), own: true }));
+
+        // Inserir 2 linhas antes da linha 5 (base 0: 4).
+        let ins = Shift { axis: Axis::Rows, at: 4, n: 2, insert: true };
+        let undo = Command::Shift(ins, ops(ins)).apply(&mut s);
+        assert_eq!(s.cell(6, 0, &sh).value, duck_core::Value::Number(4.0));
+        assert_eq!(cell_formula(&s, 6, 1).as_deref(), Some("A7*2"));
+        assert_eq!(cell_formula(&s, 3, 1).as_deref(), Some("A4*2"));
+        assert_eq!(cell_formula(&s, 1, 2).as_deref(), Some("SUM(A1:A3002)"));
+        assert_eq!(cell_formula(&s, 2, 3).as_deref(), Some("A3+1"));
+        assert_eq!(s.layout.merges[0].first_row, 11);
+        assert_eq!(s.rows(), 3002);
+        assert!(s.edits().structure);
+        undo.apply(&mut s);
+        assert_eq!(snapshot(&s), before, "desfazer volta ao mesmo");
+
+        // Apagar as linhas 2 e 3 (base 0: 1..3): C2 (a soma) some; D2/D3 também.
+        let del = Shift { axis: Axis::Rows, at: 1, n: 2, insert: false };
+        let undo = Command::Shift(del, ops(del)).apply(&mut s);
+        assert_eq!(s.cell(1, 0, &sh).value, duck_core::Value::Number(3.0));
+        assert_eq!(cell_formula(&s, 1, 1).as_deref(), Some("A2*2"));
+        assert_eq!(cell_formula(&s, 1, 2), None);
+        assert_eq!(cell_formula(&s, 0, 3).as_deref(), Some("A1+1"));
+        undo.apply(&mut s);
+        assert_eq!(snapshot(&s), before, "desfazer devolve as linhas apagadas");
+
+        // Colunas: inserir antes de B.
+        let ic = Shift { axis: Axis::Cols, at: 1, n: 1, insert: true };
+        let undo = Command::Shift(ic, ops(ic)).apply(&mut s);
+        assert_eq!(cell_formula(&s, 5, 2).as_deref(), Some("A6*2"));
+        assert_eq!(cell_formula(&s, 1, 3).as_deref(), Some("SUM(A1:A3000)"));
+        assert_eq!(s.layout.merges[0].first_col, 5);
+        undo.apply(&mut s);
+        assert_eq!(snapshot(&s), before);
+
+        // Apagar a coluna A: as fórmulas que usavam A viram #REF!.
+        let dc = Shift { axis: Axis::Cols, at: 0, n: 1, insert: false };
+        let undo = Command::Shift(dc, ops(dc)).apply(&mut s);
+        assert_eq!(cell_formula(&s, 5, 0).as_deref(), Some("#REF!*2"));
+        undo.apply(&mut s);
+        assert_eq!(snapshot(&s), before);
     }
 }

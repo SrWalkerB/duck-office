@@ -16,18 +16,23 @@
 //!   é idêntico com qualquer número de threads (ADR-012).
 
 pub mod cond;
+pub mod edit;
+pub mod input;
 mod layout;
 pub mod numfmt;
+pub mod shift;
 mod styles;
 
 use std::collections::HashMap;
 
 pub use cond::{CfApply, CfCtx, CfKind, CfOp, CfRule, CfState, Cfvo, CfvoKind, Period, TextOp};
+pub use edit::{CellChange, CellValue, Command, Edits, OpsHandle, RawCell};
 pub use layout::{CellRange, ColSpec, Hyperlink, Layout, Pane, RowSpec, SheetView};
 pub use numfmt::{Formatted, NumFmt};
+pub use shift::{Axis, FormulaOps, Shift};
 pub use styles::{
-    Alignment, Border, BorderSide, BorderStyle, CellXf, Color, Dxf, Fill, Font, HAlign, RichRun, RunFont,
-    Styles, Theme, VAlign, apply_tint, rotation_angle,
+    Alignment, Border, BorderSide, BorderStyle, CellXf, Color, Dxf, FileCounts, Fill, Font, HAlign, RichRun,
+    RunFont, Styles, Theme, VAlign, apply_tint, rotation_angle,
 };
 
 /// Linhas por bloco.
@@ -854,6 +859,12 @@ pub struct Sheet {
     cols: u32,
     /// Os blocos abaixo deste índice já foram compactados no merge.
     sealed: usize,
+    /// O que mudou desde o último salvamento (ver `edit.rs`).
+    edits: Edits,
+    /// Índice em `strings` da tabela do texto digitado.
+    edit_table: Option<usize>,
+    /// Blocos (coluna, bloco) escritos desde o último [`Sheet::settle`].
+    touched: Vec<(u32, u32)>,
 }
 
 impl Sheet {
@@ -871,6 +882,9 @@ impl Sheet {
             rows: 0,
             cols: 0,
             sealed: 0,
+            edits: Edits::default(),
+            edit_table: None,
+            touched: Vec::new(),
         }
     }
 

@@ -50,3 +50,15 @@ jobs:
           ./target/release/duck-bench open target/synth.xlsx
           ./target/release/duck-bench gen-showcase target/vitrine.xlsx
           ./target/release/duck-bench verify target/vitrine.xlsx
+
+      # Salvar (F3): cópia intacta, reescrita de todas as células e edições,
+      # cada uma relida e conferida contra o modelo e o calamine.
+      - name: Round-trip
+        shell: bash
+        run: |
+          for f in target/synth.xlsx target/vitrine.xlsx; do
+            ./target/release/duck-bench roundtrip "$f"
+            ./target/release/duck-bench roundtrip "$f" --rewrite-all
+            ./target/release/duck-bench roundtrip "$f" --edit 500
+            ./target/release/duck-bench roundtrip "$f" --estrutura
+          done

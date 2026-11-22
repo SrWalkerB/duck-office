@@ -8,7 +8,7 @@ Roadmap e status das fases: [ROADMAP.md](ROADMAP.md) · Decisões de arquitetura
 
 ```
 apps/
-  duck-sheets/       o visualizador de planilhas (F2)
+  duck-sheets/       o editor de planilhas (F2, F3)
 platform/            biblioteca nativa independente (não depende da suíte)
   duck-platform/     janela, entrada, DPI, clipboard, diálogos: chamadas ao SO
   duck-gfx/          renderer 2D por instâncias sobre wgpu
@@ -17,12 +17,13 @@ platform/            biblioteca nativa independente (não depende da suíte)
   examples/
     million_rows/    grade de 1.000.000 de linhas (prova da F0)
 crates/              a suíte office
-  duck-core/         modelo do workbook: blocos colunares, strings, estilos, formatos de número
+  duck-core/         modelo do workbook: blocos colunares, strings, estilos, formatos de número,
+                     edição e comandos com desfazer
   duck-par/          pool de threads, limitador de memória, cortes SIMD
   duck-deflate/      descompactação deflate em paralelo (especulativa)
-  duck-xlsx/         leitura de .xlsx/.xlsm em paralelo e em streaming, e de .csv
-  duck-calc/         fórmulas: referências e modelos relativos
-  duck-bench/        medição: open, sweep, verify, gen, gen-showcase, inflate, preview
+  duck-xlsx/         leitura e gravação de .xlsx/.xlsm (em paralelo, gravação por remendo) e de .csv
+  duck-calc/         fórmulas: referências, modelos relativos e ajuste ao inserir/apagar linhas
+  duck-bench/        medição: open, sweep, verify, roundtrip, gen, gen-showcase, inflate, preview
 scripts/
   check-platform-deps.sh   garante que platform/ não depende da suíte
 ```
@@ -49,7 +50,11 @@ cargo run --release -p duck-sheets -- caminho/arquivo.xlsx
 
 Sem arquivo, abre o diálogo nativo (ou arraste o arquivo para a janela). Teclas: setas (+Shift seleciona, +Ctrl vai até a borda dos dados), PageUp/PageDown, Ctrl+Home/End, Ctrl+PageUp/PageDown (abas), Ctrl+C (copia a seleção), Ctrl+F e F3 (busca), Ctrl+G ou F5 (ir para), Ctrl+O (abrir), Ctrl+A, Ctrl + roda ou Ctrl +/−/0 (zoom).
 
-Opções: `--sheet N` (aba inicial, 1 = primeira), `--cell B12`, `--zoom 80`, `--find texto`.
+Edição: digitar substitui a célula; F2, duplo clique ou clique na barra de fórmulas editam o conteúdo; Enter/Tab confirmam e Esc cancela; Delete apaga a seleção; Ctrl+C, Ctrl+X e Ctrl+V copiam, recortam e colam (de outros programas também); Ctrl+Z e Ctrl+Y desfazem e refazem; Ctrl+S salva e Ctrl+Shift+S salva como. A barra de ferramentas tem negrito, itálico, sublinhado, tachado, cores, alinhamento, formatos de número, bordas e inserir/apagar linhas e colunas (também Ctrl+N/B, Ctrl+I, Ctrl+U, Ctrl+5, Ctrl+Shift+1/3/4/5/7 e Ctrl+Alt+= / Ctrl+Alt+-).
+
+O que se digita é lido como no Excel em português: `1.234,56`, `10%`, `R$ 10`, `22/11/2026`, `14:30`, `VERDADEIRO`, `=A1*2`. Fórmulas simples ganham valor na hora; as outras (com intervalos, como `SUM`) ficam sem valor até o motor de cálculo (F4), e o arquivo salvo pede ao Excel para recalcular ao abrir.
+
+Opções: `--sheet N` (aba inicial, 1 = primeira), `--cell B12`, `--zoom 80`, `--find texto`. Para testar a edição sem a janela: `--edit A1=valor` (também `copiar:A1:B2`, `colar:D5`, `inserir:A5:A6`, `formatar:negrito:A1:B2`...), `--undo N` e `--save-to cópia.xlsx`.
 
 Medir (abre, rola a aba, mostra os tempos e sai) e screenshot (renderiza fora da tela depois de carregar tudo):
 
@@ -123,6 +128,12 @@ O caminho da primeira tela do duck-sheets (pacote, estilos, strings e prévia da
 
 ```
 cargo run --release -p duck-bench -- preview caminho/arquivo.xlsx
+```
+
+Salvar numa cópia e conferir (partes intactas idênticas byte a byte, abas regravadas relidas e comparadas célula a célula, cópia conferida contra o calamine). `--rewrite-all` escreve toda célula a partir do modelo; `--edit N` faz N edições; `--estrutura` insere e apaga linhas e colunas:
+
+```
+cargo run --release -p duck-bench -- roundtrip caminho/arquivo.xlsx --edit 500
 ```
 
 Gerar uma planilha sintética grande (600 mil linhas × 37 colunas por padrão):

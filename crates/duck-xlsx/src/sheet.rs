@@ -708,7 +708,7 @@ impl FusedPart {
 
 /// Posição em `bytes` logo depois do primeiro `</row>` que termina nele,
 /// contando um que começou no fim de `before` (os bytes anteriores).
-fn row_end(before: &[u8], bytes: &[u8]) -> Option<usize> {
+pub(crate) fn row_end(before: &[u8], bytes: &[u8]) -> Option<usize> {
     const TAG: &[u8] = b"</row>";
     let k = before.len().min(TAG.len() - 1);
     let n = bytes.len().min(TAG.len() - 1);
