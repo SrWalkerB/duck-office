@@ -22,6 +22,7 @@ pub struct FontLook {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    pub strike: bool,
 }
 
 /// Um estilo de célula resolvido.
@@ -35,6 +36,8 @@ pub struct Look {
     pub v: VAlign,
     pub wrap: bool,
     pub indent: u8,
+    /// `textRotation` do Excel (ver [`duck_core::Alignment::angle`]).
+    pub rotation: u8,
     /// Índice em [`Looks::fmts`].
     pub fmt: u32,
     /// Esquerda, direita, cima, baixo.
@@ -61,6 +64,7 @@ impl Looks {
                 bold: f.bold,
                 italic: f.italic,
                 underline: f.underline,
+                strike: f.strike,
             })
             .collect();
         if fonts.is_empty() {
@@ -70,6 +74,7 @@ impl Looks {
                 bold: false,
                 italic: false,
                 underline: false,
+                strike: false,
             });
         }
         let mut fmts = vec![NumFmt::general()];
@@ -103,6 +108,7 @@ impl Looks {
                     v: xf.alignment.vertical,
                     wrap: xf.alignment.wrap,
                     indent: xf.alignment.indent,
+                    rotation: xf.alignment.rotation,
                     fmt: if xf.num_fmt == 0 { 0 } else { fmt_of(xf.num_fmt) },
                     edges,
                 }
@@ -116,6 +122,7 @@ impl Looks {
             v: VAlign::Bottom,
             wrap: false,
             indent: 0,
+            rotation: 0,
             fmt: 0,
             edges: [None; 4],
         });

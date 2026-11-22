@@ -27,13 +27,15 @@ pub struct ColSpec {
     pub style: u16,
 }
 
-/// Uma linha com altura própria ou escondida.
+/// Uma linha com altura própria, escondida ou com estilo de linha inteira.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RowSpec {
     pub row: u32,
     /// Altura em pontos.
     pub height: Option<f32>,
     pub hidden: bool,
+    /// Estilo das células sem `<c>` da linha (`<row s customFormat="1">`).
+    pub style: Option<u16>,
 }
 
 /// Painéis congelados.
@@ -89,6 +91,21 @@ pub struct Layout {
     pub pane: Option<Pane>,
     /// Área usada declarada no arquivo (`<dimension>`).
     pub dimension: Option<CellRange>,
+    /// Formatação condicional, em ordem de prioridade depois de [`Layout::finish`].
+    pub cond: Vec<crate::CfRule>,
+    /// Hiperlinks, em ordem de linha depois de [`Layout::finish`].
+    pub links: Vec<Hyperlink>,
+}
+
+/// Um `<hyperlink>`: endereço externo (já resolvido pelos relacionamentos da
+/// aba) ou lugar dentro do arquivo (`Aba!A1`, nome definido).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hyperlink {
+    pub range: CellRange,
+    /// `r:id` até a leitura resolver; depois, o endereço externo.
+    pub target: Option<String>,
+    pub location: Option<String>,
+    pub tooltip: Option<String>,
 }
 
 impl Layout {
@@ -109,6 +126,8 @@ impl Layout {
         self.cols.extend(other.cols);
         self.rows.extend(other.rows);
         self.merges.extend(other.merges);
+        self.cond.extend(other.cond);
+        self.links.extend(other.links);
     }
 
     /// Ordena depois de juntar todos os pedaços.
@@ -122,6 +141,15 @@ impl Layout {
         self.cols.sort_by_key(|c| c.first);
         self.rows.sort_by_key(|r| r.row);
         self.merges.sort_by_key(|m| (m.first_row, m.first_col));
+        self.cond.sort_by_key(|r| r.priority);
+        self.links.sort_by_key(|l| (l.range.first_row, l.range.first_col));
+    }
+
+    /// Hiperlink que cobre a célula, se houver.
+    pub fn link_at(&self, row: u32, col: u32) -> Option<&Hyperlink> {
+        // Poucos links por aba; os que começam depois da linha não servem.
+        let end = self.links.partition_point(|l| l.range.first_row <= row);
+        self.links[..end].iter().rev().find(|l| l.range.contains(row, col))
     }
 
     /// Especificação da coluna `col`, se houver (busca binária).

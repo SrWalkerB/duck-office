@@ -237,7 +237,7 @@ Futuras: `duck-vba`, `duck-docs`, `duck-slides`, todas reutilizando `duck-core` 
 **Otimizações futuras.**
 
 - **`.xlsb`** (formato binário do Excel): ordens de grandeza mais rápido de ler; bom alvo para "salvar como formato rápido".
-- **`.csv`** e **`.ods`**.
+- **`.ods`** (o `.csv` já abre desde a F2).
 - **Formato nativo** (ADR-013) para reabrir instantaneamente, sem XML.
 
 **Consequências.** Com o parse distribuído entre os núcleos, o tempo de carga passa a ser dominado pelo inflate (~1 GB/s por núcleo com libdeflate), o que torna a meta de < 8 s plausível e a de < 4 s alcançável com inflate paralelo. A UI precisa lidar com "planilha ainda carregando" como estado normal.
@@ -690,8 +690,8 @@ Entregue: o app **`apps/duck-sheets`** abre `.xlsx`/`.xlsm` numa janela nativa, 
 |---|---|---|---|
 | Pacote + estilos + strings + prévia da aba ativa | 15 ms (`duck-bench preview`) | — | — |
 | Arquivo aberto + prévia (processo inteiro) | 68–70 ms | — | — |
-| Abertura da GPU (instância + adaptador / device) | 200–206 ms (95–102 / 37–38 ms) | — | — |
-| **Primeira tela com dados** (processo inteiro) | **212–245 ms** | **162–182 ms** (aba pequena ou a de 593 mil linhas) | < 300 ms |
+| Abertura da GPU (instância + adaptador / device) | 104–112 / 42–43 ms, numa thread desde o início do processo; a janela espera 91–104 ms por ela | — | — |
+| **Primeira tela com dados** (processo inteiro) | **190–199 ms** (era 212–245) | **127–182 ms** (aba pequena ou a de 593 mil linhas) | < 300 ms |
 | Aba ativa inteira | 0,22 s (aba pequena) | 0,18 s (aba pequena) / 0,74 s (593 mil linhas) | — |
 | Todas as 20 abas | 0,61–0,65 s | 0,75–0,95 s | — |
 | Montagem do frame, p50 / p99 (scroll, saltos, horizontal) | 0,5–0,6 / 0,6–2,5 ms | 1,5–2,0 / 2,3–3,2 ms | < 16 ms |
@@ -717,11 +717,29 @@ O que a F2 ensinou:
   - *Cada tarefa do inflate paralelo segurava a parte inteira descompactada* (~15 MB × 16 tarefas). Agora `inflate_parallel_process` entrega a saída em pedaços de 1 MB, guardando só a janela de 32 KB entre eles, e a leitura das linhas emenda os pedaços (até um `</row>` cortado ao meio).
   - Resultado no `duck-bench open` (16 threads): **pico de 820–860 para 352–373 MB** e leitura de 465–480 para **369–419 ms** (pedaços de 1 MB cabem no cache, o que deixou o parse mais rápido). Com 4 e 8 threads o pico também cai à metade e a leitura fica 7–10% mais rápida; no Linux, 493–535 para 321–338 MB e 568–651 para 489–497 ms. No app: pico de 954–979 para 517–527 MB no Windows e de 652–658 para 475–489 MB no Linux, 0 divergências nos dois.
 
+**Fechamento da F2 (22/11/2026)**
+
+- **Estilo de linha inteira** (`<row s customFormat="1">`): vale para as células sem `<c>` da linha, antes do estilo da coluna (`View::blank_style`), como no Excel.
+- **Texto girado** (`textRotation`): 0–180° e letras empilhadas (`255`). O `duck-gfx` ganhou um glifo girado (`KIND_GLYPH_ROT`: ângulo nos bits altos de `kind`, rotação no vertex shader e interpolação bilinear à mão no fragment, só dentro do glifo). O renderer não recorta glifos girados: `Painter::text_rotated` descarta os que têm o centro fora da célula. Exigir o glifo inteiro dentro fazia sumir letras acentuadas em células justas.
+- **Texto rico**: os trechos `<r><rPr>` das strings compartilhadas ficam ao lado da tabela (`StringTable::rich`, só para as strings que têm), e a célula reconhece a string pelo endereço do texto, como na busca. Cada trecho tem fonte, tamanho, cor, negrito, itálico, sublinhado, tachado e sobrescrito/subscrito, numa linha ou com quebra por palavra entre trechos. Tachado também nas fontes de célula. Texto inline (`<is>`) com trechos continua simples.
+- **Formatação condicional** (`duck_core::cond`, leitura em `duck-xlsx/src/cond.rs`, `dxfs` no `styles.xml`):
+  - tipos `cellIs`, `expression`, `colorScale` (2 e 3 cores), `dataBar`, `iconSet` (como caracteres coloridos), `top10`, `aboveAverage`, `duplicateValues`/`uniqueValues`, textos (contém, não contém, começa, termina), vazias, erros e períodos de data;
+  - prioridade e `stopIfTrue` como no Excel: em cada propriedade (preenchimento, cor, negrito, bordas...) vale a regra de maior prioridade que a define;
+  - fórmulas das regras passam por um avaliador pequeno (operadores, referências relativas à primeira célula do intervalo, `AND`/`OR`/`NOT`/`IF`/`IS*`/`LEN`/`MOD`/`ROW`/`TODAY`...). Regras com outras abas, intervalos (`COUNTIF`) ou funções fora da lista não se aplicam, sem afetar o resto;
+  - o que depende do intervalo inteiro (mínimo, máximo, percentis, média, N maiores, contagem de repetidos) é calculado uma vez por regra, na primeira vez que ela aparece na tela (`CfState`), e cada frame avalia só as células visíveis;
+  - fora por enquanto: regras da extensão de 2010 (`x14`, no `extLst`: 12 no arquivo de referência) e o formato de número do `dxf`.
+- **Hiperlinks**: `<hyperlink>` da aba, com o `r:id` resolvido nos relacionamentos dela. Com o mouse em cima, cursor de link e o destino na barra de status; **Ctrl+clique** segue o link: lugar no arquivo (`Aba!A1`) muda de aba e seleciona, e endereço externo abre no programa padrão, mas só `http`, `https` e `mailto`, porque o endereço vem do arquivo.
+- **Redimensionar com o mouse**: arrastar a borda do cabeçalho muda a largura da coluna ou a altura da linha (`Axis::set_size`, que refaz as somas só a partir do item mudado). Duplo clique na borda ajusta a coluna ao texto mais largo (até 20 mil células) e a linha volta à altura padrão. Os tamanhos mudados sobrevivem quando a aba é remontada (prévia → aba inteira, fontes novas).
+- **GPU antes da janela**: no DX12, `Gfx::start_early` abre instância, adaptador e device numa thread desde o início do processo, e `Gfx::new_with` só cria a superfície quando a janela existe. Se o adaptador não servir para a janela, abre do jeito normal. No Linux fica como estava, porque a escolha do adaptador depende da superfície (Vulkan × software no WSLg). **Primeira tela de 212–245 para 190–199 ms.**
+- **`.csv`** (e `.tsv`/`.txt`): uma aba só. Separador detectado entre `;`, `,`, tab e `|`; com `;`, vírgula decimal e ponto de milhar, como o Excel em pt-BR; UTF-8 com ou sem BOM, senão Windows-1252. Datas ficam como texto.
+- A vitrine ganhou a aba "Recursos" com tudo isso, inventado, para conferir sem dados reais.
+
+Medido depois (Windows, mesmo arquivo): leitura completa no `duck-bench open` em 378–389 ms com pico de ~355 MB (igual a antes), 864–1.091 fps sem vsync, 422–425 MB com tudo carregado e pico de 519–520 MB; 0 divergências no `verify`. No Linux: primeira tela em 127–142 ms, 408 MB e pico de 467–484 MB.
+
 Pendências da F2:
 
-- **Abrir a GPU** é agora o caminho crítico da primeira tela (~200 ms, dos quais ~100 ms em instância + adaptador). Alavanca: criar instância, adaptador e device numa thread antes de a janela existir (~45 ms), e só a superfície depois.
-- **Teclado e mouse** foram testados só por código (cópia em TSV, Ctrl+setas, busca, referências). Falta o teste manual na janela.
-- **Ainda não suportados**: texto girado (`textRotation`, comum em painéis), formatação condicional (`dxf`), estilo de linha (`<row s customFormat>`), texto com várias fontes na mesma célula (rich text), redimensionar colunas com o mouse, hiperlinks. Gráficos, imagens e slicers ficam para a F5.
+- **Teste manual de teclado e mouse** na janela. Seleção, Ctrl+setas, busca, cópia e referências têm teste de código; redimensionar e Ctrl+clique em link ainda não foram usados à mão.
+- Gráficos, imagens e slicers ficam para a F5.
 
 ---
 

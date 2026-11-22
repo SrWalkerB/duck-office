@@ -15,17 +15,19 @@
 //!   juntadas depois ([`Sheet::merge_part`]) em ordem fixa, então o resultado
 //!   é idêntico com qualquer número de threads (ADR-012).
 
+pub mod cond;
 mod layout;
 pub mod numfmt;
 mod styles;
 
 use std::collections::HashMap;
 
-pub use layout::{CellRange, ColSpec, Layout, Pane, RowSpec, SheetView};
+pub use cond::{CfApply, CfCtx, CfKind, CfOp, CfRule, CfState, Cfvo, CfvoKind, Period, TextOp};
+pub use layout::{CellRange, ColSpec, Hyperlink, Layout, Pane, RowSpec, SheetView};
 pub use numfmt::{Formatted, NumFmt};
 pub use styles::{
-    Alignment, Border, BorderSide, BorderStyle, CellXf, Color, Fill, Font, HAlign, Styles, Theme, VAlign,
-    apply_tint,
+    Alignment, Border, BorderSide, BorderStyle, CellXf, Color, Dxf, Fill, Font, HAlign, RichRun, RunFont,
+    Styles, Theme, VAlign, apply_tint, rotation_angle,
 };
 
 /// Linhas por bloco.
@@ -55,6 +57,8 @@ pub mod kind {
 pub struct StringTable {
     data: String,
     ends: Vec<u64>,
+    /// Trechos das strings com texto rico (várias fontes), por índice, em ordem.
+    rich: Vec<(u32, Box<[RichRun]>)>,
 }
 
 impl StringTable {
@@ -63,7 +67,7 @@ impl StringTable {
     }
 
     pub fn with_capacity(strings: usize, bytes: usize) -> Self {
-        Self { data: String::with_capacity(bytes), ends: Vec::with_capacity(strings) }
+        Self { data: String::with_capacity(bytes), ends: Vec::with_capacity(strings), rich: Vec::new() }
     }
 
     pub fn len(&self) -> usize {
@@ -93,7 +97,50 @@ impl StringTable {
         let byte_base = self.data.len() as u64;
         self.data.push_str(&other.data);
         self.ends.extend(other.ends.iter().map(|e| e + byte_base));
+        self.rich.extend(other.rich.iter().map(|(i, r)| (i + base, r.clone())));
         base
+    }
+
+    /// Guarda os trechos de texto rico da string `i`.
+    pub fn set_rich(&mut self, i: u32, runs: Vec<RichRun>) {
+        let at = self.rich.partition_point(|r| r.0 < i);
+        if self.rich.get(at).is_some_and(|r| r.0 == i) {
+            self.rich[at].1 = runs.into();
+        } else {
+            self.rich.insert(at, (i, runs.into()));
+        }
+    }
+
+    /// Trechos de texto rico da string `i`, se ela tiver.
+    pub fn rich(&self, i: u32) -> Option<&[RichRun]> {
+        let k = self.rich.binary_search_by_key(&i, |r| r.0).ok()?;
+        Some(&self.rich[k].1)
+    }
+
+    /// Quantas strings têm texto rico.
+    pub fn rich_count(&self) -> usize {
+        self.rich.len()
+    }
+
+    /// Índice de um `&str` devolvido por [`StringTable::get`] desta tabela.
+    pub fn index_of(&self, s: &str) -> Option<u32> {
+        let (lo, hi) = self.byte_range();
+        let p = s.as_ptr() as usize;
+        if p < lo || p > hi {
+            return None;
+        }
+        let off = (p - lo) as u64;
+        let i = self.ends.partition_point(|&e| e <= off);
+        (self.get(i as u32)?.as_ptr() == s.as_ptr()).then_some(i as u32)
+    }
+
+    /// Trechos de texto rico de um `&str` devolvido por esta tabela.
+    #[inline]
+    pub fn rich_of(&self, s: &str) -> Option<&[RichRun]> {
+        if self.rich.is_empty() || s.is_empty() {
+            return None;
+        }
+        self.rich(self.index_of(s)?)
     }
 
     /// Endereços [início, fim) do texto da tabela. Um `&str` devolvido por
@@ -105,13 +152,16 @@ impl StringTable {
     }
 
     pub fn heap_bytes(&self) -> usize {
-        self.data.capacity() + self.ends.capacity() * 8
+        self.data.capacity()
+            + self.ends.capacity() * 8
+            + self.rich.iter().map(|r| r.1.len() * std::mem::size_of::<RichRun>() + 16).sum::<usize>()
     }
 
     /// Devolve a folga dos buffers (depois de montar).
     pub fn shrink_to_fit(&mut self) {
         self.data.shrink_to_fit();
         self.ends.shrink_to_fit();
+        self.rich.shrink_to_fit();
     }
 }
 

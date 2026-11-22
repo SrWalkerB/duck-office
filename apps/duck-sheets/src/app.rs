@@ -86,6 +86,32 @@ pub struct View {
     pub headers: bool,
     /// Estilo de cada coluna (`<col style>`), para células sem `<c>`.
     pub col_styles: Vec<(u32, u32, u16)>,
+    /// Estilo de linha inteira (`<row s customFormat>`), em ordem de linha.
+    /// Vale antes do da coluna, como no Excel.
+    pub row_styles: Vec<(u32, u16)>,
+    /// Dados calculados de cada regra de formatação condicional (mesma ordem
+    /// de `sheet.layout.cond`).
+    pub cf: Vec<duck_core::CfState>,
+    /// Larguras e alturas mudadas pelo usuário (pixels a 100%), mantidas
+    /// quando a aba é remontada (prévia → aba inteira, fontes novas).
+    pub resized_cols: Vec<(u32, u32)>,
+    pub resized_rows: Vec<(u32, u32)>,
+}
+
+impl View {
+    /// Muda a largura de uma coluna (pixels lógicos a 100%).
+    pub fn resize_col(&mut self, c: u32, size: u32) {
+        self.cols.set_size(c, size);
+        self.resized_cols.retain(|x| x.0 != c);
+        self.resized_cols.push((c, size));
+    }
+
+    /// Muda a altura de uma linha (pixels lógicos a 100%).
+    pub fn resize_row(&mut self, r: u32, size: u32) {
+        self.rows.set_size(r, size);
+        self.resized_rows.retain(|x| x.0 != r);
+        self.resized_rows.push((r, size));
+    }
 }
 
 impl View {
@@ -101,6 +127,17 @@ impl View {
             Some(&(a, _, st)) if a <= c => st,
             _ => 0,
         }
+    }
+
+    /// Estilo de uma célula sem `<c>` (ou com `s="0"`): o da linha, se houver,
+    /// senão o da coluna.
+    pub fn blank_style(&self, r: u32, c: u32) -> u16 {
+        if !self.row_styles.is_empty()
+            && let Ok(i) = self.row_styles.binary_search_by_key(&r, |s| s.0)
+        {
+            return self.row_styles[i].1;
+        }
+        self.col_style(c)
     }
 }
 
@@ -192,6 +229,7 @@ fn build_view(sheet: &Sheet, mdw: f32, prev: Option<View>, opts_zoom: Option<u16
     let frozen_rows = pane.frozen_rows.min(nrows - 1);
     let frozen_cols = pane.frozen_cols.min(ncols - 1);
     let merges = Merges::new(l.merges.clone());
+    let row_styles = l.rows.iter().filter_map(|r| Some((r.row, r.style?))).filter(|s| s.1 != 0).collect();
 
     let mut v = View {
         frozen_rows,
@@ -205,6 +243,10 @@ fn build_view(sheet: &Sheet, mdw: f32, prev: Option<View>, opts_zoom: Option<u16
         grid: sv.show_grid_lines,
         headers: sv.show_headers,
         col_styles,
+        row_styles,
+        cf: l.cond.iter().map(|_| duck_core::CfState::default()).collect(),
+        resized_cols: Vec::new(),
+        resized_rows: Vec::new(),
         rows,
         cols,
     };
@@ -223,6 +265,12 @@ fn build_view(sheet: &Sheet, mdw: f32, prev: Option<View>, opts_zoom: Option<u16
         v.cur = p.cur;
         v.anchor = p.anchor;
         v.zoom = p.zoom;
+        for (c, s) in p.resized_cols {
+            v.resize_col(c, s);
+        }
+        for (r, s) in p.resized_rows {
+            v.resize_row(r, s);
+        }
     }
     v
 }
@@ -303,9 +351,27 @@ pub enum Drag {
     Select,
     Cols,
     Rows,
-    VThumb { grab: f32 },
-    HThumb { grab: f32 },
+    VThumb {
+        grab: f32,
+    },
+    HThumb {
+        grab: f32,
+    },
+    /// Arrastando a borda direita da coluna `col` (tamanho inicial e x do mouse).
+    ResizeCol {
+        col: u32,
+        size: u32,
+        x: f32,
+    },
+    ResizeRow {
+        row: u32,
+        size: u32,
+        y: f32,
+    },
 }
+
+/// Distância (pixels de interface) da borda do cabeçalho que pega o redimensionamento.
+const RESIZE_GRAB: f32 = 4.0;
 
 pub struct Find {
     pub input: TextInput,
@@ -352,6 +418,8 @@ pub struct SheetsApp {
     pub opts: Opts,
     pub window: Option<Window>,
     pub gfx: Option<Gfx>,
+    /// GPU sendo aberta desde o início do processo (ver `Gfx::start_early`).
+    gpu_early: Option<duck_gfx::EarlyGpu>,
     pub text: Option<TextSystem>,
     fonts_loading: Option<std::thread::JoinHandle<TextSystem>>,
     /// Resto das fontes do sistema, lido depois da primeira tela.
@@ -388,10 +456,15 @@ pub struct SheetsApp {
     pub buf2: String,
     /// `DUCK_TRACE=1`: imprime eventos e frames dos primeiros segundos.
     trace: bool,
+    /// Data de hoje (série do Excel), para a formatação condicional por data.
+    pub today: f64,
+    /// Destino do hiperlink sob o mouse (barra de status).
+    pub hover_link: Option<String>,
 }
 
 impl SheetsApp {
     pub fn new(t0: Instant, opts: Opts) -> Self {
+        let gpu_early = Gfx::start_early();
         let fonts_loading = std::thread::spawn(|| TextSystem::new_fast(UI_FONT_PX, ATLAS));
         let bench = opts.bench.then(|| Bench {
             phase: 0,
@@ -410,6 +483,7 @@ impl SheetsApp {
             opts,
             window: None,
             gfx: None,
+            gpu_early,
             text: None,
             fonts_loading: Some(fonts_loading),
             font_scan: None,
@@ -439,6 +513,8 @@ impl SheetsApp {
             buf: String::new(),
             buf2: String::new(),
             trace: std::env::var_os("DUCK_TRACE").is_some(),
+            today: duck_core::cond::today_serial(),
+            hover_link: None,
         }
     }
 
@@ -1107,7 +1183,7 @@ impl SheetsApp {
 
     // --- mouse ---------------------------------------------------------------
 
-    fn mouse_down(&mut self, cx: &mut Context, x: f32, y: f32, mods: Modifiers) {
+    fn mouse_down(&mut self, cx: &mut Context, x: f32, y: f32, mods: Modifiers, clicks: u8) {
         let g = self.geom();
         // Barra de fórmulas: caixa de nome.
         if g.namebox.contains(x, y) {
@@ -1169,6 +1245,27 @@ impl SheetsApp {
             v.cur = (nr - 1, nc - 1);
             return;
         }
+        // Borda de coluna ou linha nos cabeçalhos: redimensionar (duplo clique: ajustar).
+        if let Some(edge) = resize_target(&g, v, x, y) {
+            match edge {
+                Edge::Col(col) => {
+                    if clicks >= 2 {
+                        self.autofit_col(col);
+                    } else {
+                        self.drag = Some(Drag::ResizeCol { col, size: v.cols.size(col), x });
+                    }
+                }
+                Edge::Row(row) => {
+                    if clicks >= 2 {
+                        let d = v.rows.default_size();
+                        v.resize_row(row, d);
+                    } else {
+                        self.drag = Some(Drag::ResizeRow { row, size: v.rows.size(row), y });
+                    }
+                }
+            }
+            return;
+        }
         // Cabeçalho de colunas.
         if g.colhdr.contains(x, y) {
             let q = if x < g.grid.x0 + g.fw { &g.quads[0] } else { &g.quads[1] };
@@ -1197,6 +1294,19 @@ impl SheetsApp {
             return;
         }
         if let Some((mut r, mut c)) = g.hit(v, x, y) {
+            // Ctrl+clique num hiperlink: segue o link.
+            if mods.ctrl || mods.logo {
+                let link = self
+                    .doc
+                    .as_ref()
+                    .and_then(|d| d.current())
+                    .and_then(|(s, _)| s.layout.link_at(r, c).cloned());
+                if let Some(link) = link {
+                    self.follow_link(&link);
+                    return;
+                }
+            }
+            let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) else { return };
             if !mods.shift
                 && let Some(m) = v.merges.at(r, c)
             {
@@ -1214,17 +1324,43 @@ impl SheetsApp {
         self.mouse = (x, y);
         let Some(drag) = self.drag else {
             let g = self.geom();
+            let over_input = g.namebox.contains(x, y)
+                || self.find.as_ref().is_some_and(|_| crate::draw::find_rect(&g).contains(x, y));
+            let current = self.doc.as_ref().and_then(|d| d.current());
+            let edge = current.and_then(|(_, v)| resize_target(&g, v, x, y));
+            let link = match current {
+                Some((s, v)) if !over_input && !s.layout.links.is_empty() => g
+                    .hit(v, x, y)
+                    .and_then(|(r, c)| s.layout.link_at(r, c))
+                    .map(|l| l.target.clone().or_else(|| l.location.clone()).unwrap_or_default()),
+                _ => None,
+            };
+            let cursor = match (edge, &link) {
+                (Some(Edge::Col(_)), _) => Cursor::ResizeColumn,
+                (Some(Edge::Row(_)), _) => Cursor::ResizeRow,
+                (None, Some(_)) => Cursor::Pointer,
+                _ if over_input => Cursor::Text,
+                _ => Cursor::Default,
+            };
             if let Some(w) = &self.window {
-                let over_input = g.namebox.contains(x, y)
-                    || self.find.as_ref().is_some_and(|_| crate::draw::find_rect(&g).contains(x, y));
-                w.set_cursor(if over_input { Cursor::Text } else { Cursor::Default });
+                w.set_cursor(cursor);
             }
-            return false;
+            let changed = link != self.hover_link;
+            self.hover_link = link;
+            return changed;
         };
         let g = self.geom();
         let (thumb_v, thumb_h) = (self.vthumb(&g), self.hthumb(&g));
         let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) else { return false };
         match drag {
+            Drag::ResizeCol { col, size, x: x0 } => {
+                let s = (size as f32 + (x - x0) / g.g).round().max(0.0) as u32;
+                v.resize_col(col, s);
+            }
+            Drag::ResizeRow { row, size, y: y0 } => {
+                let s = (size as f32 + (y - y0) / g.g).round().max(0.0) as u32;
+                v.resize_row(row, s);
+            }
             Drag::VThumb { grab } => {
                 let track = g.vscroll.h() - thumb_v.1;
                 let min = v.rows.offset(v.frozen_rows) as f64;
@@ -1297,6 +1433,81 @@ impl SheetsApp {
         )
     }
 
+    /// Segue um hiperlink: lugar dentro do arquivo (`Aba!A1`) ou endereço
+    /// externo (só `http`, `https` e `mailto`, no programa padrão).
+    fn follow_link(&mut self, link: &duck_core::Hyperlink) {
+        if let Some(loc) = link.location.as_deref().filter(|l| !l.is_empty()) {
+            let loc = loc.trim_start_matches('#');
+            let (sheet, cell) = match loc.rfind('!') {
+                Some(i) => (Some(&loc[..i]), &loc[i + 1..]),
+                None => (None, loc),
+            };
+            let target = match sheet {
+                Some(name) => {
+                    let name = name
+                        .strip_prefix('\'')
+                        .and_then(|n| n.strip_suffix('\''))
+                        .map_or(name.to_string(), |n| n.replace("''", "'"));
+                    self.doc
+                        .as_ref()
+                        .and_then(|d| d.sheets.iter().position(|s| s.info.name.eq_ignore_ascii_case(&name)))
+                }
+                None => self.doc.as_ref().map(|d| d.active),
+            };
+            match (target, parse_range(&cell.replace('$', ""))) {
+                (Some(i), Some((a, b))) => {
+                    self.switch_sheet(i);
+                    self.go_to(a.0, a.1);
+                    if let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) {
+                        v.anchor = (b.0.min(v.rows.len() - 1), b.1.min(v.cols.len() - 1));
+                    }
+                }
+                _ => self.message = format!("Destino do link não encontrado: {loc}"),
+            }
+            return;
+        }
+        match link.target.as_deref() {
+            Some(url) if duck_platform::open_url(url) => self.message = format!("Abrindo {url}"),
+            Some(url) => self.message = format!("Link não aberto (só http, https e mailto): {url}"),
+            None => self.message = "Link sem destino".into(),
+        }
+    }
+
+    /// Ajusta a largura da coluna ao texto mais largo dela (até 20 mil células).
+    fn autofit_col(&mut self, col: u32) {
+        let Some(doc) = &self.doc else { return };
+        let Some((sheet, view)) = doc.current() else { return };
+        let (sheet, looks, strings, date1904, mdw) =
+            (sheet.clone(), doc.looks.clone(), doc.strings.clone(), doc.date1904, doc.mdw);
+        let Some(text) = self.text.as_mut() else { return };
+        let mut widest = 0.0f32;
+        let mut buf = String::new();
+        let mut n = 0;
+        sheet.for_each_value(col, 0..sheet.rows(), &strings, |r, cell| {
+            if view.merges.at(r, col).is_some() {
+                return true;
+            }
+            let s = if cell.style == 0 { view.blank_style(r, col) } else { cell.style };
+            let look = looks.get(s);
+            if show(&looks, look, cell.value, date1904, &mut buf).is_some() {
+                let f = &looks.fonts[(look.font as usize).min(looks.fonts.len() - 1)];
+                let st = text.style(&f.name, f.pt * 96.0 / 72.0, f.bold, f.italic);
+                widest = widest
+                    .max(text.measure_styled(&buf, st) + look.indent as f32 * 3.0 * (st.px() * 0.55).round());
+            }
+            n += 1;
+            n < 20_000
+        });
+        let size = if widest > 0.0 {
+            (widest + 2.0 * 3.0 + 2.0).ceil() as u32
+        } else {
+            (8.43 * mdw).round() as u32 + 5
+        };
+        if let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) {
+            v.resize_col(col, size);
+        }
+    }
+
     /// Índices (no workbook) das abas visíveis, na ordem das guias.
     pub fn visible_sheet_indices(&self) -> Vec<usize> {
         self.doc
@@ -1316,7 +1527,12 @@ impl SheetsApp {
 
     fn pick_and_open(&mut self, cx: &mut Context) {
         let Some(w) = &self.window else { return };
-        if let Some(p) = w.pick_file("Abrir planilha", &[("Planilhas do Excel", &["xlsx", "xlsm"])]) {
+        let filters: &[(&str, &[&str])] = &[
+            ("Planilhas", &["xlsx", "xlsm", "csv", "tsv", "txt"]),
+            ("Planilhas do Excel", &["xlsx", "xlsm"]),
+            ("Texto separado (CSV)", &["csv", "tsv", "txt"]),
+        ];
+        if let Some(p) = w.pick_file("Abrir planilha", filters) {
             self.open(p, cx.waker());
         }
     }
@@ -1602,7 +1818,7 @@ impl App for SheetsApp {
         }
         let (w, h) = window.inner_size();
         let vsync = !self.opts.bench;
-        match Gfx::new(window.clone(), w, h, vsync, ATLAS) {
+        match Gfx::new_with(self.gpu_early.take(), window.clone(), w, h, vsync, ATLAS) {
             Ok(g) => self.gfx = Some(g),
             Err(e) => {
                 self.error = Some(e.to_string());
@@ -1687,8 +1903,8 @@ impl App for SheetsApp {
                 }
                 true
             }
-            Event::MouseDown { button: MouseButton::Left, x, y, modifiers, .. } => {
-                self.mouse_down(cx, x as f32, y as f32, modifiers);
+            Event::MouseDown { button: MouseButton::Left, x, y, modifiers, clicks } => {
+                self.mouse_down(cx, x as f32, y as f32, modifiers, clicks);
                 true
             }
             Event::MouseUp { button: MouseButton::Left, .. } => self.drag.take().is_some(),
@@ -1782,6 +1998,56 @@ impl App for SheetsApp {
 // ---------------------------------------------------------------------------
 // Utilidades
 // ---------------------------------------------------------------------------
+
+/// Borda de cabeçalho que pode ser arrastada.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Edge {
+    Col(u32),
+    Row(u32),
+}
+
+/// Borda (direita de uma coluna, de baixo de uma linha) perto do ponto, nos cabeçalhos.
+fn resize_target(g: &Geom, v: &View, x: f32, y: f32) -> Option<Edge> {
+    let grab = RESIZE_GRAB * g.s;
+    if g.colhdr.contains(x, y) {
+        for q in [&g.quads[0], &g.quads[1]] {
+            if x < q.rect.x0 - grab || x > q.rect.x1 + grab || q.rect.is_empty() {
+                continue;
+            }
+            let (_, c) = g.cell_in(v, q, x.clamp(q.rect.x0, q.rect.x1 - 1.0), q.rect.y0);
+            // A borda mais próxima: a da coluna sob o mouse ou a da anterior.
+            let right = |c: u32| q.rect.x0 + ((v.cols.offset(c + 1) as f64 - q.ox) * g.g as f64) as f32;
+            if (right(c) - x).abs() <= grab {
+                return Some(Edge::Col(c));
+            }
+            if c > 0 {
+                let prev = v.cols.prev_visible(c);
+                if prev < c && (right(prev) - x).abs() <= grab {
+                    return Some(Edge::Col(prev));
+                }
+            }
+        }
+    }
+    if g.rowhdr.contains(x, y) {
+        for q in [&g.quads[0], &g.quads[2]] {
+            if y < q.rect.y0 - grab || y > q.rect.y1 + grab || q.rect.is_empty() {
+                continue;
+            }
+            let (r, _) = g.cell_in(v, q, q.rect.x0, y.clamp(q.rect.y0, q.rect.y1 - 1.0));
+            let bottom = |r: u32| q.rect.y0 + ((v.rows.offset(r + 1) as f64 - q.oy) * g.g as f64) as f32;
+            if (bottom(r) - y).abs() <= grab {
+                return Some(Edge::Row(r));
+            }
+            if r > 0 {
+                let prev = v.rows.prev_visible(r);
+                if prev < r && (bottom(prev) - y).abs() <= grab {
+                    return Some(Edge::Row(prev));
+                }
+            }
+        }
+    }
+    None
+}
 
 /// Texto da seleção como o Excel copia: o que as células mostram, colunas
 /// separadas por tab e linhas por CRLF; células com tab, quebra ou aspas

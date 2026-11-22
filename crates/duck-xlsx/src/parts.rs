@@ -1,14 +1,14 @@
 //! Partes pequenas do pacote: relacionamentos, workbook, strings e estilos.
 
 use duck_core::{
-    Alignment, Border, BorderSide, BorderStyle, CellXf, Color, Fill, Font, HAlign, StringTable, Styles,
-    Theme, VAlign,
+    Alignment, Border, BorderSide, BorderStyle, CellXf, Color, Dxf, Fill, Font, HAlign, RichRun, RunFont,
+    StringTable, Styles, Theme, VAlign,
 };
 use rayon::prelude::*;
 
 use crate::Error;
 use crate::package::Package;
-use crate::xml::{attr, attr_str, find_tag, for_each, inner, parse_u32, rich_text_into};
+use crate::xml::{attr, attr_str, find_tag, for_each, inner, parse_u32, rich_text_into, unescape_into};
 
 // ---------------------------------------------------------------------------
 // Relacionamentos e workbook
@@ -61,6 +61,32 @@ fn read_rels(pkg: &Package, part: &str) -> Result<Vec<Rel>, Error> {
         out.push(Rel { id, kind, target: resolve(dir, &target) });
     });
     Ok(out)
+}
+
+/// Troca o `r:id` dos hiperlinks de uma aba pelo endereço externo que está
+/// nos relacionamentos dela (`_rels/sheetN.xml.rels`).
+pub fn resolve_links(pkg: &Package, part: &str, links: &mut [duck_core::Hyperlink]) {
+    if links.iter().all(|l| l.target.is_none()) {
+        return;
+    }
+    let (dir, file) = match part.rfind('/') {
+        Some(i) => (&part[..i], &part[i + 1..]),
+        None => ("", part),
+    };
+    let path = if dir.is_empty() { format!("_rels/{file}.rels") } else { format!("{dir}/_rels/{file}.rels") };
+    let mut map = std::collections::HashMap::new();
+    if let Ok(buf) = pkg.read(&path) {
+        for_each(&buf, b"Relationship", |a, _| {
+            if let (Some(id), Some(target)) = (attr_str(a, b"Id"), attr_str(a, b"Target"))
+                && attr(a, b"Type").is_some_and(|t| t.ends_with(b"/hyperlink"))
+            {
+                map.insert(id, target);
+            }
+        });
+    }
+    for l in links {
+        l.target = l.target.take().and_then(|id| map.get(&id).cloned());
+    }
 }
 
 /// Junta `dir` + `target`, tratando caminhos absolutos e `..`.
@@ -164,7 +190,10 @@ pub fn read_shared_strings(pkg: &Package, path: &str) -> Result<StringTable, Err
             for_each(piece, b"si", |_, content| {
                 s.clear();
                 rich_text_into(content, &mut s);
-                t.push(&s);
+                let i = t.push(&s);
+                if let Some(runs) = rich_runs(content, s.len()) {
+                    t.set_rich(i, runs);
+                }
             });
             t
         })
@@ -174,6 +203,49 @@ pub fn read_shared_strings(pkg: &Package, path: &str) -> Result<StringTable, Err
         out.append(t);
     }
     Ok(out)
+}
+
+/// Trechos de um `<si>` com texto rico (`<r>`), se algum tiver fonte própria
+/// (`<rPr>`). `len` = tamanho do texto já montado; se a soma dos trechos não
+/// bater (XML fora do padrão), o texto fica simples.
+pub(crate) fn rich_runs(content: &[u8], len: usize) -> Option<Vec<RichRun>> {
+    memchr::memmem::find(content, b"<rPr")?;
+    let mut runs = Vec::new();
+    let mut at = 0usize;
+    let mut text = String::new();
+    for_each(content, b"r", |_, r| {
+        let font = find_tag(r, 0, b"rPr").map(|t| run_font(inner(r, &t, b"rPr")));
+        text.clear();
+        if let Some(t) = find_tag(r, 0, b"t") {
+            unescape_into(inner(r, &t, b"t"), &mut text);
+        }
+        if !text.is_empty() {
+            runs.push(RichRun { start: at as u32, font });
+            at += text.len();
+        }
+    });
+    (at == len && runs.iter().any(|r| r.font.is_some())).then_some(runs)
+}
+
+/// Fonte de um trecho (`<rPr>`): marcas presentes valem, o resto herda da célula.
+fn run_font(c: &[u8]) -> RunFont {
+    RunFont {
+        name: find_tag(c, 0, b"rFont").and_then(|t| attr_str(t.attrs, b"val")).filter(|n| !n.is_empty()),
+        size: find_tag(c, 0, b"sz")
+            .and_then(|t| attr(t.attrs, b"val"))
+            .and_then(|v| std::str::from_utf8(v).ok())
+            .and_then(|v| v.parse().ok()),
+        bold: flag(c, b"b"),
+        italic: flag(c, b"i"),
+        underline: flag(c, b"u"),
+        strike: flag(c, b"strike"),
+        color: find_tag(c, 0, b"color").map(|t| color(t.attrs)),
+        script: match find_tag(c, 0, b"vertAlign").and_then(|t| attr(t.attrs, b"val")) {
+            Some(b"superscript") => 1,
+            Some(b"subscript") => -1,
+            _ => 0,
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,20 +284,25 @@ fn flag(content: &[u8], name: &[u8]) -> bool {
 
 pub fn read_styles(pkg: &Package, path: &str) -> Result<Styles, Error> {
     let buf = pkg.read(path)?;
+    Ok(parse_styles(&buf))
+}
+
+pub(crate) fn parse_styles(buf: &[u8]) -> Styles {
     let mut st = Styles::default();
 
-    for_each(section(&buf, b"numFmts"), b"numFmt", |a, _| {
+    for_each(section(buf, b"numFmts"), b"numFmt", |a, _| {
         if let (Some(id), Some(code)) = (attr(a, b"numFmtId").and_then(parse_u32), attr_str(a, b"formatCode"))
         {
             st.num_fmts.insert(id as u16, code);
         }
     });
 
-    for_each(section(&buf, b"fonts"), b"font", |_, c| {
+    for_each(section(buf, b"fonts"), b"font", |_, c| {
         let mut f = Font {
             bold: flag(c, b"b"),
             italic: flag(c, b"i"),
             underline: flag(c, b"u"),
+            strike: flag(c, b"strike"),
             ..Default::default()
         };
         if let Some(t) = find_tag(c, 0, b"sz") {
@@ -243,7 +320,7 @@ pub fn read_styles(pkg: &Package, path: &str) -> Result<Styles, Error> {
         st.fonts.push(f);
     });
 
-    for_each(section(&buf, b"fills"), b"fill", |_, c| {
+    for_each(section(buf, b"fills"), b"fill", |_, c| {
         let mut fill = Fill::default();
         if let Some(p) = find_tag(c, 0, b"patternFill") {
             fill.pattern = attr_str(p.attrs, b"patternType").filter(|t| t != "none");
@@ -258,7 +335,7 @@ pub fn read_styles(pkg: &Package, path: &str) -> Result<Styles, Error> {
         st.fills.push(fill);
     });
 
-    for_each(section(&buf, b"borders"), b"border", |_, c| {
+    for_each(section(buf, b"borders"), b"border", |_, c| {
         let side = |names: &[&[u8]]| {
             for name in names {
                 if let Some(t) = find_tag(c, 0, name) {
@@ -279,7 +356,7 @@ pub fn read_styles(pkg: &Package, path: &str) -> Result<Styles, Error> {
     });
 
     // Paleta indexada própria (arquivos antigos).
-    let colors = section(&buf, b"colors");
+    let colors = section(buf, b"colors");
     if !colors.is_empty() {
         let mut pal = Vec::new();
         for_each(section(colors, b"indexedColors"), b"rgbColor", |a, _| {
@@ -294,7 +371,9 @@ pub fn read_styles(pkg: &Package, path: &str) -> Result<Styles, Error> {
         }
     }
 
-    for_each(section(&buf, b"cellXfs"), b"xf", |a, c| {
+    for_each(section(buf, b"dxfs"), b"dxf", |_, c| st.dxfs.push(dxf(c)));
+
+    for_each(section(buf, b"cellXfs"), b"xf", |a, c| {
         let num = |k: &[u8]| attr(a, k).and_then(parse_u32).unwrap_or(0) as u16;
         let mut xf = CellXf {
             num_fmt: num(b"numFmtId"),
@@ -324,10 +403,55 @@ pub fn read_styles(pkg: &Package, path: &str) -> Result<Styles, Error> {
             };
             al.wrap = matches!(attr(t.attrs, b"wrapText"), Some(b"1") | Some(b"true"));
             al.indent = attr(t.attrs, b"indent").and_then(parse_u32).unwrap_or(0).min(255) as u8;
+            al.rotation = match attr(t.attrs, b"textRotation").and_then(parse_u32) {
+                Some(r @ 0..=180) | Some(r @ 255) => r as u8,
+                _ => 0,
+            };
         }
         st.xfs.push(xf);
     });
-    Ok(st)
+    st
+}
+
+/// Um `<dxf>`: marcas de fonte presentes valem (`val="0"` desliga), o resto
+/// fica `None`. Preenchimento sólido de dxf vem em `bgColor`.
+fn dxf(c: &[u8]) -> Dxf {
+    let mut d = Dxf::default();
+    if let Some(t) = find_tag(c, 0, b"font") {
+        let f = inner(c, &t, b"font");
+        let mark = |name: &[u8]| find_tag(f, 0, name).map(|_| flag(f, name));
+        d.bold = mark(b"b");
+        d.italic = mark(b"i");
+        d.underline = mark(b"u");
+        d.strike = mark(b"strike");
+        d.color = find_tag(f, 0, b"color").map(|t| color(t.attrs));
+    }
+    if let Some(t) = find_tag(c, 0, b"fill") {
+        let f = inner(c, &t, b"fill");
+        let bg = find_tag(f, 0, b"bgColor").map(|t| color(t.attrs));
+        let fg = find_tag(f, 0, b"fgColor").map(|t| color(t.attrs));
+        d.fill = bg.filter(|c| *c != Color::Auto).or(fg);
+    }
+    if let Some(t) = find_tag(c, 0, b"border") {
+        let b = inner(c, &t, b"border");
+        let side = |names: &[&[u8]]| {
+            for name in names {
+                if let Some(t) = find_tag(b, 0, name) {
+                    let style = attr(t.attrs, b"style").map(BorderStyle::parse).unwrap_or_default();
+                    if style == BorderStyle::None {
+                        return None;
+                    }
+                    let color =
+                        find_tag(inner(b, &t, name), 0, b"color").map(|t| color(t.attrs)).unwrap_or_default();
+                    return Some(BorderSide { style, color });
+                }
+            }
+            None
+        };
+        d.border =
+            [side(&[b"left", b"start"]), side(&[b"right", b"end"]), side(&[b"top"]), side(&[b"bottom"])];
+    }
+    d
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +518,47 @@ pub(crate) fn parse_theme(buf: &[u8]) -> Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn styles_with_dxfs_and_rotation() {
+        let xml = br#"<styleSheet><fonts count="1"><font><strike/><sz val="11"/><name val="Calibri"/></font></fonts>
+<cellXfs count="2"><xf numFmtId="0" fontId="0"/><xf numFmtId="0" fontId="0"><alignment textRotation="90" horizontal="center"/></xf></cellXfs>
+<dxfs count="2"><dxf><font><b/><i val="0"/><color rgb="FF9C0006"/></font><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf>
+<dxf><border><left style="thin"><color auto="1"/></left><bottom style="medium"/></border></dxf></dxfs></styleSheet>"#;
+        let st = parse_styles(xml);
+        assert!(st.fonts[0].strike);
+        assert_eq!(st.xfs[1].alignment.rotation, 90);
+        assert_eq!(st.xfs[1].alignment.angle(), Some(90.0));
+        let d = &st.dxfs[0];
+        assert_eq!((d.bold, d.italic, d.underline), (Some(true), Some(false), None));
+        assert_eq!(d.color, Some(Color::Rgb(0xFF9C0006)));
+        assert_eq!(d.fill, Some(Color::Rgb(0xFFFFC7CE)));
+        let b = &st.dxfs[1].border;
+        assert_eq!(b[0].map(|s| s.style), Some(BorderStyle::Thin));
+        assert_eq!(b[3].map(|s| s.style), Some(BorderStyle::Medium));
+        assert!(b[1].is_none() && b[2].is_none());
+    }
+
+    #[test]
+    fn rich_text_runs() {
+        let si = br#"<r><t>Total </t></r><r><rPr><b/><sz val="14"/><color rgb="FFFF0000"/><rFont val="Arial"/></rPr><t>R$ &amp; mais</t></r><rPh sb="0" eb="1"><t>x</t></rPh>"#;
+        let mut s = String::new();
+        rich_text_into(si, &mut s);
+        assert_eq!(s, "Total R$ & mais");
+        let runs = rich_runs(si, s.len()).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!((runs[0].start, runs[0].font.is_none()), (0, true));
+        let f = runs[1].font.as_ref().unwrap();
+        assert_eq!(runs[1].start, 6);
+        assert!(f.bold && !f.italic);
+        assert_eq!(f.size, Some(14.0));
+        assert_eq!(f.name.as_deref(), Some("Arial"));
+        assert_eq!(f.color, Some(Color::Rgb(0xFFFF0000)));
+        // Sem <rPr>: texto simples.
+        assert!(rich_runs(b"<r><t>a</t></r><r><t>b</t></r>", 2).is_none());
+        // Tamanho que não bate: texto simples.
+        assert!(rich_runs(si, 3).is_none());
+    }
 
     #[test]
     fn resolve_paths() {

@@ -2,7 +2,7 @@
 
 Onde o projeto está, o que já foi feito e o que falta. Os detalhes de cada decisão e as medições completas ficam em [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-**Fase atual: fim da F2.** O visualizador está pronto e medido no Windows e no Linux. A próxima fase é a **F3** (edição e salvar).
+**Fase atual: fim da F2.** O visualizador está pronto e medido no Windows e no Linux; falta só o teste manual de teclado e mouse. A próxima fase é a **F3** (edição e salvar).
 
 | Fase | Entrega | Status |
 |---|---|---|
@@ -34,46 +34,48 @@ Resultado: ~0,8 ms de CPU por frame (1.150+ fps sem vsync) no Windows, e o mesmo
 - `duck-calc`: texto das fórmulas, modelos relativos.
 - `duck-bench`: `open`, `sweep`, `verify` (contra o calamine), `gen`, `inflate`, `parse`.
 
-Resultado no arquivo de referência (185 MB, 1,9 GB de XML, 24 milhões de células, 10 milhões de fórmulas): **450–650 ms** para ler tudo, ~460 MB de memória, **0 divergências** contra o calamine.
+Resultado no arquivo de referência (185 MB, 1,9 GB de XML, 24 milhões de células, 10 milhões de fórmulas): **370–420 ms** para ler tudo com 16 threads (era 450–650 ms), pico de ~355 MB, **0 divergências** contra o calamine.
 
-Em aberto: as metas de < 0,4 s e ganho ≥ 10× com 16+ núcleos. A leitura hoje está limitada pela CPU total; as alavancas que sobram são micro-otimizações do parse e do decodificador.
+Em aberto: a meta de < 0,4 s está no limite, e o ganho ≥ 10× com 16+ núcleos não foi atingido. A leitura hoje está limitada pela CPU total; as alavancas que sobram são micro-otimizações do parse e do decodificador.
 
 ## ✅ F2 · Visualizador `duck-sheets`
 
 Feito:
 
-- **Abrir**: linha de comando, diálogo nativo (Ctrl+O), arrastar o arquivo para a janela.
+- **Abrir**: linha de comando, diálogo nativo (Ctrl+O), arrastar o arquivo para a janela; `.xlsx`, `.xlsm` e `.csv`.
 - **Carga progressiva**: prévia da aba ativa → primeira tela → aba inteira → outras abas, cada uma quando fica pronta.
 - **Aparência do Excel**:
   - formatos de número em pt-BR: moeda, contábil, %, datas e horas, científico, frações, cores e condições;
   - fontes (família, tamanho, negrito, itálico, sublinhado, cor), preenchimentos, cores do tema com tonalidade;
   - bordas (fina, média, grossa, dupla, pontilhada, tracejada), alinhamentos, recuo, texto quebrado;
-  - larguras e alturas reais, linhas e colunas ocultas, texto que transborda para as vizinhas, `###`.
+  - larguras e alturas reais, linhas e colunas ocultas, texto que transborda para as vizinhas, `###`;
+  - texto girado e empilhado, texto rico (várias fontes na célula), tachado, estilo de linha inteira;
+  - formatação condicional: regras de valor, fórmula, texto e data, escalas de cor, barras de dados, ícones, N maiores, acima da média, repetidos.
 - **Estrutura**: abas (ocultas ficam de fora, com a cor da guia), mesclagens, painéis congelados, barra de fórmulas, caixa de nome ("ir para").
-- **Interação**: seleção com mouse, Shift e cabeçalhos; Ctrl+setas; copiar em TSV (Ctrl+C); soma, média e contagem da seleção; busca paralela sem acentos (Ctrl+F); zoom.
+- **Interação**: seleção com mouse, Shift e cabeçalhos; Ctrl+setas; copiar em TSV (Ctrl+C); soma, média e contagem da seleção; busca paralela sem acentos (Ctrl+F); zoom; redimensionar colunas e linhas arrastando o cabeçalho (duplo clique ajusta); hiperlinks com Ctrl+clique.
 - **Plataforma**: crate novo `duck-ui` (Painter, campo de texto, abas), texto com estilos e quebra de linha, bordas tracejadas no shader.
 - **Medição**: `--bench`, `--screenshot`, `duck-bench preview` e uma planilha de vitrine sem dados reais (`duck-bench gen-showcase`) no CI.
 
-Resultado no Windows (AMD RX 9070 XT, DX12): **primeira tela com dados em 212–245 ms**, todas as 20 abas em 0,61–0,65 s, ~980–1.160 fps sem vsync (p99 do frame até 2,3 ms), **memória de 423–437 MB** com tudo carregado (era 657–663 MB) e **pico de 517–527 MB** durante a leitura (era 954–979 MB).
+Resultado no Windows (AMD RX 9070 XT, DX12): **primeira tela com dados em 190–199 ms** (era 212–245), todas as 20 abas em 0,59–0,67 s, ~860–1.090 fps sem vsync (p99 do frame até 2,5 ms), **memória de 422–437 MB** com tudo carregado (era 657–663 MB) e **pico de 517–527 MB** durante a leitura (era 954–979 MB).
 
-No Linux (WSLg, renderização por software): primeira tela em 125–182 ms, todas as abas em 0,75–0,95 s, frame montado em até 1,2 ms (p99), busca em 593 mil células em 33 ms, memória de 401–412 MB e pico de 475–489 MB (era 652–658 MB).
+No Linux (WSLg, renderização por software): primeira tela em 125–182 ms, todas as abas em 0,75–0,95 s, frame montado em até 1,4 ms (p99), busca em 593 mil células em 33 ms, memória de 401–412 MB e pico de 467–489 MB (era 652–658 MB).
 
-Para não atrasar a primeira tela, a leitura da planilha começa junto com a abertura da GPU, e só 12 fontes essenciais são carregadas no início. As outras ~340 fontes do sistema são lidas numa thread depois da primeira tela; com o cache de disco frio, isso levava até 0,6 s.
+Para não atrasar a primeira tela, a GPU começa a abrir numa thread desde o início do processo (no DX12; a janela só cria a superfície), a leitura da planilha corre junto, e só 12 fontes essenciais são carregadas no início. As outras ~340 fontes do sistema são lidas numa thread depois da primeira tela; com o cache de disco frio, isso levava até 0,6 s.
 
 Falta na F2:
 
 - [x] Medir no Windows com a GPU (21/11/2026).
 - [x] Memória abaixo de 600 MB: 423–437 MB no Windows, com os blocos de células compactados (dados: 396 → 193 MB).
 - [x] Pico de memória durante a leitura: 517–527 MB no Windows e 475–489 MB no Linux (era ~960 e ~655 MB), com a leitura completa ~15% mais rápida.
-- [ ] Abrir a GPU antes da janela existir (a GPU é o que resta no caminho da primeira tela: ~200 ms).
-- [ ] Teste manual de teclado e mouse na janela.
-- [ ] Texto girado (`textRotation`), comum em painéis.
-- [ ] Formatação condicional.
-- [ ] Estilo de linha inteira (`<row s>`).
-- [ ] Várias fontes na mesma célula (rich text).
-- [ ] Redimensionar colunas e linhas com o mouse.
-- [ ] Hiperlinks.
-- [ ] Abrir `.csv` (opcional).
+- [x] Abrir a GPU antes da janela existir: primeira tela de 212–245 para 190–199 ms no Windows (no Linux a escolha do adaptador depende da janela e fica como estava).
+- [ ] Teste manual de teclado e mouse na janela (redimensionar e Ctrl+clique em link ainda não foram usados à mão).
+- [x] Texto girado (`textRotation`) e empilhado.
+- [x] Formatação condicional (fora: regras `x14` do Excel 2010 e fórmulas com outras abas, intervalos ou funções fora do avaliador).
+- [x] Estilo de linha inteira (`<row s>`).
+- [x] Várias fontes na mesma célula (rich text) nas strings compartilhadas.
+- [x] Redimensionar colunas e linhas com o mouse (duplo clique ajusta a coluna ao texto).
+- [x] Hiperlinks (Ctrl+clique; externos só `http`, `https` e `mailto`).
+- [x] Abrir `.csv` (separador detectado, vírgula decimal com `;`).
 
 ## ⏳ F3 · Edição e salvar
 

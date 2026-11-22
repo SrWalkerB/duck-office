@@ -127,6 +127,36 @@ impl Axis {
         i
     }
 
+    /// Muda o tamanho de um item (arrastar a borda do cabeçalho).
+    pub fn set_size(&mut self, i: u32, size: u32) {
+        if i >= self.len {
+            return;
+        }
+        let k = match self.idx.binary_search(&i) {
+            Ok(k) if size == self.default => {
+                self.idx.remove(k);
+                self.size.remove(k);
+                k
+            }
+            Ok(k) => {
+                self.size[k] = size;
+                k
+            }
+            Err(_) if size == self.default => return,
+            Err(k) => {
+                self.idx.insert(k, i);
+                self.size.insert(k, size);
+                k
+            }
+        };
+        self.prefix.truncate(k + 1);
+        let mut acc = self.prefix[k];
+        for &s in &self.size[k..] {
+            acc += s as i64 - self.default as i64;
+            self.prefix.push(acc);
+        }
+    }
+
     #[cfg(test)]
     pub fn heap_bytes(&self) -> usize {
         self.idx.capacity() * 4 + self.size.capacity() * 4 + self.prefix.capacity() * 8
@@ -166,6 +196,21 @@ mod tests {
         assert_eq!(axis.index_at(0), 1);
         assert_eq!(axis.next_visible(96), 98);
         assert_eq!(axis.prev_visible(98), 96);
+    }
+
+    #[test]
+    fn set_size_keeps_sums() {
+        let mut a = Axis::new(100, 20, [(10, 40), (50, 0)]);
+        a.set_size(30, 70);
+        a.set_size(10, 20); // volta ao padrão
+        a.set_size(50, 25);
+        a.set_size(5, 20); // já era o padrão
+        let b = Axis::new(100, 20, [(30, 70), (50, 25)]);
+        for i in 0..=100 {
+            assert_eq!(a.offset(i), b.offset(i), "offset({i})");
+        }
+        assert_eq!(a.size(10), 20);
+        assert_eq!(a.idx, vec![30, 50]);
     }
 
     #[test]

@@ -11,6 +11,8 @@
 //! Use dentro de um pool (`duck_par::pool(n).install(|| duck_xlsx::open(...))`)
 //! para escolher o número de threads; fora de um pool, usa o pool global.
 
+mod cond;
+pub mod csv;
 mod package;
 mod parts;
 #[doc(hidden)]
@@ -228,6 +230,7 @@ impl Book {
                     Some(e) => {
                         sheet::load_sheet(&self.pkg, e, &m.name, chunk, limiter, opts).map(|(mut sh, rep)| {
                             sh.hidden = m.hidden;
+                            parts::resolve_links(&self.pkg, &m.path, &mut sh.layout.links);
                             (sh, rep)
                         })
                     }

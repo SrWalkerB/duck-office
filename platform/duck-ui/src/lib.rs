@@ -116,6 +116,38 @@ impl<'a> Painter<'a> {
             .draw_styled(s, style, x, y, clip.as_clip(), |q| out.push(Instance::glyph(q.rect, q.uv, color)))
     }
 
+    /// Texto girado `degrees` graus no sentido anti-horário em torno de
+    /// (x, y), o canto superior esquerdo da linha antes de girar. Glifos com o
+    /// centro fora de `clip` ficam de fora (o renderer não recorta glifos
+    /// girados).
+    #[allow(clippy::too_many_arguments)]
+    pub fn text_rotated(
+        &mut self,
+        s: &str,
+        style: TextStyle,
+        x: f32,
+        y: f32,
+        degrees: f32,
+        clip: &Rect,
+        color: Rgba,
+    ) -> f32 {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let rot = |dx: f32, dy: f32| (x + dx * cos + dy * sin, y - dx * sin + dy * cos);
+        let out = &mut *self.out;
+        let everything = [f32::MIN, f32::MIN, f32::MAX, f32::MAX];
+        self.text.draw_styled(s, style, 0.0, 0.0, everything, |q| {
+            let [gx, gy, gw, gh] = q.rect;
+            // Sem recorte na GPU: entra o glifo cujo centro está na área (um
+            // acento pode passar um pouco da borda; cortar a letra inteira é pior).
+            let (cx, cy) = rot(gx + gw / 2.0, gy + gh / 2.0);
+            let inside = cx >= clip.x0 && cx <= clip.x1 && cy >= clip.y0 && cy <= clip.y1;
+            if inside {
+                let (px, py) = rot(gx, gy);
+                out.push(Instance::glyph_rotated([px, py, gw, gh], q.uv, color, degrees));
+            }
+        })
+    }
+
     /// Texto alinhado entre `x0` e `x1`, com o topo da linha em `y`.
     #[allow(clippy::too_many_arguments)]
     pub fn text_aligned(

@@ -1,7 +1,9 @@
 //! Planilha de vitrine para conferir a fidelidade visual (F2) sem dados reais:
 //! painéis congelados, mesclagens, bordas de todos os tipos, formatos de número
 //! (moeda, contábil, %, datas, cores), fontes, preenchimentos, texto quebrado e
-//! transbordando, abas coloridas e uma aba oculta. Tudo inventado.
+//! transbordando, abas coloridas e uma aba oculta. A aba "Recursos" tem texto
+//! girado, estilo de linha inteira, texto rico, formatação condicional e
+//! hiperlinks. Tudo inventado.
 
 use std::fmt::Write as _;
 use std::fs::File;
@@ -14,7 +16,7 @@ use zip::{CompressionMethod, ZipWriter};
 const STYLES: &str = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
 <numFmts count="2"><numFmt numFmtId="164" formatCode="[Color10]#,##0.00;[Red]\-#,##0.00"/><numFmt numFmtId="165" formatCode="dd/mm/yyyy hh:mm"/></numFmts>
-<fonts count="7">
+<fonts count="9">
 <font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font>
 <font><b/><sz val="16"/><color rgb="FFFFFFFF"/><name val="Calibri"/><family val="2"/></font>
 <font><b/><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/></font>
@@ -22,6 +24,8 @@ const STYLES: &str = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <font><u/><sz val="12"/><color rgb="FFC00000"/><name val="Arial"/><family val="2"/></font>
 <font><sz val="10"/><color theme="1"/><name val="Courier New"/><family val="3"/></font>
 <font><b/><sz val="11"/><color rgb="FF0B57D0"/><name val="Calibri"/><family val="2"/></font>
+<font><u/><sz val="11"/><color theme="10"/><name val="Calibri"/><family val="2"/></font>
+<font><strike/><sz val="11"/><color rgb="FF808080"/><name val="Calibri"/><family val="2"/></font>
 </fonts>
 <fills count="6">
 <fill><patternFill patternType="none"/></fill>
@@ -41,7 +45,7 @@ const STYLES: &str = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <border><left style="thick"><color theme="4"/></left><right style="thick"><color theme="4"/></right><top style="thick"><color theme="4"/></top><bottom style="thick"><color theme="4"/></bottom><diagonal/></border>
 </borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="24">
+<cellXfs count="31">
 <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
 <xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
 <xf numFmtId="0" fontId="2" fillId="3" borderId="2" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
@@ -66,7 +70,19 @@ const STYLES: &str = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0"/>
 <xf numFmtId="165" fontId="0" fillId="0" borderId="1" xfId="0"/>
 <xf numFmtId="0" fontId="2" fillId="0" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="right" indent="1"/></xf>
+<xf numFmtId="0" fontId="2" fillId="3" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center" textRotation="90"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center" textRotation="45"/></xf>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center" textRotation="135"/></xf>
+<xf numFmtId="0" fontId="2" fillId="0" borderId="1" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="top" textRotation="255"/></xf>
+<xf numFmtId="0" fontId="0" fillId="4" borderId="0" xfId="0"/>
+<xf numFmtId="0" fontId="7" fillId="0" borderId="0" xfId="0"/>
+<xf numFmtId="0" fontId="8" fillId="0" borderId="0" xfId="0"/>
 </cellXfs>
+<dxfs count="3">
+<dxf><font><color rgb="FF9C0006"/></font><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf>
+<dxf><fill><patternFill><bgColor rgb="FFE2EFDA"/></patternFill></fill></dxf>
+<dxf><font><b/><i/><color rgb="FF0B57D0"/></font><border><bottom style="medium"><color rgb="FF0B57D0"/></bottom></border></dxf>
+</dxfs>
 </styleSheet>"##;
 
 const STORES: [&str; 8] = [
@@ -79,6 +95,9 @@ const STORES: [&str; 8] = [
     "Rede Econômica",
     "Feira Livre Norte",
 ];
+
+/// Marca de string com texto rico (o resto é o XML dos `<r>`).
+const RICH: &str = "\u{1}";
 
 struct Strings {
     list: Vec<String>,
@@ -113,7 +132,7 @@ pub fn write(path: &Path) -> std::io::Result<()> {
     put(
         &mut z,
         "[Content_Types].xml",
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/worksheets/sheet4.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
     )?;
     put(
         &mut z,
@@ -123,12 +142,12 @@ pub fn write(path: &Path) -> std::io::Result<()> {
     put(
         &mut z,
         "xl/workbook.xml",
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView activeTab="0"/></bookViews><sheets><sheet name="Vitrine" sheetId="1" r:id="rId1"/><sheet name="Oculta" sheetId="2" state="hidden" r:id="rId2"/><sheet name="Resumo" sheetId="3" r:id="rId3"/></sheets></workbook>"#,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView activeTab="0"/></bookViews><sheets><sheet name="Vitrine" sheetId="1" r:id="rId1"/><sheet name="Oculta" sheetId="2" state="hidden" r:id="rId2"/><sheet name="Resumo" sheetId="3" r:id="rId3"/><sheet name="Recursos" sheetId="4" r:id="rId6"/></sheets></workbook>"#,
     )?;
     put(
         &mut z,
         "xl/_rels/workbook.xml.rels",
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>"#,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/><Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet4.xml"/></Relationships>"#,
     )?;
     put(&mut z, "xl/styles.xml", STYLES)?;
 
@@ -136,15 +155,30 @@ pub fn write(path: &Path) -> std::io::Result<()> {
     let s1 = vitrine(&mut st);
     let s2 = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>42</v></c></row></sheetData></worksheet>"#;
     let s3 = resumo(&mut st);
+    let s4 = recursos(&mut st);
     put(&mut z, "xl/worksheets/sheet1.xml", &s1)?;
     put(&mut z, "xl/worksheets/sheet2.xml", s2)?;
     put(&mut z, "xl/worksheets/sheet3.xml", &s3)?;
+    put(&mut z, "xl/worksheets/sheet4.xml", &s4)?;
+    put(
+        &mut z,
+        "xl/worksheets/_rels/sheet4.xml.rels",
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/" TargetMode="External"/></Relationships>"#,
+    )?;
     let mut ss = format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="{0}" uniqueCount="{0}">"#,
         st.list.len()
     );
     for s in &st.list {
-        let _ = write!(ss, "<si><t xml:space=\"preserve\">{}</t></si>", esc(s));
+        match s.strip_prefix(RICH) {
+            // Texto rico: o XML dos trechos vai como está.
+            Some(xml) => {
+                let _ = write!(ss, "<si>{xml}</si>");
+            }
+            None => {
+                let _ = write!(ss, "<si><t xml:space=\"preserve\">{}</t></si>", esc(s));
+            }
+        }
     }
     ss.push_str("</sst>");
     put(&mut z, "xl/sharedStrings.xml", &ss)?;
@@ -242,6 +276,65 @@ fn vitrine(st: &mut Strings) -> String {
         x.push_str("</row>");
     }
     x.push_str("</sheetData><mergeCells count=\"2\"><mergeCell ref=\"A1:H1\"/><mergeCell ref=\"A21:A25\"/></mergeCells></worksheet>");
+    x
+}
+
+fn recursos(st: &mut Strings) -> String {
+    let mut x = String::from(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetPr><tabColor rgb="FF7B1FA2"/></sheetPr><sheetFormatPr defaultRowHeight="15"/><cols><col min="1" max="1" width="22.7109375" customWidth="1"/><col min="2" max="7" width="13.7109375" customWidth="1"/></cols><sheetData>"#,
+    );
+    x.push_str(r#"<row r="1">"#);
+    s(&mut x, st, "A1", 12, "Texto girado, texto rico, formatação condicional e links");
+    x.push_str(r#"</row><row r="2" ht="90" customHeight="1">"#);
+    s(&mut x, st, "A2", 24, "Girado 90°");
+    s(&mut x, st, "B2", 25, "Girado 45°");
+    s(&mut x, st, "C2", 26, "Girado -45°");
+    s(&mut x, st, "D2", 27, "Pilha");
+    x.push_str(r#"</row><row r="4" s="28" customFormat="1">"#);
+    s(&mut x, st, "A4", 28, "Linha inteira com estilo (as vazias também)");
+    x.push_str("</row>");
+    let heads = ["Escala", "Barra", "Setas", "Maior que 5", "Linhas pares", "Repetidos", "3 maiores"];
+    x.push_str(r#"<row r="5">"#);
+    for (i, h) in heads.iter().enumerate() {
+        s(&mut x, st, &format!("{}5", (b'A' + i as u8) as char), 2, h);
+    }
+    x.push_str("</row>");
+    let names = ["Ana", "Bruno", "Carla", "Ana", "Davi", "Eva", "Bruno", "Ana", "Fábio", "Gil"];
+    for k in 0..10u32 {
+        let r = 6 + k;
+        let v = ((k * 7) % 10 + 1) as f64;
+        let _ = write!(x, r#"<row r="{r}">"#);
+        for col in ["A", "B", "C", "D"] {
+            n(&mut x, &format!("{col}{r}"), 3, v);
+        }
+        s(&mut x, st, &format!("E{r}"), 3, &format!("linha {r}"));
+        s(&mut x, st, &format!("F{r}"), 3, names[k as usize]);
+        n(&mut x, &format!("G{r}"), 3, v * 11.0);
+        x.push_str("</row>");
+    }
+    x.push_str(r#"<row r="17" ht="48" customHeight="1">"#);
+    let rich = format!(
+        "{RICH}<r><t xml:space=\"preserve\">Texto rico: </t></r><r><rPr><b/><sz val=\"11\"/><color rgb=\"FFC00000\"/><rFont val=\"Calibri\"/></rPr><t xml:space=\"preserve\">negrito vermelho, </t></r><r><rPr><i/><sz val=\"14\"/><color theme=\"4\"/><rFont val=\"Calibri\"/></rPr><t xml:space=\"preserve\">itálico maior, </t></r><r><rPr><strike/><sz val=\"11\"/><rFont val=\"Calibri\"/></rPr><t xml:space=\"preserve\">tachado</t></r><r><rPr><sz val=\"11\"/><rFont val=\"Calibri\"/></rPr><t xml:space=\"preserve\"> e m</t></r><r><rPr><vertAlign val=\"superscript\"/><sz val=\"11\"/><rFont val=\"Calibri\"/></rPr><t>2</t></r>"
+    );
+    s(&mut x, st, "A17", 14, &rich);
+    let rich2 = format!(
+        "{RICH}<r><rPr><b/><sz val=\"11\"/><rFont val=\"Calibri\"/></rPr><t xml:space=\"preserve\">Numa linha: </t></r><r><rPr><sz val=\"11\"/><color rgb=\"FF188038\"/><rFont val=\"Courier New\"/></rPr><t>código</t></r>"
+    );
+    s(&mut x, st, "C17", 10, &rich2);
+    x.push_str(r#"</row><row r="18">"#);
+    s(&mut x, st, "A18", 29, "Ir para Vitrine!D5");
+    s(&mut x, st, "C18", 29, "https://example.com/");
+    x.push_str(r#"</row><row r="19">"#);
+    s(&mut x, st, "A19", 30, "Fonte tachada");
+    x.push_str("</row></sheetData>");
+    x.push_str(r#"<conditionalFormatting sqref="A6:A15"><cfRule type="colorScale" priority="1"><colorScale><cfvo type="min"/><cfvo type="percentile" val="50"/><cfvo type="max"/><color rgb="FFF8696B"/><color rgb="FFFFEB84"/><color rgb="FF63BE7B"/></colorScale></cfRule></conditionalFormatting>"#);
+    x.push_str(r#"<conditionalFormatting sqref="B6:B15"><cfRule type="dataBar" priority="2"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar></cfRule></conditionalFormatting>"#);
+    x.push_str(r#"<conditionalFormatting sqref="C6:C15"><cfRule type="iconSet" priority="3"><iconSet iconSet="3Arrows"><cfvo type="percent" val="0"/><cfvo type="percent" val="33"/><cfvo type="percent" val="67"/></iconSet></cfRule></conditionalFormatting>"#);
+    x.push_str(r#"<conditionalFormatting sqref="D6:D15"><cfRule type="cellIs" dxfId="0" priority="4" operator="greaterThan"><formula>5</formula></cfRule></conditionalFormatting>"#);
+    x.push_str(r#"<conditionalFormatting sqref="E6:E15"><cfRule type="expression" dxfId="1" priority="5"><formula>MOD(ROW(),2)=0</formula></cfRule></conditionalFormatting>"#);
+    x.push_str(r#"<conditionalFormatting sqref="F6:F15"><cfRule type="duplicateValues" dxfId="0" priority="6"/></conditionalFormatting>"#);
+    x.push_str(r#"<conditionalFormatting sqref="G6:G15"><cfRule type="top10" dxfId="2" priority="7" rank="3"/></conditionalFormatting>"#);
+    x.push_str(r#"<hyperlinks><hyperlink ref="A18" location="Vitrine!D5" display="Ir para Vitrine!D5"/><hyperlink ref="C18" r:id="rId1" tooltip="Site de exemplo"/></hyperlinks></worksheet>"#);
     x
 }
 

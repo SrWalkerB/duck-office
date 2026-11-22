@@ -23,7 +23,31 @@ pub struct Font {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    pub strike: bool,
     pub color: Color,
+}
+
+/// Fonte de um trecho de texto rico (`<r><rPr>`). O que não vier no arquivo
+/// (`None`) fica como a fonte da célula.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RunFont {
+    pub name: Option<String>,
+    pub size: Option<f32>,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
+    pub color: Option<Color>,
+    /// Sobrescrito (1) ou subscrito (-1).
+    pub script: i8,
+}
+
+/// Um trecho de texto rico: começa no byte `start` do texto e vai até o
+/// próximo trecho. `font: None` = a fonte da célula.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RichRun {
+    pub start: u32,
+    pub font: Option<RunFont>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -63,6 +87,26 @@ pub struct Alignment {
     pub vertical: VAlign,
     pub wrap: bool,
     pub indent: u8,
+    /// `textRotation`: 0–90 = graus no sentido anti-horário, 91–180 = 1–90
+    /// graus no sentido horário, 255 = letras empilhadas na vertical.
+    pub rotation: u8,
+}
+
+impl Alignment {
+    /// Ângulo do texto em graus, positivo = anti-horário (subindo). `None`
+    /// para texto empilhado (`255`).
+    pub fn angle(&self) -> Option<f32> {
+        rotation_angle(self.rotation)
+    }
+}
+
+/// Ver [`Alignment::angle`].
+pub fn rotation_angle(rotation: u8) -> Option<f32> {
+    match rotation {
+        0..=90 => Some(rotation as f32),
+        91..=180 => Some(-((rotation - 90) as f32)),
+        _ => None,
+    }
 }
 
 /// Uma entrada de `cellXfs`: o que o índice de estilo de uma célula aponta.
@@ -87,6 +131,21 @@ pub struct Styles {
     /// Paleta indexada própria do arquivo (`<colors><indexedColors>`), ARGB.
     pub indexed: Option<Vec<u32>>,
     pub theme: Theme,
+    /// Formatos diferenciais (`<dxfs>`), usados pela formatação condicional.
+    pub dxfs: Vec<Dxf>,
+}
+
+/// Formato diferencial: só o que muda em relação ao estilo da célula.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Dxf {
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub underline: Option<bool>,
+    pub strike: Option<bool>,
+    pub color: Option<Color>,
+    pub fill: Option<Color>,
+    /// Esquerda, direita, cima, baixo.
+    pub border: [Option<BorderSide>; 4],
 }
 
 /// Estilo de uma linha de borda.

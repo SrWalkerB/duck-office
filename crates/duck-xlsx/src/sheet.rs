@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use duck_core::{
-    CellError, CellRange, ColSpec, FormulaKind, Pane, RowSpec, Sheet, SheetPart, SheetView, kind,
+    CellError, CellRange, ColSpec, FormulaKind, Hyperlink, Pane, RowSpec, Sheet, SheetPart, SheetView, kind,
 };
 use duck_par::{InFlight, cut_after_last};
 use memchr::{memchr, memmem};
@@ -164,13 +164,19 @@ pub fn parse_rows(
                 _ => state.row.map(|r| r + 1),
             };
             state.next_col = 0;
-            // Altura própria (ou calculada pelo Excel, ex.: texto quebrado) e linhas ocultas.
+            // Altura própria (ou calculada pelo Excel, ex.: texto quebrado),
+            // linhas ocultas e estilo de linha inteira.
             let height = attr_f32(attrs, b"ht");
             let hidden = attr_true(attrs, b"hidden");
+            let style = if attr_true(attrs, b"customFormat") {
+                attr(attrs, b"s").and_then(parse_u32).map(|s| s.min(u16::MAX as u32) as u16)
+            } else {
+                None
+            };
             if let Some(row) = state.row
-                && (height.is_some() || hidden)
+                && (height.is_some() || hidden || style.is_some())
             {
-                part.layout.rows.push(RowSpec { row, height, hidden });
+                part.layout.rows.push(RowSpec { row, height, hidden, style });
             }
             pos = end;
             continue;
@@ -262,6 +268,40 @@ pub fn parse_rows(
             let mut v = part.layout.view.unwrap_or(SheetView { zoom: 0, ..Default::default() });
             v.tab_color = Some(crate::parts::color(&buf[i + 9..end - 1]));
             part.layout.view = Some(v);
+            pos = end;
+            continue;
+        }
+        if starts_tag(rest, b"conditionalFormatting") {
+            let Some(end) = tag_end(buf, i) else { break };
+            let self_closing = buf[end - 2] == b'/';
+            let attrs = &buf[i + 22..if self_closing { end - 2 } else { end - 1 }];
+            let close = if self_closing {
+                end
+            } else {
+                memmem::find(&buf[end..], b"</conditionalFormatting>").map_or(buf.len(), |x| end + x)
+            };
+            crate::cond::parse_block(attrs, &buf[end..close], &mut part.layout.cond);
+            pos = close;
+            continue;
+        }
+        if starts_tag(rest, b"hyperlink") {
+            let Some(end) = tag_end(buf, i) else { break };
+            let attrs = &buf[i + 10..end - 1];
+            if let Some(range) = attr(attrs, b"ref").and_then(parse_range) {
+                let text = |k: &[u8]| {
+                    attr(attrs, k).filter(|v| !v.is_empty()).map(|v| {
+                        let mut s = String::new();
+                        unescape_into(v, &mut s);
+                        s
+                    })
+                };
+                part.layout.links.push(Hyperlink {
+                    range,
+                    target: text(b"r:id"),
+                    location: text(b"location"),
+                    tooltip: text(b"tooltip"),
+                });
+            }
             pos = end;
             continue;
         }
@@ -1028,8 +1068,8 @@ mod tests {
 <sheetData>
 <row r="1" ht="30" customHeight="1"><c r="A1"><f t="shared" ref="A1:A3" si="0">B1*2</f><v>2</v></c><c r="B1"><v>1</v></c></row>
 <row r="2" hidden="1"><c r="A2"><f t="shared" si="0"/><v>4</v></c><c r="B2"><f>SUM($B$1:B1)</f><v>1</v></c></row>
-<row r="3"><c r="A3"><f t="shared" si="0"/><v>6</v></c><c r="B3"><f>SUM($B$1:B2)</f><v>2</v></c><c r="C3"><f t="array" ref="C3:C4">B1:B2*2</f><v>2</v></c></row>
-</sheetData><mergeCells count="1"><mergeCell ref="B4:C4"/></mergeCells></worksheet>"#;
+<row r="3" s="4" customFormat="1"><c r="A3"><f t="shared" si="0"/><v>6</v></c><c r="B3"><f>SUM($B$1:B2)</f><v>2</v></c><c r="C3"><f t="array" ref="C3:C4">B1:B2*2</f><v>2</v></c></row>
+</sheetData><mergeCells count="1"><mergeCell ref="B4:C4"/></mergeCells><conditionalFormatting sqref="A1:A3"><cfRule type="cellIs" dxfId="0" priority="1" operator="greaterThan"><formula>3</formula></cfRule></conditionalFormatting><hyperlinks><hyperlink ref="B1" r:id="rId2" tooltip="Abrir &amp; ver"/><hyperlink ref="A2" location="'Outra aba'!C3" display="ir"/></hyperlinks></worksheet>"#;
         let mut sheet = parse_all(xml);
         sheet.finish();
         let l = &sheet.layout;
@@ -1045,7 +1085,16 @@ mod tests {
         assert!(l.col(2).unwrap().hidden);
         assert_eq!(l.row(0).and_then(|r| r.height), Some(30.0));
         assert!(l.row(1).unwrap().hidden);
+        assert_eq!(l.row(1).unwrap().style, None);
+        assert_eq!(l.row(2).unwrap().style, Some(4));
         assert_eq!(l.merges, vec![CellRange { first_row: 3, first_col: 1, last_row: 3, last_col: 2 }]);
+        assert_eq!(l.cond.len(), 1);
+        assert_eq!(l.cond[0].dxf, Some(0));
+        assert_eq!(l.links.len(), 2);
+        assert_eq!(l.link_at(0, 1).and_then(|h| h.target.as_deref()), Some("rId2"));
+        assert_eq!(l.link_at(0, 1).and_then(|h| h.tooltip.as_deref()), Some("Abrir & ver"));
+        assert_eq!(l.link_at(1, 0).and_then(|h| h.location.as_deref()), Some("'Outra aba'!C3"));
+        assert!(l.link_at(1, 1).is_none());
         assert_eq!(l.dimension, Some(CellRange { first_row: 0, first_col: 0, last_row: 3, last_col: 2 }));
 
         let f = |r, c| duck_calc::cell_formula(&sheet, r, c).map(|s| s.into_owned());

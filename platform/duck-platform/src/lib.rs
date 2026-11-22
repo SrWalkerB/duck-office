@@ -128,6 +128,23 @@ impl Window {
     }
 }
 
+/// Abre um endereço (`http`, `https`, `mailto`) no programa padrão do sistema.
+/// Outros esquemas são recusados: o endereço vem de arquivos de terceiros.
+pub fn open_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")) {
+        return false;
+    }
+    let url = url.trim();
+    #[cfg(windows)]
+    let r = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(url).spawn();
+    r.is_ok()
+}
+
 /// Mensagem simples numa caixa de diálogo nativa (erro ao abrir, por exemplo).
 pub fn message_box(title: &str, text: &str) {
     rfd::MessageDialog::new()

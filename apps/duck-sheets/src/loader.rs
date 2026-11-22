@@ -120,6 +120,9 @@ fn load(
     t0: Instant,
     want: Option<usize>,
 ) -> Result<(), String> {
+    if is_csv(path) {
+        return load_csv(path, send, t0);
+    }
     let book = Book::open(path).map_err(|e| e.to_string())?;
     let sheets = book.sheets();
     let active = want.filter(|&i| i < sheets.len()).unwrap_or(book.active_sheet());
@@ -163,6 +166,29 @@ fn load(
     }
     let others: Vec<usize> = (0..book.sheets().len()).filter(|&i| i != active).collect();
     book.load_sheets(&others, &opts, &deliver);
+    send(Msg::Finished { at: t0.elapsed() });
+    Ok(())
+}
+
+/// Texto separado (`.csv`, `.tsv`, `.txt`): lido como uma aba só.
+pub fn is_csv(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "csv" | "tsv" | "txt"))
+}
+
+fn load_csv(path: &PathBuf, send: &(dyn Fn(Msg) + Sync), t0: Instant) -> Result<(), String> {
+    let sheet = duck_xlsx::csv::read_csv(path).map_err(|e| e.to_string())?;
+    let bytes = std::fs::metadata(path).map_or(0, |m| m.len());
+    send(Msg::Opened {
+        sheets: vec![SheetInfo { name: sheet.name.clone(), hidden: false, xml_bytes: bytes }],
+        active: 0,
+        styles: Arc::new(Styles::default()),
+        strings: Arc::new(StringTable::new()),
+        date1904: false,
+        at: t0.elapsed(),
+    });
+    send(Msg::Sheet { index: 0, sheet, at: t0.elapsed() });
     send(Msg::Finished { at: t0.elapsed() });
     Ok(())
 }

@@ -20,7 +20,7 @@ crates/              a suíte office
   duck-core/         modelo do workbook: blocos colunares, strings, estilos, formatos de número
   duck-par/          pool de threads, limitador de memória, cortes SIMD
   duck-deflate/      descompactação deflate em paralelo (especulativa)
-  duck-xlsx/         leitura de .xlsx/.xlsm em paralelo e em streaming
+  duck-xlsx/         leitura de .xlsx/.xlsm em paralelo e em streaming, e de .csv
   duck-calc/         fórmulas: referências e modelos relativos
   duck-bench/        medição: open, sweep, verify, gen, gen-showcase, inflate, preview
 scripts/

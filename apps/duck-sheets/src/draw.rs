@@ -5,9 +5,12 @@
 //! barra de fórmulas, as abas e a barra de status.
 
 use std::fmt::Write as _;
+use std::ops::Range;
 use std::path::Path;
 
-use duck_core::{BorderStyle, CellRange, HAlign, Sheet, VAlign, Value};
+use duck_core::{
+    BorderStyle, CellRange, CfApply, CfCtx, CfKind, HAlign, RichRun, Sheet, Styles, VAlign, Value,
+};
 use duck_text::TextStyle;
 use duck_ui::{Align, InputColors, Painter, Rect, Rgba, Tab, TabColors, rgb};
 
@@ -40,6 +43,7 @@ struct Ctx<'a> {
     sheet: &'a Sheet,
     view: &'a View,
     looks: &'a Looks,
+    styles: &'a Styles,
     strings: &'a duck_core::StringTable,
     date1904: bool,
     fonts: &'a [TextStyle],
@@ -48,11 +52,101 @@ struct Ctx<'a> {
     px: f32,
     pad: f32,
     hits: &'a [(u32, u32)],
+    cf: CfCtx<'a>,
+}
+
+/// O que a formatação condicional muda numa célula (o que não vier fica do estilo).
+#[derive(Clone, Copy, Default)]
+struct Fx {
+    fill: Option<Rgba>,
+    color: Option<Rgba>,
+    bold: Option<bool>,
+    italic: Option<bool>,
+    underline: Option<bool>,
+    strike: Option<bool>,
+    edges: [Option<Edge>; 4],
+    /// Barra de dados: fração da largura e cor.
+    bar: Option<(f32, Rgba)>,
+    /// Ícone: caractere e cor.
+    icon: Option<(char, Rgba)>,
+    /// Barra ou ícone sem o valor (`showValue="0"`).
+    hide: bool,
 }
 
 impl Ctx<'_> {
-    fn look_of(&self, style: u16, c: u32) -> &Look {
-        let s = if style == 0 { self.view.col_style(c) } else { style };
+    /// Formatação condicional da célula, considerando só as regras `active`
+    /// (as que tocam a área visível), em ordem de prioridade.
+    fn fx(&self, active: &[usize], r: u32, c: u32, value: Value) -> Option<Fx> {
+        if active.is_empty() {
+            return None;
+        }
+        let rules = &self.sheet.layout.cond;
+        let mut fx = Fx::default();
+        let mut any = false;
+        for &k in active {
+            let rule = &rules[k];
+            if !rule.covers(r, c) {
+                continue;
+            }
+            let Some(a) = self.cf.apply(rule, &self.view.cf[k], r, c, value) else { continue };
+            any = true;
+            match a {
+                CfApply::Dxf(i) => {
+                    if let Some(d) = self.styles.dxfs.get(i as usize) {
+                        let color = |c| self.styles.rgb(c).map(rgb);
+                        fx.fill = fx.fill.or(d.fill.and_then(color));
+                        fx.color = fx.color.or(d.color.and_then(color));
+                        fx.bold = fx.bold.or(d.bold);
+                        fx.italic = fx.italic.or(d.italic);
+                        fx.underline = fx.underline.or(d.underline);
+                        fx.strike = fx.strike.or(d.strike);
+                        for (e, s) in fx.edges.iter_mut().zip(d.border) {
+                            if e.is_none()
+                                && let Some(s) = s
+                            {
+                                *e = Some(Edge {
+                                    style: s.style,
+                                    color: self.styles.rgb(s.color).map_or([0, 0, 0, 255], rgb),
+                                });
+                            }
+                        }
+                    }
+                }
+                CfApply::Scale { lo, hi, t } => {
+                    if fx.fill.is_none() {
+                        let (a, b) = (
+                            self.styles.rgb(lo).unwrap_or(0xFFFFFF),
+                            self.styles.rgb(hi).unwrap_or(0xFFFFFF),
+                        );
+                        let mix = |sh: u32| {
+                            let (x, y) = (((a >> sh) & 0xFF) as f32, ((b >> sh) & 0xFF) as f32);
+                            (x + (y - x) * t).round() as u32
+                        };
+                        fx.fill = Some(rgb((mix(16) << 16) | (mix(8) << 8) | mix(0)));
+                    }
+                }
+                CfApply::Bar { frac, color, show_value } => {
+                    if fx.bar.is_none() {
+                        fx.bar = Some((frac, self.styles.rgb(color).map_or(rgb(0x638EC6), rgb)));
+                        fx.hide |= !show_value;
+                    }
+                }
+                CfApply::Icon { set, idx, n, show_value } => {
+                    if fx.icon.is_none() {
+                        fx.icon = Some(icon(set, idx, n));
+                        fx.hide |= !show_value;
+                    }
+                }
+            }
+            if rule.stop {
+                break;
+            }
+        }
+        any.then_some(fx)
+    }
+
+    fn look_of(&self, style: u16, r: u32, c: u32) -> &Look {
+        let s = if style == 0 { self.view.blank_style(r, c) } else { style };
         self.looks.get(s)
     }
 
@@ -119,6 +213,7 @@ impl SheetsApp {
                     sheet,
                     view,
                     looks: &doc.looks,
+                    styles: &doc.styles,
                     strings: &doc.strings,
                     date1904: doc.date1904,
                     fonts: &self.font_styles,
@@ -126,6 +221,7 @@ impl SheetsApp {
                     px,
                     pad: (3.0 * geom.g).round().max(1.0),
                     hits,
+                    cf: CfCtx { sheet, shared: &doc.strings, today: self.today },
                 };
                 // Fundo da grade.
                 p.fill(geom.grid, &geom.grid, WHITE);
@@ -165,7 +261,8 @@ impl SheetsApp {
                 let msg = if self.loader.is_some() || self.doc.is_some() {
                     if self.message.is_empty() { "Carregando…".to_string() } else { self.message.clone() }
                 } else {
-                    "Arraste um arquivo .xlsx ou .xlsm para cá, ou pressione Ctrl+O para abrir".to_string()
+                    "Arraste um arquivo .xlsx, .xlsm ou .csv para cá, ou pressione Ctrl+O para abrir"
+                        .to_string()
                 };
                 let area = Rect::new(0.0, geom.fbar.y1, geom.w, geom.tabs.y0);
                 let big = ui.with_px(15.0 * s);
@@ -276,7 +373,11 @@ impl SheetsApp {
         p.fill(st, &st, HEADER_BG);
         p.fill(Rect::new(0.0, st.y0, geom.w, st.y0 + px), &st, BAR_LINE);
         let small = ui.with_px(12.0 * s);
-        p.label(&self.message, small, st, Align::Left, 10.0 * s, UI_MUTED);
+        let left = match &self.hover_link {
+            Some(l) => format!("Ctrl+clique para abrir: {l}"),
+            None => self.message.clone(),
+        };
+        p.label(&left, small, st, Align::Left, 10.0 * s, UI_MUTED);
         buf.clear();
         if let Some(stats) = stats
             && stats.count > 1
@@ -366,6 +467,41 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
     }
     let grid_bottom = rows[rows.len() - 1].b;
     let grid_right = cols[nc - 1].b;
+    // Formatação condicional: regras que tocam a área visível e o efeito em cada célula.
+    let active: Vec<usize> = cx
+        .sheet
+        .layout
+        .cond
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| {
+            !matches!(r.kind, CfKind::Unsupported) && r.touches(r_first, r_last, c_first, c_last)
+        })
+        .map(|(k, _)| k)
+        .collect();
+    let fxs: Vec<Option<Fx>> = if active.is_empty() {
+        Vec::new()
+    } else {
+        let mut v = Vec::with_capacity(cells.len());
+        for (ri, r) in rows.iter().enumerate() {
+            for (ci, c) in cols.iter().enumerate() {
+                v.push(cx.fx(&active, r.i, c.i, cells[ri * nc + ci].value));
+            }
+        }
+        v
+    };
+    let fx_at = |ri: usize, ci: usize| fxs.get(ri * nc + ci).copied().flatten();
+    let merge_fx: Vec<Option<Fx>> = merges
+        .iter()
+        .map(|m| {
+            cx.fx(
+                &active,
+                m.first_row,
+                m.first_col,
+                cx.sheet.cell(m.first_row, m.first_col, cx.strings).value,
+            )
+        })
+        .collect();
 
     // 1. Linhas de grade.
     if v.grid {
@@ -384,16 +520,24 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
                 continue;
             }
             let cell = &cells[ri * nc + ci];
-            if let Some(fill) = cx.look_of(cell.style, c.i).fill {
+            let fx = fx_at(ri, ci);
+            if let Some(fill) = fx.and_then(|f| f.fill).or(cx.look_of(cell.style, r.i, c.i).fill) {
                 p.fill(Rect::new(c.a - px, r.a - px, c.b, r.b), &clip, fill);
+            }
+            if let Some((frac, color)) = fx.and_then(|f| f.bar) {
+                data_bar(p, Rect::new(c.a, r.a, c.b - px, r.b - px), frac, color, px, &clip);
             }
         }
     }
-    for m in &merges {
+    for (mi, m) in merges.iter().enumerate() {
         let rect =
             Rect::new(x_of(m.first_col), y_of(m.first_row), x_of(m.last_col + 1), y_of(m.last_row + 1));
         let anchor = cx.sheet.cell(m.first_row, m.first_col, cx.strings);
-        match cx.look_of(anchor.style, m.first_col).fill {
+        let fx = merge_fx[mi];
+        if let Some((frac, color)) = fx.and_then(|f| f.bar) {
+            data_bar(p, Rect::new(rect.x0, rect.y0, rect.x1 - px, rect.y1 - px), frac, color, px, &clip);
+        }
+        match fx.and_then(|f| f.fill).or(cx.look_of(anchor.style, m.first_row, m.first_col).fill) {
             Some(fill) => p.fill(Rect::new(rect.x0 - px, rect.y0 - px, rect.x1, rect.y1), &clip, fill),
             // Sem preenchimento: apaga as linhas de grade de dentro.
             None => p.fill(Rect::new(rect.x0, rect.y0, rect.x1 - px, rect.y1 - px), &clip, WHITE),
@@ -415,8 +559,10 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
     for (ri, r) in rows.iter().enumerate() {
         for (ci, c) in cols.iter().enumerate() {
             let cell = &cells[ri * nc + ci];
-            let look = cx.look_of(cell.style, c.i);
-            if look.edges.iter().all(Option::is_none) {
+            let look = cx.look_of(cell.style, r.i, c.i);
+            let fx_edges = fx_at(ri, ci).map_or([None; 4], |f| f.edges);
+            let edges = [0, 1, 2, 3].map(|k| fx_edges[k].or(look.edges[k]));
+            if edges.iter().all(Option::is_none) {
                 continue;
             }
             // Dentro de uma mesclagem, só as bordas do contorno dela.
@@ -433,7 +579,7 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
                     _ => r.i == m.last_row,
                 },
             };
-            let [left, right, top, bottom] = look.edges;
+            let [left, right, top, bottom] = edges;
             if let Some(e) = left.filter(|_| on(0)) {
                 edge(p, &clip, false, c.a - px, r.a - px, r.b, e, px, g);
             }
@@ -466,6 +612,13 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
             let this = c;
             c += 1;
             let ci = ci_of(this);
+            let fx = match ci {
+                Some(ci) => fx_at(ri, ci),
+                None if !active.is_empty() => {
+                    cx.fx(&active, r.i, this, cx.sheet.cell(r.i, this, cx.strings).value)
+                }
+                None => None,
+            };
             let cell = match ci {
                 Some(ci) => {
                     if covered[ri * nc + ci] != 0 {
@@ -486,7 +639,7 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
             if matches!(cell.value, Value::Empty) {
                 continue;
             }
-            let look = cx.look_of(cell.style, this);
+            let look = cx.look_of(cell.style, r.i, this);
             let (x0, x1) = match ci {
                 Some(ci) => (cols[ci].a, cols[ci].b),
                 None => (x_of(this), x_of(this + 1)),
@@ -497,15 +650,29 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
             }
             let cell_rect = Rect::new(x0, r.a, x1, r.b);
             draw_cell_text(
-                p, cx, q, ri, &rows, &cols, this, cell_rect, look, shown, cell.value, buf, buf2, true,
+                p,
+                cx,
+                q,
+                ri,
+                &rows,
+                &cols,
+                this,
+                cell_rect,
+                look,
+                shown,
+                cell.value,
+                buf,
+                buf2,
+                true,
+                fx.as_ref(),
             );
         }
     }
-    for m in &merges {
+    for (mi, m) in merges.iter().enumerate() {
         let rect =
             Rect::new(x_of(m.first_col), y_of(m.first_row), x_of(m.last_col + 1), y_of(m.last_row + 1));
         let cell = cx.sheet.cell(m.first_row, m.first_col, cx.strings);
-        let look = cx.look_of(cell.style, m.first_col);
+        let look = cx.look_of(cell.style, m.first_row, m.first_col);
         if let Some(shown) = show(cx.looks, look, cell.value, cx.date1904, buf)
             && !buf.is_empty()
         {
@@ -524,6 +691,7 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
                 buf,
                 buf2,
                 false,
+                merge_fx[mi].as_ref(),
             );
         }
     }
@@ -614,11 +782,44 @@ fn draw_cell_text(
     buf: &mut String,
     buf2: &mut String,
     can_overflow: bool,
+    fx: Option<&Fx>,
 ) {
-    let style = cx.font(look);
+    let mut style = cx.font(look);
     let pad = cx.pad;
     let px = cx.px;
-    let color = shown.color.unwrap_or(look.color);
+    let mut color = shown.color.unwrap_or(look.color);
+    let mut cell = cell;
+    let font = cx.looks.fonts.get(look.font as usize);
+    let (mut underline, mut strike) = (font.is_some_and(|f| f.underline), font.is_some_and(|f| f.strike));
+    if let Some(fx) = fx {
+        color = fx.color.unwrap_or(color);
+        underline = fx.underline.unwrap_or(underline);
+        strike = fx.strike.unwrap_or(strike);
+        if let Some(f) = font
+            && (fx.bold.is_some_and(|b| b != f.bold) || fx.italic.is_some_and(|i| i != f.italic))
+        {
+            style = p.text.style(
+                &f.name,
+                f.pt * 96.0 / 72.0 * cx.g,
+                fx.bold.unwrap_or(f.bold),
+                fx.italic.unwrap_or(f.italic),
+            );
+        }
+        if let Some((ch, ic)) = fx.icon {
+            // Ícone à esquerda; o texto fica no resto da célula.
+            let lh = p.text.line_height_of(style);
+            let mut tmp = [0u8; 4];
+            let s = ch.encode_utf8(&mut tmp);
+            let w = p.text.measure_styled(s, style);
+            let y = (cell.y1 - px - lh).max(cell.y0 + px).floor();
+            let clip = Rect::new(cell.x0, cell.y0, cell.x1 - px, cell.y1 - px).intersect(&q.rect);
+            p.text(s, style, cell.x0 + pad, y, &clip, ic);
+            cell.x0 += w + pad;
+        }
+        if fx.hide {
+            return;
+        }
+    }
     let lh = p.text.line_height_of(style);
     let avail = (cell.w() - 2.0 * pad).max(0.0);
     let indent = look.indent as f32 * 3.0 * (style.px() * 0.55).round();
@@ -641,6 +842,93 @@ fn draw_cell_text(
     };
     let clip_cell = Rect::new(cell.x0, cell.y0, cell.x1 - px, cell.y1 - px).intersect(&q.rect);
 
+    // Texto girado ou empilhado: sempre dentro da célula, uma linha.
+    if look.rotation != 0 {
+        one_line(buf);
+        let inner = Rect::new(cell.x0 + pad + indent, cell.y0 + px, cell.x1 - pad, cell.y1 - px);
+        let place = |w: f32, h: f32| {
+            let x = match align {
+                Align::Left => inner.x0,
+                Align::Right => inner.x1 - w,
+                Align::Center => ((cell.x0 + cell.x1 - w) / 2.0).floor(),
+            };
+            (x, vpos(h))
+        };
+        match duck_core::rotation_angle(look.rotation) {
+            Some(deg) => {
+                let tw = p.text.measure_styled(buf, style);
+                let (sin, cos) = deg.to_radians().sin_cos();
+                // Caixa da linha girada: cantos de (0,0)-(tw,lh) depois de girar.
+                let pts = [
+                    (0.0, 0.0),
+                    (tw * cos, -tw * sin),
+                    (lh * sin, lh * cos),
+                    (tw * cos + lh * sin, lh * cos - tw * sin),
+                ];
+                let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                for (x, y) in pts {
+                    (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                }
+                let (bx, by) = place(x1 - x0, y1 - y0);
+                p.text_rotated(buf, style, (bx - x0).round(), (by - y0).round(), deg, &clip_cell, color);
+            }
+            None => {
+                // Empilhado: uma letra por linha, cada uma centrada na coluna.
+                let n = buf.chars().count();
+                let wmax = buf
+                    .chars()
+                    .map(|ch| p.text.measure_styled(ch.encode_utf8(&mut [0; 4]), style))
+                    .fold(0.0, f32::max);
+                let (bx, by) = place(wmax, n as f32 * lh);
+                for (i, ch) in buf.chars().enumerate() {
+                    let s = ch.encode_utf8(&mut [0; 4]).to_string();
+                    let y = by + i as f32 * lh;
+                    if y > clip_cell.y1 {
+                        break;
+                    }
+                    p.text_aligned(&s, style, bx, bx + wmax, y, Align::Center, &clip_cell, color);
+                }
+            }
+        }
+        return;
+    }
+
+    // Trechos do texto: vários (texto rico) ou um só, com a fonte da célula.
+    let base = Seg { range: 0..buf.len(), style, color, underline, strike, rise: 0.0 };
+    let rich = match value {
+        Value::Text(s) if shown.kind == Kind::Text && s == buf.as_str() => cx.strings.rich_of(s),
+        _ => None,
+    };
+    let segs = match rich {
+        Some(runs) => rich_segs(p, cx, look, &base, runs, buf.len()),
+        None => vec![base.clone()],
+    };
+
+    // Texto rico quebrado: quebra própria (por palavra, entre trechos).
+    if look.wrap && rich.is_some() {
+        let lines = wrap_segs(p, &segs, buf, (avail - indent).max(1.0));
+        let line_h = segs.iter().map(|s| p.text.line_height_of(s.style)).fold(lh, f32::max);
+        let y0 = vpos((lines.len() as f32 * line_h).min(cell.h()));
+        for (k, line) in lines.iter().enumerate() {
+            let y = y0 + k as f32 * line_h;
+            if y > clip_cell.y1 {
+                break;
+            }
+            let lw: f32 = line.iter().map(|(_, r)| r.2).sum();
+            let x = match align {
+                Align::Left => cell.x0 + pad + indent,
+                Align::Right => cell.x1 - pad - lw - indent,
+                Align::Center => ((cell.x0 + cell.x1 - lw) / 2.0).floor(),
+            };
+            let mut xx = x;
+            for &(si, (a, b, w)) in line {
+                draw_seg(p, cx, &segs[si], &buf[a..b], xx, y, line_h, w, &clip_cell);
+                xx += w;
+            }
+        }
+        return;
+    }
+
     // Texto quebrado: só dentro da célula.
     if look.wrap && shown.kind == Kind::Text {
         let w = p.text.wrap(buf, style, (avail - indent).max(1.0));
@@ -660,14 +948,11 @@ fn draw_cell_text(
             p.text.draw_wrapped_line(&w, line, x, y, clip_cell.as_clip(), |gq| {
                 out.push(duck_gfx::Instance::glyph(gq.rect, gq.uv, color))
             });
+            decorate(p, cx, &base, x, y, lw, w.line_height(), &clip_cell);
         }
         return;
     }
-    if buf.contains(['\n', '\r']) {
-        let s = buf.replace(['\n', '\r'], " ");
-        buf.clear();
-        buf.push_str(&s);
-    }
+    one_line(buf);
     let y = vpos(lh);
 
     // Números: precisam caber (sem transbordo).
@@ -718,11 +1003,15 @@ fn draw_cell_text(
             Align::Center => ((cell.x0 + cell.x1 - tw) / 2.0).floor(),
         };
         p.text(buf, style, x, y, &clip_cell, color);
-        underline(p, cx, look, x, y, tw, lh, &clip_cell, color);
+        decorate(p, cx, &base, x, y, tw, lh, &clip_cell);
         return;
     }
 
-    let tw = p.text.measure_styled(buf, style);
+    let widths: Vec<f32> =
+        segs.iter().map(|s| p.text.measure_styled(&buf[s.range.clone()], s.style)).collect();
+    let tw: f32 = widths.iter().sum();
+    let line_h = segs.iter().map(|s| p.text.line_height_of(s.style)).fold(lh, f32::max);
+    let y = if line_h > lh { vpos(line_h) } else { y };
     let mut span = cell;
     if can_overflow && ri != usize::MAX && tw + 2.0 * pad + indent > cell.w() && look.h != HAlign::Fill {
         // Transborda para as vizinhas vazias (e não mescladas) do lado do alinhamento.
@@ -775,25 +1064,193 @@ fn draw_cell_text(
         Align::Center => ((cell.x0 + cell.x1 - tw) / 2.0).floor(),
     };
     let clip = Rect::new(span.x0, cell.y0, span.x1 - px, cell.y1 - px).intersect(&q.rect);
-    p.text(buf, style, x, y, &clip, color);
-    underline(p, cx, look, x, y, tw, lh, &clip, color);
+    let mut xx = x;
+    for (seg, w) in segs.iter().zip(widths) {
+        draw_seg(p, cx, seg, &buf[seg.range.clone()], xx, y, line_h, w, &clip);
+        xx += w;
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn underline(
-    p: &mut Painter,
-    cx: &Ctx,
-    look: &Look,
-    x: f32,
-    y: f32,
-    w: f32,
-    lh: f32,
-    clip: &Rect,
+/// Barra de dados: da esquerda até `frac` da largura, com contorno na cor.
+fn data_bar(p: &mut Painter, cell: Rect, frac: f32, color: Rgba, px: f32, clip: &Rect) {
+    let inset = (2.0 * px).max(1.0);
+    let r = Rect::new(
+        cell.x0 + px,
+        cell.y0 + inset,
+        cell.x0 + px + (cell.w() - 2.0 * px) * frac,
+        cell.y1 - inset,
+    );
+    let light = [color[0], color[1], color[2], 150];
+    p.fill(r, clip, light);
+    p.stroke(r, clip, px, color);
+}
+
+/// Ícone de um conjunto (`iconSet`): caractere e cor. `idx` 0 = o mais baixo.
+fn icon(set: &str, idx: usize, n: usize) -> (char, Rgba) {
+    const RED: Rgba = rgb(0xE0443E);
+    const YELLOW: Rgba = rgb(0xF1C232);
+    const GREEN: Rgba = rgb(0x3E9B3E);
+    const GRAY: Rgba = rgb(0x808080);
+    const BLACK: Rgba = rgb(0x202124);
+    let ramp = |colors: &[Rgba]| colors[(idx * colors.len() / n.max(1)).min(colors.len() - 1)];
+    let traffic = ramp(&[RED, YELLOW, GREEN]);
+    let arrows = |gray: bool| {
+        let ch = match (n, idx) {
+            (_, 0) => '↓',
+            (3, 1) | (5, 2) => '→',
+            (4, 1) | (5, 1) => '↘',
+            (4, 2) | (5, 3) => '↗',
+            _ => '↑',
+        };
+        (ch, if gray { GRAY } else { traffic })
+    };
+    match set {
+        "3Arrows" | "4Arrows" | "5Arrows" => arrows(false),
+        "3ArrowsGray" | "4ArrowsGray" | "5ArrowsGray" => arrows(true),
+        "3Flags" => ('⚑', traffic),
+        "3Symbols" | "3Symbols2" => (['✖', '!', '✔'][idx.min(2)], traffic),
+        "3Signs" => (['◆', '▲', '●'][idx.min(2)], traffic),
+        "3Stars" => (['☆', '⯪', '★'][idx.min(2)], YELLOW),
+        "3Triangles" => (['▼', '▬', '▲'][idx.min(2)], traffic),
+        "4RedToBlack" => ('●', [BLACK, GRAY, rgb(0xF4A6A6), RED][idx.min(3)]),
+        "4Rating" | "5Rating" | "5Boxes" => {
+            (['▁', '▃', '▅', '▇', '█'][(idx * 5 / n.max(1)).min(4)], rgb(0x4472C4))
+        }
+        "5Quarters" => (['○', '◔', '◑', '◕', '●'][idx.min(4)], BLACK),
+        // Semáforos e o padrão.
+        _ => ('●', if n >= 4 { ramp(&[BLACK, RED, YELLOW, GREEN]) } else { traffic }),
+    }
+}
+
+/// Um trecho de texto com fonte própria (texto rico) ou o texto inteiro.
+#[derive(Clone)]
+struct Seg {
+    range: Range<usize>,
+    style: TextStyle,
     color: Rgba,
-) {
-    if cx.looks.fonts.get(look.font as usize).is_some_and(|f| f.underline) {
+    underline: bool,
+    strike: bool,
+    /// Deslocamento vertical (sobrescrito < 0, subscrito > 0).
+    rise: f32,
+}
+
+/// Trechos de um texto rico, com a fonte de cada um resolvida a partir da
+/// fonte da célula.
+fn rich_segs(p: &mut Painter, cx: &Ctx, look: &Look, base: &Seg, runs: &[RichRun], len: usize) -> Vec<Seg> {
+    let cell_font = cx.looks.fonts.get(look.font as usize);
+    let mut out = Vec::with_capacity(runs.len());
+    for (k, run) in runs.iter().enumerate() {
+        let a = run.start as usize;
+        let b = runs.get(k + 1).map_or(len, |r| r.start as usize).min(len);
+        if a >= b {
+            continue;
+        }
+        let Some(f) = &run.font else {
+            out.push(Seg { range: a..b, ..base.clone() });
+            continue;
+        };
+        let name = f.name.as_deref().or(cell_font.map(|c| c.name.as_str())).unwrap_or("Calibri");
+        let mut pt = f.size.or(cell_font.map(|c| c.pt)).unwrap_or(11.0);
+        if f.script != 0 {
+            pt *= 0.75;
+        }
+        let style = p.text.style(name, pt * 96.0 / 72.0 * cx.g, f.bold, f.italic);
+        let lh = p.text.line_height_of(style);
+        out.push(Seg {
+            range: a..b,
+            style,
+            color: f.color.and_then(|c| cx.styles.rgb(c)).map_or(base.color, duck_ui::rgb),
+            underline: f.underline,
+            strike: f.strike,
+            rise: match f.script {
+                1 => -(lh * 0.35).round(),
+                -1 => (lh * 0.2).round(),
+                _ => 0.0,
+            },
+        });
+    }
+    if out.is_empty() {
+        out.push(base.clone());
+    }
+    out
+}
+
+/// Quebra trechos em linhas de até `width` pixels, por palavra (os espaços
+/// ficam no fim da palavra) e em `\n`. Cada linha: (trecho, (início, fim, largura)).
+#[allow(clippy::type_complexity)]
+fn wrap_segs(
+    p: &mut Painter,
+    segs: &[Seg],
+    text: &str,
+    width: f32,
+) -> Vec<Vec<(usize, (usize, usize, f32))>> {
+    let mut lines = vec![Vec::new()];
+    let mut x = 0.0f32;
+    for (si, seg) in segs.iter().enumerate() {
+        let s = &text[seg.range.clone()];
+        let mut start = 0;
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while start < s.len() {
+            // Próximo pedaço: até depois dos espaços que seguem a palavra, ou até `\n`.
+            while i < s.len() && bytes[i] != b' ' && bytes[i] != b'\n' {
+                i += 1;
+            }
+            let newline = i < s.len() && bytes[i] == b'\n';
+            while !newline && i < s.len() && bytes[i] == b' ' {
+                i += 1;
+            }
+            let (a, b) = (seg.range.start + start, seg.range.start + i);
+            let w = p.text.measure_styled(&text[a..b], seg.style);
+            let line = lines.last_mut().unwrap();
+            if x + w.min(width) > width + 0.5 && !line.is_empty() {
+                lines.push(Vec::new());
+                x = 0.0;
+            }
+            lines.last_mut().unwrap().push((si, (a, b, w)));
+            x += w;
+            if newline {
+                i += 1;
+                lines.push(Vec::new());
+                x = 0.0;
+            }
+            start = i;
+        }
+    }
+    if lines.len() > 1 && lines.last().is_some_and(Vec::is_empty) {
+        lines.pop();
+    }
+    lines
+}
+
+/// Desenha um trecho com a base alinhada às dos outros (linha de altura `line_h`).
+#[allow(clippy::too_many_arguments)]
+fn draw_seg(p: &mut Painter, cx: &Ctx, seg: &Seg, s: &str, x: f32, y: f32, line_h: f32, w: f32, clip: &Rect) {
+    let lh = p.text.line_height_of(seg.style);
+    let yy = y + (line_h - lh) + seg.rise;
+    p.text(s, seg.style, x, yy, clip, seg.color);
+    decorate(p, cx, seg, x, yy, w, lh, clip);
+}
+
+/// Quebras de linha viram espaço (texto de uma linha só).
+fn one_line(buf: &mut String) {
+    if buf.contains(['\n', '\r']) {
+        let s = buf.replace(['\n', '\r'], " ");
+        buf.clear();
+        buf.push_str(&s);
+    }
+}
+
+/// Sublinhado e tachado de um trecho.
+#[allow(clippy::too_many_arguments)]
+fn decorate(p: &mut Painter, cx: &Ctx, seg: &Seg, x: f32, y: f32, w: f32, lh: f32, clip: &Rect) {
+    if seg.underline {
         let uy = (y + lh * 0.86).round();
-        p.fill(Rect::new(x, uy, x + w, uy + cx.px), clip, color);
+        p.fill(Rect::new(x, uy, x + w, uy + cx.px), clip, seg.color);
+    }
+    if seg.strike {
+        let sy = (y + lh * 0.55).round();
+        p.fill(Rect::new(x, sy, x + w, sy + cx.px), clip, seg.color);
     }
 }
 

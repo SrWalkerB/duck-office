@@ -22,6 +22,9 @@ pub use bytemuck;
 ///   (coordenadas em texels, 1 texel = 1 pixel).
 /// - `kind == KIND_DASH`: tracejado ao longo do lado maior; `uv[0]` = período
 ///   (negativo = vertical), `uv[1]` = parte desenhada, em pixels.
+/// - `kind & 0xFF == KIND_GLYPH_ROT`: glifo girado em torno do canto
+///   superior esquerdo de `rect`; o ângulo vai nos bits altos de `kind`
+///   (ver [`Instance::glyph_rotated`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct Instance {
@@ -37,6 +40,7 @@ pub struct Instance {
 pub const KIND_SOLID: u32 = 0;
 pub const KIND_GLYPH: u32 = 1;
 pub const KIND_DASH: u32 = 2;
+pub const KIND_GLYPH_ROT: u32 = 3;
 
 impl Instance {
     #[inline]
@@ -47,6 +51,16 @@ impl Instance {
     #[inline]
     pub fn glyph(rect: [f32; 4], uv: [f32; 4], color: [u8; 4]) -> Self {
         Self { rect, uv, color, kind: KIND_GLYPH }
+    }
+
+    /// Glifo girado `degrees` graus no sentido anti-horário (como o texto
+    /// girado do Excel), em torno do canto superior esquerdo de `rect`. Não
+    /// há recorte: quem chama descarta os glifos que saem da área.
+    #[inline]
+    pub fn glyph_rotated(rect: [f32; 4], uv: [f32; 4], color: [u8; 4], degrees: f32) -> Self {
+        // Centésimos de grau, deslocados para ficarem positivos (24 bits).
+        let a = ((degrees.clamp(-360.0, 360.0) + 360.0) * 100.0).round() as u32;
+        Self { rect, uv, color, kind: KIND_GLYPH_ROT | (a << 8) }
     }
 
     /// Linha tracejada (bordas pontilhadas, tracejadas...). O padrão segue a
@@ -121,18 +135,33 @@ struct VOut {
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
     @location(2) @interpolate(flat) kind: u32,
+    @location(3) @interpolate(flat) bounds: vec4<f32>,
 };
+
+fn texel(p: vec2<i32>, b: vec4<f32>) -> f32 {
+    if (p.x < i32(b.x) || p.y < i32(b.y) || p.x >= i32(b.z) || p.y >= i32(b.w)) {
+        return 0.0;
+    }
+    return textureLoad(atlas, p, 0).r;
+}
 
 @vertex
 fn vs(in: VIn) -> VOut {
     // Triangle strip: 0=(0,0) 1=(1,0) 2=(0,1) 3=(1,1)
     let corner = vec2<f32>(f32(in.vi & 1u), f32(in.vi >> 1u));
-    let p = in.rect.xy + corner * in.rect.zw;
+    var p = in.rect.xy + corner * in.rect.zw;
+    if ((in.kind & 0xFFu) == 3u) {
+        // Anti-horário na tela (y para baixo).
+        let a = radians(f32(in.kind >> 8u) / 100.0 - 360.0);
+        let d = corner * in.rect.zw;
+        p = in.rect.xy + vec2<f32>(d.x * cos(a) + d.y * sin(a), -d.x * sin(a) + d.y * cos(a));
+    }
     var out: VOut;
     out.pos = vec4<f32>(p.x / g.screen.x * 2.0 - 1.0, 1.0 - p.y / g.screen.y * 2.0, 0.0, 1.0);
     out.uv = mix(in.uv.xy, in.uv.zw, corner);
     out.color = in.color;
     out.kind = in.kind;
+    out.bounds = in.uv;
     return out;
 }
 
@@ -140,6 +169,20 @@ fn vs(in: VIn) -> VOut {
 fn fs(in: VOut) -> @location(0) vec4<f32> {
     if (in.kind == 1u) {
         let a = textureLoad(atlas, vec2<i32>(floor(in.uv)), 0).r;
+        return vec4<f32>(in.color.rgb, in.color.a * a);
+    }
+    if ((in.kind & 0xFFu) == 3u) {
+        // Girado: interpolação bilinear à mão (o atlas não tem sampler), só
+        // dentro do glifo para não puxar o vizinho no atlas.
+        let t = in.uv - vec2<f32>(0.5);
+        let i = vec2<i32>(floor(t));
+        let f = t - floor(t);
+        let b = in.bounds;
+        let a00 = texel(i, b);
+        let a10 = texel(i + vec2<i32>(1, 0), b);
+        let a01 = texel(i + vec2<i32>(0, 1), b);
+        let a11 = texel(i + vec2<i32>(1, 1), b);
+        let a = mix(mix(a00, a10, f.x), mix(a01, a11, f.x), f.y);
         return vec4<f32>(in.color.rgb, in.color.a * a);
     }
     if (in.kind == 2u) {
@@ -263,18 +306,136 @@ where
     Err(first_err.or(other_err).unwrap_or(GfxError::UnsupportedSurface))
 }
 
+/// GPU aberta antes da janela existir (instância, adaptador e device).
+struct Early {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    timings: Vec<(&'static str, Duration)>,
+}
+
+/// Abertura da GPU em andamento numa thread (ver [`Gfx::start_early`]).
+pub struct EarlyGpu(std::thread::JoinHandle<Option<Early>>);
+
+/// Limites pedidos ao device (os mesmos com ou sem abertura antecipada).
+fn limits(max_tex: u32) -> wgpu::Limits {
+    wgpu::Limits { max_texture_dimension_2d: max_tex, ..wgpu::Limits::downlevel_webgl2_defaults() }
+}
+
+fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue), GfxError> {
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("duck-gfx"),
+        required_features: wgpu::Features::empty(),
+        required_limits: limits(adapter.limits().max_texture_dimension_2d),
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        memory_hints: wgpu::MemoryHints::Performance,
+        trace: wgpu::Trace::Off,
+    }))
+    .map_err(|e| GfxError::Device(e.to_string()))
+}
+
 impl Gfx {
+    /// Começa a abrir a GPU numa thread, antes da janela existir: a parte cara
+    /// (instância, adaptador, device: 150–250 ms) corre junto com a criação da
+    /// janela e a leitura do arquivo. Só no DX12, em que qualquer adaptador
+    /// apresenta em qualquer janela; nos outros backends a escolha depende da
+    /// superfície (ex.: Vulkan × software no WSLg) e fica para [`Gfx::new`].
+    /// Com `WGPU_BACKEND` definido, também fica para depois.
+    pub fn start_early() -> Option<EarlyGpu> {
+        if primary_backends() != wgpu::Backends::DX12 || wgpu::Backends::from_env().is_some() {
+            return None;
+        }
+        let h = std::thread::Builder::new()
+            .name("duck-gpu".into())
+            .spawn(|| {
+                let mut timings = Vec::new();
+                let t = Instant::now();
+                let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+                desc.backends = wgpu::Backends::DX12;
+                let instance = wgpu::Instance::new(desc);
+                let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    force_fallback_adapter: false,
+                    compatible_surface: None,
+                    ..Default::default()
+                }))
+                .ok()
+                .filter(|a| !is_software(a))?;
+                timings.push(("instância + adaptador", t.elapsed()));
+                let t = Instant::now();
+                let (device, queue) = request_device(&adapter).ok()?;
+                timings.push(("device", t.elapsed()));
+                Some(Early { instance, adapter, device, queue, timings })
+            })
+            .ok()?;
+        Some(EarlyGpu(h))
+    }
+
     /// Abre a GPU e cria a superfície da janela.
     pub fn new<W>(window: W, width: u32, height: u32, vsync: bool, atlas_size: u32) -> Result<Self, GfxError>
     where
         W: HasWindowHandle + HasDisplayHandle + fmt::Debug + Clone + Send + Sync + 'static,
     {
+        Self::new_with(None, window, width, height, vsync, atlas_size)
+    }
+
+    /// Como [`Gfx::new`], aproveitando uma abertura antecipada. Se ela tiver
+    /// falhado ou o adaptador não servir para a janela, abre do jeito normal.
+    pub fn new_with<W>(
+        early: Option<EarlyGpu>,
+        window: W,
+        width: u32,
+        height: u32,
+        vsync: bool,
+        atlas_size: u32,
+    ) -> Result<Self, GfxError>
+    where
+        W: HasWindowHandle + HasDisplayHandle + fmt::Debug + Clone + Send + Sync + 'static,
+    {
+        let t = Instant::now();
+        let early = early.and_then(|e| e.0.join().ok().flatten());
+        let wait = t.elapsed();
+        if let Some(e) = early {
+            let t = Instant::now();
+            if let Ok(surface) = e.instance.create_surface(window.clone())
+                && e.adapter.is_surface_supported(&surface)
+            {
+                let mut timings = e.timings;
+                timings.push(("espera da thread da GPU", wait));
+                timings.push(("superfície criada", t.elapsed()));
+                return Self::finish(
+                    surface,
+                    e.adapter,
+                    Some((e.device, e.queue)),
+                    width,
+                    height,
+                    vsync,
+                    atlas_size,
+                    timings,
+                );
+            }
+            log::warn!("adaptador aberto antes da janela não serve para ela; abrindo de novo");
+        }
         let mut timings = Vec::new();
         let t = Instant::now();
         // Inicializar um backend só custa ~250 ms; todos de uma vez, ~900 ms.
         let (surface, adapter) = select(&window)?;
         timings.push(("instância + adaptador", t.elapsed()));
+        Self::finish(surface, adapter, None, width, height, vsync, atlas_size, timings)
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        surface: wgpu::Surface<'static>,
+        adapter: wgpu::Adapter,
+        device: Option<(wgpu::Device, wgpu::Queue)>,
+        width: u32,
+        height: u32,
+        vsync: bool,
+        atlas_size: u32,
+        mut timings: Vec<(&'static str, Duration)>,
+    ) -> Result<Self, GfxError> {
         let ainfo = adapter.get_info();
         let info = AdapterInfo {
             name: ainfo.name.clone(),
@@ -284,20 +445,15 @@ impl Gfx {
 
         let max_tex = adapter.limits().max_texture_dimension_2d;
         let atlas_size = atlas_size.min(max_tex);
-        let t = Instant::now();
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("duck-gfx"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits {
-                max_texture_dimension_2d: max_tex,
-                ..wgpu::Limits::downlevel_webgl2_defaults()
-            },
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            memory_hints: wgpu::MemoryHints::Performance,
-            trace: wgpu::Trace::Off,
-        }))
-        .map_err(|e| GfxError::Device(e.to_string()))?;
-        timings.push(("device", t.elapsed()));
+        let (device, queue) = match device {
+            Some(d) => d,
+            None => {
+                let t = Instant::now();
+                let d = request_device(&adapter)?;
+                timings.push(("device", t.elapsed()));
+                d
+            }
+        };
 
         let t = Instant::now();
         let mut config = surface

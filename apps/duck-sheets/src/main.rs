@@ -1,4 +1,4 @@
-//! `duck-sheets`: visualizador de planilhas `.xlsx` / `.xlsm` (F2).
+//! `duck-sheets`: visualizador de planilhas `.xlsx` / `.xlsm` / `.csv` (F2).
 //!
 //! ```text
 //! duck-sheets [ARQUIVO] [--sheet N] [--cell B12] [--zoom 80] [--find TEXTO]
