@@ -921,6 +921,35 @@ pub fn process_memory() -> (u64, u64) {
     (kb("VmRSS:"), kb("VmHWM:"))
 }
 
+/// Memória **privada** em uso (o que o Gerenciador de Tarefas mostra como
+/// "Memória"): sem as páginas de DLLs e arquivos mapeados, que são
+/// compartilhadas e podem ser descartadas pelo sistema a qualquer momento.
+#[cfg(windows)]
+pub fn private_memory() -> u64 {
+    use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX2};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    // SAFETY: como em `process_memory`; a versão EX2 existe desde o Windows 10 1809.
+    unsafe {
+        let mut c: PROCESS_MEMORY_COUNTERS_EX2 = std::mem::zeroed();
+        c.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32;
+        if GetProcessMemoryInfo(GetCurrentProcess(), (&raw mut c).cast(), c.cb) != 0 {
+            return c.PrivateWorkingSetSize as u64;
+        }
+    }
+    0
+}
+
+#[cfg(not(windows))]
+pub fn private_memory() -> u64 {
+    let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    s.lines()
+        .find(|l| l.starts_with("RssAnon:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+        * 1024
+}
+
 pub fn save_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     let file = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut enc = png::Encoder::new(file, w, h);

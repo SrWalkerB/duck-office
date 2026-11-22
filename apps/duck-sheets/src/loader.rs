@@ -167,9 +167,12 @@ fn load(
     Ok(())
 }
 
-/// Devolve ao sistema a memória que a leitura usou e liberou (pedaços de XML).
+/// Devolve ao sistema a memória que a leitura usou e liberou (pedaços de XML,
+/// blocos antes de compactar). Cada thread do pool guarda as próprias páginas
+/// livres; sem pedir a todas, ~30 MB ficavam presos nas threads paradas.
 fn release_memory() {
     // SAFETY: chamada simples do mimalloc, segura de qualquer thread.
+    rayon::broadcast(|_| unsafe { libmimalloc_sys::mi_collect(true) });
     unsafe { libmimalloc_sys::mi_collect(true) };
 }
 

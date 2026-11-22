@@ -2,8 +2,11 @@
 //!
 //! - **Colunar em blocos**: cada coluna é uma lista de blocos de
 //!   [`BLOCK_ROWS`] linhas. Blocos vazios não alocam.
-//! - Cada célula ocupa 11 bytes dentro do bloco: tipo (`u8`), estilo (`u16`)
-//!   e um payload de 64 bits (número `f64`, índice de string, booleano ou erro).
+//! - Na montagem, cada célula ocupa 11 bytes dentro do bloco: tipo (`u8`),
+//!   estilo (`u16`) e um payload de 64 bits (número `f64`, índice de string,
+//!   booleano ou erro). No fim ([`Sheet::finish`]), cada bloco é compactado:
+//!   estilo único vira um valor só, payloads que cabem em 32 bits (inteiros,
+//!   índices) usam 4 bytes, e blocos só com estilo não guardam payload.
 //! - Strings ficam em tabelas contíguas ([`StringTable`]); células guardam
 //!   só o índice.
 //! - Partes da mesma aba podem ser montadas em paralelo ([`SheetPart`]) e
@@ -102,6 +105,12 @@ impl StringTable {
     pub fn heap_bytes(&self) -> usize {
         self.data.capacity() + self.ends.capacity() * 8
     }
+
+    /// Devolve a folga dos buffers (depois de montar).
+    pub fn shrink_to_fit(&mut self) {
+        self.data.shrink_to_fit();
+        self.ends.shrink_to_fit();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +205,8 @@ pub struct Cell<'a> {
 // Blocos e colunas
 // ---------------------------------------------------------------------------
 
-/// 1024 linhas de uma coluna. 11 KB, alocado só se a coluna tiver algo nessas linhas.
+/// 1024 linhas de uma coluna durante a montagem: 11 KB, escrita direta.
+/// Alocado só se a coluna tiver algo nessas linhas.
 pub struct Block {
     pub kind: [u8; BLOCK_ROWS],
     pub style: [u16; BLOCK_ROWS],
@@ -216,17 +226,250 @@ impl Block {
     }
 }
 
+/// Array de inteiros zerado direto no heap.
+fn zeroed_lane<T: Copy>() -> Box<[T; BLOCK_ROWS]> {
+    // SAFETY: só é usado com inteiros, para os quais todos os bits zero é válido.
+    unsafe { Box::<[T; BLOCK_ROWS]>::new_zeroed().assume_init() }
+}
+
+/// Payload em 32 bits, se couber sem perda: números inteiros na faixa de
+/// `i32` (sem o -0), strings locais com tabela < 256 e índice < 2^24, e o
+/// resto (índices, booleanos, erros) se for < 2^32.
+#[inline]
+fn narrow(k: u8, p: u64) -> Option<u32> {
+    match k & kind::TYPE_MASK {
+        kind::NUMBER => {
+            let i = f64::from_bits(p) as i32;
+            ((i as f64).to_bits() == p).then_some(i as u32)
+        }
+        kind::LOCAL_STR => {
+            let (table, index) = (p >> 32, p & 0xffff_ffff);
+            (table < 256 && index < 1 << 24).then_some(((table << 24) | index) as u32)
+        }
+        _ => u32::try_from(p).ok(),
+    }
+}
+
+/// Inverso de [`narrow`].
+#[inline]
+fn widen(k: u8, v: u32) -> u64 {
+    match k & kind::TYPE_MASK {
+        kind::NUMBER => (v as i32 as f64).to_bits(),
+        kind::LOCAL_STR => (((v >> 24) as u64) << 32) | (v & 0x00ff_ffff) as u64,
+        _ => v as u64,
+    }
+}
+
+/// Estilos de um bloco compactado.
+enum StyleLane {
+    Same(u16),
+    Each(Box<[u16; BLOCK_ROWS]>),
+}
+
+/// Payloads de um bloco compactado.
+enum PayloadLane {
+    /// Todos zero (blocos só com estilo, ou só zeros e índices 0).
+    Zero,
+    /// Todos cabem em 32 bits ([`narrow`]).
+    Narrow(Box<[u32; BLOCK_ROWS]>),
+    Wide(Box<[u64; BLOCK_ROWS]>),
+}
+
+/// Bloco depois da montagem: 1 KB de tipos mais o que não se repete.
+struct Packed {
+    kind: [u8; BLOCK_ROWS],
+    style: StyleLane,
+    payload: PayloadLane,
+}
+
+impl Packed {
+    fn from_block(b: &Block) -> Self {
+        let s0 = b.style[0];
+        let style = if b.style.iter().all(|&s| s == s0) {
+            StyleLane::Same(s0)
+        } else {
+            let mut each = zeroed_lane::<u16>();
+            each.copy_from_slice(&b.style);
+            StyleLane::Each(each)
+        };
+        let payload = if b.payload.iter().all(|&p| p == 0) {
+            PayloadLane::Zero
+        } else {
+            let mut small = zeroed_lane::<u32>();
+            let fits = (0..BLOCK_ROWS).all(|i| match narrow(b.kind[i], b.payload[i]) {
+                Some(v) => {
+                    small[i] = v;
+                    true
+                }
+                None => false,
+            });
+            if fits {
+                PayloadLane::Narrow(small)
+            } else {
+                let mut wide = zeroed_lane::<u64>();
+                wide.copy_from_slice(&b.payload);
+                PayloadLane::Wide(wide)
+            }
+        };
+        Self { kind: b.kind, style, payload }
+    }
+
+    fn to_block(&self) -> Box<Block> {
+        let mut b = Block::new();
+        b.kind = self.kind;
+        for i in 0..BLOCK_ROWS {
+            b.style[i] = self.style(i);
+            b.payload[i] = self.payload(i);
+        }
+        b
+    }
+
+    #[inline]
+    fn style(&self, i: usize) -> u16 {
+        match &self.style {
+            StyleLane::Same(s) => *s,
+            StyleLane::Each(a) => a[i],
+        }
+    }
+
+    #[inline]
+    fn payload(&self, i: usize) -> u64 {
+        match &self.payload {
+            PayloadLane::Zero => 0,
+            PayloadLane::Narrow(a) => widen(self.kind[i], a[i]),
+            PayloadLane::Wide(a) => a[i],
+        }
+    }
+
+    fn heap_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + match self.style {
+                StyleLane::Same(_) => 0,
+                StyleLane::Each(_) => BLOCK_ROWS * 2,
+            }
+            + match self.payload {
+                PayloadLane::Zero => 0,
+                PayloadLane::Narrow(_) => BLOCK_ROWS * 4,
+                PayloadLane::Wide(_) => BLOCK_ROWS * 8,
+            }
+    }
+}
+
+/// Um bloco em montagem ou já compactado.
+enum Slot {
+    Wide(Box<Block>),
+    Packed(Box<Packed>),
+}
+
+impl Slot {
+    #[inline]
+    fn kinds(&self) -> &[u8; BLOCK_ROWS] {
+        match self {
+            Slot::Wide(b) => &b.kind,
+            Slot::Packed(p) => &p.kind,
+        }
+    }
+
+    #[inline]
+    fn kind(&self, i: usize) -> u8 {
+        self.kinds()[i]
+    }
+
+    #[inline]
+    fn style(&self, i: usize) -> u16 {
+        match self {
+            Slot::Wide(b) => b.style[i],
+            Slot::Packed(p) => p.style(i),
+        }
+    }
+
+    #[inline]
+    fn payload(&self, i: usize) -> u64 {
+        match self {
+            Slot::Wide(b) => b.payload[i],
+            Slot::Packed(p) => p.payload(i),
+        }
+    }
+
+    /// O bloco para escrita (descompacta, se preciso).
+    fn wide_mut(&mut self) -> &mut Block {
+        if let Slot::Packed(p) = self {
+            *self = Slot::Wide(p.to_block());
+        }
+        match self {
+            Slot::Wide(b) => b,
+            Slot::Packed(_) => unreachable!(),
+        }
+    }
+
+    fn pack(&mut self) {
+        if let Slot::Wide(b) = self {
+            *self = Slot::Packed(Box::new(Packed::from_block(b)));
+        }
+    }
+
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Slot::Wide(_) => std::mem::size_of::<Block>(),
+            Slot::Packed(p) => p.heap_bytes(),
+        }
+    }
+}
+
 /// Id de fórmula de uma célula: 0 = sem fórmula; com o bit alto, membro do
 /// grupo compartilhado `si`; senão, índice + 1 em `Sheet::formula_defs`.
 const SHARED_BIT: u32 = 0x8000_0000;
 
-type FormulaBlock = Box<[u32; BLOCK_ROWS]>;
+/// Ids de fórmula de um bloco. Fórmulas copiadas para baixo costumam ter o
+/// mesmo id no bloco inteiro (modelo deduplicado ou grupo compartilhado).
+enum Ids {
+    Same(u32),
+    Each(Box<[u32; BLOCK_ROWS]>),
+}
+
+impl Ids {
+    #[inline]
+    fn get(&self, i: usize) -> u32 {
+        match self {
+            Ids::Same(id) => *id,
+            Ids::Each(a) => a[i],
+        }
+    }
+
+    fn each_mut(&mut self) -> &mut [u32; BLOCK_ROWS] {
+        if let Ids::Same(id) = *self {
+            let mut a = zeroed_lane::<u32>();
+            a.fill(id);
+            *self = Ids::Each(a);
+        }
+        match self {
+            Ids::Each(a) => a,
+            Ids::Same(_) => unreachable!(),
+        }
+    }
+
+    fn pack(&mut self) {
+        if let Ids::Each(a) = self {
+            let id0 = a[0];
+            if a.iter().all(|&id| id == id0) {
+                *self = Ids::Same(id0);
+            }
+        }
+    }
+
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Ids::Same(_) => 0,
+            Ids::Each(_) => BLOCK_ROWS * 4,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct Column {
-    blocks: Vec<Option<Box<Block>>>,
+    blocks: Vec<Option<Slot>>,
     /// Ids de fórmula, alocados só nos blocos que têm fórmula.
-    formulas: Vec<Option<FormulaBlock>>,
+    formulas: Vec<Option<Ids>>,
 }
 
 impl Column {
@@ -235,7 +478,7 @@ impl Column {
         if bi >= self.blocks.len() {
             self.blocks.resize_with(bi + 1, || None);
         }
-        self.blocks[bi].get_or_insert_with(Block::new)
+        self.blocks[bi].get_or_insert_with(|| Slot::Wide(Block::new())).wide_mut()
     }
 
     #[inline]
@@ -243,21 +486,19 @@ impl Column {
         if bi >= self.formulas.len() {
             self.formulas.resize_with(bi + 1, || None);
         }
-        // SAFETY: um array de `u32` zerado é válido.
-        self.formulas[bi]
-            .get_or_insert_with(|| unsafe { Box::<[u32; BLOCK_ROWS]>::new_zeroed().assume_init() })
+        self.formulas[bi].get_or_insert_with(|| Ids::Each(zeroed_lane::<u32>())).each_mut()
     }
 
     #[inline]
-    fn get(&self, row: usize) -> Option<(&Block, usize)> {
-        let b = self.blocks.get(row / BLOCK_ROWS)?.as_deref()?;
+    fn get(&self, row: usize) -> Option<(&Slot, usize)> {
+        let b = self.blocks.get(row / BLOCK_ROWS)?.as_ref()?;
         Some((b, row % BLOCK_ROWS))
     }
 
     #[inline]
     fn formula_id(&self, row: usize) -> u32 {
         match self.formulas.get(row / BLOCK_ROWS) {
-            Some(Some(f)) => f[row % BLOCK_ROWS],
+            Some(Some(f)) => f.get(row % BLOCK_ROWS),
             _ => 0,
         }
     }
@@ -266,8 +507,23 @@ impl Column {
         self.blocks.iter().filter(|b| b.is_some()).count()
     }
 
-    fn formula_blocks(&self) -> usize {
-        self.formulas.iter().filter(|b| b.is_some()).count()
+    /// Compacta os blocos (fim da montagem; ver [`Sheet::finish_with`]).
+    pub fn pack(&mut self) {
+        for b in self.blocks.iter_mut().flatten() {
+            b.pack();
+        }
+        for f in self.formulas.iter_mut().flatten() {
+            f.pack();
+        }
+        self.blocks.shrink_to_fit();
+        self.formulas.shrink_to_fit();
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.blocks.capacity() * std::mem::size_of::<Option<Slot>>()
+            + self.formulas.capacity() * std::mem::size_of::<Option<Ids>>()
+            + self.blocks.iter().flatten().map(Slot::heap_bytes).sum::<usize>()
+            + self.formulas.iter().flatten().map(Ids::heap_bytes).sum::<usize>()
     }
 }
 
@@ -535,7 +791,8 @@ impl Sheet {
                 col.blocks.resize_with(pcol.blocks.len(), || None);
             }
             for (bi, slot) in pcol.blocks.iter_mut().enumerate() {
-                let Some(mut pb) = slot.take() else { continue };
+                let Some(mut pslot) = slot.take() else { continue };
+                let pb = pslot.wide_mut();
                 if tag != 0 {
                     for i in 0..BLOCK_ROWS {
                         if pb.kind[i] & kind::TYPE_MASK == kind::LOCAL_STR {
@@ -544,8 +801,9 @@ impl Sheet {
                     }
                 }
                 match &mut col.blocks[bi] {
-                    None => col.blocks[bi] = Some(pb),
+                    None => col.blocks[bi] = Some(pslot),
                     Some(existing) => {
+                        let existing = existing.wide_mut();
                         for i in 0..BLOCK_ROWS {
                             if pb.present(i) {
                                 existing.kind[i] = pb.kind[i];
@@ -560,7 +818,8 @@ impl Sheet {
                 col.formulas.resize_with(pcol.formulas.len(), || None);
             }
             for (bi, slot) in pcol.formulas.iter_mut().enumerate() {
-                let Some(mut pf) = slot.take() else { continue };
+                let Some(mut pids) = slot.take() else { continue };
+                let pf = pids.each_mut();
                 if !identity {
                     for id in pf.iter_mut() {
                         if *id != 0 && *id & SHARED_BIT == 0 {
@@ -569,9 +828,9 @@ impl Sheet {
                     }
                 }
                 match &mut col.formulas[bi] {
-                    None => col.formulas[bi] = Some(pf),
+                    None => col.formulas[bi] = Some(pids),
                     Some(existing) => {
-                        for (e, &n) in existing.iter_mut().zip(pf.iter()) {
+                        for (e, &n) in existing.each_mut().iter_mut().zip(pf.iter()) {
                             if n != 0 {
                                 *e = n;
                             }
@@ -585,9 +844,27 @@ impl Sheet {
         self.cols = self.cols.max(part.cols);
     }
 
-    /// Termina a montagem (ordena o layout). Chamado depois do último merge.
+    /// Termina a montagem: ordena o layout e compacta os blocos (a aba fica
+    /// com cerca de metade da memória). Chamado depois do último merge; um
+    /// merge depois disso ainda funciona (descompacta os blocos que tocar).
     pub fn finish(&mut self) {
+        self.finish_with(|cols| cols.iter_mut().for_each(Column::pack));
+    }
+
+    /// Como [`Sheet::finish`], com a compactação das colunas feita por
+    /// `pack` (ex.: em paralelo, uma coluna por tarefa).
+    pub fn finish_with(&mut self, pack: impl FnOnce(&mut [Column])) {
         self.layout.finish();
+        pack(&mut self.columns);
+        self.columns.shrink_to_fit();
+        for t in &mut self.strings {
+            t.shrink_to_fit();
+        }
+        self.strings.shrink_to_fit();
+        self.formula_texts.shrink_to_fit();
+        self.formula_defs.shrink_to_fit();
+        // Só serve para deduplicar modelos entre partes.
+        self.templates = HashMap::new();
     }
 
     /// Célula em (linha, coluna), a partir de 0.
@@ -595,8 +872,14 @@ impl Sheet {
         let empty = Cell { value: Value::Empty, style: 0, formula: false };
         let Some(column) = self.columns.get(col as usize) else { return empty };
         let Some((b, i)) = column.get(row as usize) else { return empty };
-        let k = b.kind[i];
-        let p = b.payload[i];
+        self.cell_in(b, i, shared)
+    }
+
+    /// Célula `i` de um bloco já encontrado.
+    #[inline]
+    fn cell_in<'a>(&'a self, b: &Slot, i: usize, shared: &'a StringTable) -> Cell<'a> {
+        let k = b.kind(i);
+        let p = b.payload(i);
         let value = match k & kind::TYPE_MASK {
             kind::NUMBER => Value::Number(f64::from_bits(p)),
             kind::SHARED_STR => Value::Text(shared.get(p as u32).unwrap_or("")),
@@ -607,7 +890,7 @@ impl Sheet {
             kind::ERROR => Value::Error(CellError::from_code(p as u8)),
             _ => Value::Empty,
         };
-        Cell { value, style: b.style[i], formula: k & kind::FORMULA != 0 }
+        Cell { value, style: b.style(i), formula: k & kind::FORMULA != 0 }
     }
 
     /// Visita, em ordem, as células com valor da coluna `col` nas linhas
@@ -624,14 +907,14 @@ impl Sheet {
         let mut r = rows.start as usize;
         while r < end {
             let bi = r / BLOCK_ROWS;
-            let Some(b) = column.blocks[bi].as_deref() else {
+            let Some(b) = column.blocks[bi].as_ref() else {
                 r = (bi + 1) * BLOCK_ROWS;
                 continue;
             };
             let stop = ((bi + 1) * BLOCK_ROWS).min(end);
             for row in r..stop {
-                if b.kind[row % BLOCK_ROWS] & kind::TYPE_MASK != kind::EMPTY
-                    && !f(row as u32, self.cell(row as u32, col, shared))
+                if b.kind(row % BLOCK_ROWS) & kind::TYPE_MASK != kind::EMPTY
+                    && !f(row as u32, self.cell_in(b, row % BLOCK_ROWS, shared))
                 {
                     return;
                 }
@@ -646,10 +929,10 @@ impl Sheet {
         let mut r = row as usize + 1;
         while r < column.blocks.len() * BLOCK_ROWS {
             let bi = r / BLOCK_ROWS;
-            match column.blocks[bi].as_deref() {
+            match column.blocks[bi].as_ref() {
                 None => r = (bi + 1) * BLOCK_ROWS,
                 Some(b) => {
-                    if b.kind[r % BLOCK_ROWS] & kind::TYPE_MASK != kind::EMPTY {
+                    if b.kind(r % BLOCK_ROWS) & kind::TYPE_MASK != kind::EMPTY {
                         return Some(r as u32);
                     }
                     r += 1;
@@ -665,10 +948,10 @@ impl Sheet {
         let mut r = (row as usize).min(column.blocks.len() * BLOCK_ROWS);
         while r > 0 {
             let bi = (r - 1) / BLOCK_ROWS;
-            match column.blocks[bi].as_deref() {
+            match column.blocks[bi].as_ref() {
                 None => r = bi * BLOCK_ROWS,
                 Some(b) => {
-                    if b.kind[(r - 1) % BLOCK_ROWS] & kind::TYPE_MASK != kind::EMPTY {
+                    if b.kind((r - 1) % BLOCK_ROWS) & kind::TYPE_MASK != kind::EMPTY {
                         return Some(r as u32 - 1);
                     }
                     r -= 1;
@@ -683,7 +966,7 @@ impl Sheet {
         self.columns
             .get(col as usize)
             .and_then(|c| c.get(row as usize))
-            .is_some_and(|(b, i)| b.kind[i] & kind::TYPE_MASK != kind::EMPTY)
+            .is_some_and(|(b, i)| b.kind(i) & kind::TYPE_MASK != kind::EMPTY)
     }
 
     /// Fórmula da célula como está no arquivo (ver [`FormulaRef`]).
@@ -718,7 +1001,7 @@ impl Sheet {
         self.columns
             .iter()
             .flat_map(|c| c.formulas.iter().flatten())
-            .map(|b| b.iter().filter(|&&id| id != 0).count() as u64)
+            .map(|ids| (0..BLOCK_ROWS).filter(|&i| ids.get(i) != 0).count() as u64)
             .sum()
     }
 
@@ -726,11 +1009,10 @@ impl Sheet {
     pub fn formula_positions(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
         self.columns.iter().enumerate().flat_map(|(c, col)| {
             col.formulas.iter().enumerate().flat_map(move |(bi, b)| {
-                b.iter().flat_map(move |b| {
-                    b.iter()
-                        .enumerate()
-                        .filter(|(_, id)| **id != 0)
-                        .map(move |(i, _)| ((bi * BLOCK_ROWS + i) as u32, c as u32))
+                b.iter().flat_map(move |ids| {
+                    (0..BLOCK_ROWS)
+                        .filter(move |&i| ids.get(i) != 0)
+                        .map(move |i| ((bi * BLOCK_ROWS + i) as u32, c as u32))
                 })
             })
         })
@@ -742,7 +1024,7 @@ impl Sheet {
         for col in &self.columns {
             for b in col.blocks.iter().flatten() {
                 for i in 0..BLOCK_ROWS {
-                    let k = b.kind[i];
+                    let k = b.kind(i);
                     if k & kind::FORMULA != 0 {
                         c.formulas += 1;
                     }
@@ -752,7 +1034,7 @@ impl Sheet {
                         kind::LOCAL_STR => c.local_strings += 1,
                         kind::BOOL => c.bools += 1,
                         kind::ERROR => c.errors += 1,
-                        _ if b.style[i] != 0 => c.styled_empty += 1,
+                        _ if b.style(i) != 0 => c.styled_empty += 1,
                         _ => {}
                     }
                 }
@@ -767,9 +1049,7 @@ impl Sheet {
 
     /// Memória ocupada pelos dados desta aba.
     pub fn heap_bytes(&self) -> usize {
-        self.allocated_blocks() * std::mem::size_of::<Block>()
-            + self.columns.iter().map(Column::formula_blocks).sum::<usize>() * BLOCK_ROWS * 4
-            + self.columns.iter().map(|c| (c.blocks.capacity() + c.formulas.capacity()) * 8).sum::<usize>()
+        self.columns.iter().map(Column::heap_bytes).sum::<usize>()
             + self.strings.iter().map(StringTable::heap_bytes).sum::<usize>()
             + self.formula_texts.heap_bytes()
             + self.formula_defs.capacity() * std::mem::size_of::<FormulaDef>()
@@ -877,6 +1157,80 @@ mod tests {
         assert!(sheet.has_value(5000, 0));
         assert!(!sheet.has_value(5001, 0));
         assert!(!sheet.has_value(5000, 9));
+    }
+
+    #[test]
+    fn narrow_roundtrip() {
+        let nums: [f64; 6] = [0.0, 1.0, -1.0, 42.0, 2147483647.0, -2147483648.0];
+        for v in nums {
+            let p = v.to_bits();
+            assert_eq!(widen(kind::NUMBER, narrow(kind::NUMBER, p).unwrap()), p, "{v}");
+        }
+        // Não cabem: fração, -0, fora de i32, NaN, infinito.
+        for v in [0.5, -0.0, 2147483648.0, -2147483649.0, f64::NAN, f64::INFINITY, 1e300] {
+            assert_eq!(narrow(kind::NUMBER, v.to_bits()), None, "{v}");
+        }
+        let local = (7u64 << 32) | 123_456;
+        assert_eq!(widen(kind::LOCAL_STR, narrow(kind::LOCAL_STR, local).unwrap()), local);
+        assert_eq!(narrow(kind::LOCAL_STR, (256u64 << 32) | 1), None);
+        assert_eq!(narrow(kind::LOCAL_STR, 1 << 24), None);
+        assert_eq!(widen(kind::SHARED_STR | kind::FORMULA, narrow(kind::SHARED_STR, 99).unwrap()), 99);
+    }
+
+    #[test]
+    fn finish_packs_without_changing_cells() {
+        let mut p = SheetPart::new();
+        let a = p.strings.push("a");
+        // Coluna 0: estilo único, inteiros e strings (payload de 32 bits).
+        for r in 0..1500u32 {
+            if r % 3 == 0 {
+                p.set(r, 0, kind::NUMBER, 5, (r as f64).to_bits());
+            } else {
+                p.set(r, 0, kind::LOCAL_STR, 5, a as u64);
+            }
+        }
+        // Coluna 1: números com fração e estilos variados (64 bits).
+        for r in 0..1500u32 {
+            p.set(r, 1, kind::NUMBER | kind::FORMULA, (r % 4) as u16, (r as f64 + 0.25).to_bits());
+            p.set_formula_template(r, 1, "R[0]C[-1]*2");
+        }
+        // Coluna 2: só estilo (sem payload), booleanos e erros.
+        p.set(10, 2, kind::EMPTY, 9, 0);
+        p.set(11, 2, kind::BOOL, 0, 1);
+        p.set(12, 2, kind::ERROR, 0, CellError::NA as u64);
+        p.set(13, 2, kind::NUMBER, 0, (-0.0f64).to_bits());
+        let shared = StringTable::new();
+        let mut sheet = Sheet::new("s");
+        sheet.merge_part(p);
+        let snapshot = |s: &Sheet| {
+            let mut v = Vec::new();
+            for c in 0..3 {
+                for r in 0..1600 {
+                    v.push((
+                        format!("{:?}", s.cell(r, c, &shared)),
+                        s.formula(r, c).map(|f| f.text.to_string()),
+                    ));
+                }
+            }
+            v
+        };
+        let before = snapshot(&sheet);
+        let bytes_before = sheet.heap_bytes();
+        sheet.finish();
+        assert_eq!(snapshot(&sheet), before);
+        // A coluna 1 (frações, estilos variados) não encolhe; as outras, sim.
+        assert!(sheet.heap_bytes() * 5 < bytes_before * 4, "{} → {}", bytes_before, sheet.heap_bytes());
+        assert_eq!(sheet.cell(13, 2, &shared).value, Value::Number(-0.0));
+        assert!(sheet.cell(13, 2, &shared).value.eq(&Value::Number(0.0)));
+        if let Value::Number(z) = sheet.cell(13, 2, &shared).value {
+            assert!(z.is_sign_negative());
+        }
+        // Um merge depois de compactar ainda funciona.
+        let mut late = SheetPart::new();
+        late.set(1, 0, kind::NUMBER, 5, 7.5f64.to_bits());
+        sheet.merge_part(late);
+        assert_eq!(sheet.cell(1, 0, &shared).value, Value::Number(7.5));
+        assert_eq!(sheet.cell(2, 0, &shared).value, Value::Text("a"));
     }
 
     #[test]

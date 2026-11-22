@@ -447,7 +447,23 @@ impl SheetsApp {
     }
 
     pub fn mark(&mut self, what: &'static str) {
-        self.timeline.push((what, self.t0.elapsed()));
+        self.note(what, self.t0.elapsed());
+    }
+
+    /// Registra um evento da linha do tempo (com `DUCK_TRACE`, imprime também
+    /// a memória do processo nesse momento).
+    fn note(&mut self, what: &'static str, at: Duration) {
+        self.timeline.push((what, at));
+        if self.trace {
+            let (now, peak) = crate::draw::process_memory();
+            eprintln!(
+                "{:>8.1} ms  {what}: memória {:.0} MB (privada {:.0} MB, pico {:.0} MB)",
+                at.as_secs_f64() * 1000.0,
+                now as f64 / 1048576.0,
+                crate::draw::private_memory() as f64 / 1048576.0,
+                peak as f64 / 1048576.0
+            );
+        }
     }
 
     fn redraw_later(&self) {
@@ -489,7 +505,7 @@ impl SheetsApp {
         for m in msgs {
             match m {
                 Msg::Opened { sheets, active, styles, strings, date1904, at } => {
-                    self.timeline.push(("arquivo aberto", at));
+                    self.note("arquivo aberto", at);
                     let looks = Arc::new(Looks::new(&styles));
                     let mdw = self.measure_mdw(&looks);
                     self.doc = Some(Doc {
@@ -510,17 +526,17 @@ impl SheetsApp {
                     self.font_key = (0, 0);
                 }
                 Msg::Preview { index, sheet, at } => {
-                    self.timeline.push(("prévia da aba ativa", at));
+                    self.note("prévia da aba ativa", at);
                     self.install_sheet(index, sheet, true);
                 }
                 Msg::Sheet { index, sheet, at } => {
                     if self.doc.as_ref().is_some_and(|d| d.active == index) {
-                        self.timeline.push(("aba ativa completa", at));
+                        self.note("aba ativa completa", at);
                     }
                     self.install_sheet(index, sheet, false);
                 }
                 Msg::Finished { at } => {
-                    self.timeline.push(("todas as abas", at));
+                    self.note("todas as abas", at);
                     if let Some(d) = &mut self.doc {
                         d.finished = Some(at);
                     }
@@ -1078,6 +1094,9 @@ impl SheetsApp {
         } else {
             format!("{} células com “{}” ({:.0} ms)", fmt_int(res.total as u64), f.done_query, res.millis)
         };
+        if self.trace {
+            eprintln!("busca: {} células em {:.1} ms", res.total, res.millis);
+        }
         let target = res.hits.get(f.current).copied();
         f.result = Some(res);
         if let Some((r, c)) = target {
@@ -1547,8 +1566,9 @@ impl SheetsApp {
         }
         let (cur, peak) = crate::draw::process_memory();
         println!(
-            "\nMemória do processo: {:.0} MB agora, {:.0} MB de pico",
+            "\nMemória do processo: {:.0} MB agora ({:.0} MB privada), {:.0} MB de pico",
             cur as f64 / 1048576.0,
+            crate::draw::private_memory() as f64 / 1048576.0,
             peak as f64 / 1048576.0
         );
         if let Some(b) = &self.bench {

@@ -8,7 +8,7 @@ Onde o projeto está, o que já foi feito e o que falta. Os detalhes de cada dec
 |---|---|---|
 | **F0** | Camada nativa (`platform/`) e grade de 1 milhão de linhas | ✅ Concluída |
 | **F1** | Leitura paralela de `.xlsx`/`.xlsm` e benchmark | ✅ Concluída (metas de 16+ núcleos em aberto) |
-| **F2** | Visualizador `duck-sheets` | ✅ Concluída (meta de memória em aberto) |
+| **F2** | Visualizador `duck-sheets` | ✅ Concluída |
 | **F3** | Edição e salvar com round-trip | ⏳ Próxima |
 | **F4** | Motor de cálculo | ⏳ Planejada |
 | **F5+** | Gráficos, pivôs, slicers, VBA, formato nativo, docs e slides | ⏳ Planejada |
@@ -27,7 +27,7 @@ Resultado: ~0,8 ms de CPU por frame (1.150+ fps sem vsync) no Windows, e o mesmo
 
 ## ✅ F1 · Leitura paralela de planilhas
 
-- `duck-core`: modelo colunar em blocos (11 bytes por célula), strings contíguas, estilos.
+- `duck-core`: modelo colunar em blocos (11 bytes por célula na montagem, compactados no fim), strings contíguas, estilos.
 - `duck-par`: pool de threads, limite de memória em trânsito, cortes por SIMD.
 - `duck-deflate`: descompactação deflate **paralela e especulativa** (decodificador próprio).
 - `duck-xlsx`: todas as abas ao mesmo tempo, abas grandes em pedaços paralelos, fórmulas (compartilhadas e deduplicadas), larguras, alturas, mesclagens e painéis.
@@ -54,7 +54,7 @@ Feito:
 - **Plataforma**: crate novo `duck-ui` (Painter, campo de texto, abas), texto com estilos e quebra de linha, bordas tracejadas no shader.
 - **Medição**: `--bench`, `--screenshot`, `duck-bench preview` e uma planilha de vitrine sem dados reais (`duck-bench gen-showcase`) no CI.
 
-Resultado no Windows (AMD RX 9070 XT, DX12): **primeira tela com dados em 221–229 ms**, todas as 20 abas em 0,7 s, 866–1.147 fps sem vsync (p99 do frame até 4,7 ms), memória de 657–663 MB com tudo carregado.
+Resultado no Windows (AMD RX 9070 XT, DX12): **primeira tela com dados em 221–229 ms**, todas as 20 abas em 0,7 s, 858–1.140 fps sem vsync (p99 do frame até 4,6 ms), **memória de 441–462 MB** com tudo carregado (era 657–663 MB).
 
 No Linux (WSLg, renderização por software): primeira tela em 162–182 ms, todas as abas em ~1 s, frame montado em até 3,2 ms (p99), busca em 593 mil células em 33 ms.
 
@@ -63,7 +63,8 @@ Para não atrasar a primeira tela, a leitura da planilha começa junto com a abe
 Falta na F2:
 
 - [x] Medir no Windows com a GPU (21/11/2026).
-- [ ] **Memória abaixo de 600 MB** (hoje 657–663 MB no Windows, pico de ~1 GB).
+- [x] Memória abaixo de 600 MB: 441–462 MB no Windows, com os blocos de células compactados depois da leitura (dados: 396 → 198 MB).
+- [ ] Pico de memória durante a leitura (~960 MB).
 - [ ] Abrir a GPU antes da janela existir (a GPU é o que resta no caminho da primeira tela: ~200 ms).
 - [ ] Teste manual de teclado e mouse na janela.
 - [ ] Texto girado (`textRotation`), comum em painéis.

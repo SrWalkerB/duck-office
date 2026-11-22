@@ -874,7 +874,11 @@ fn load_sheet_with(
         sheet = Sheet::new(name);
         sequential(pkg, entry, chunk_bytes, &mut sheet)?;
     }
-    sheet.finish();
+    // Compacta as colunas em paralelo (aba de 593 mil linhas: 74 ms numa thread).
+    sheet.finish_with(|cols| {
+        use rayon::prelude::*;
+        cols.par_iter_mut().for_each(duck_core::Column::pack);
+    });
     report.merge = merge + tm.elapsed();
     report.wall = t0.elapsed();
     Ok((sheet, report))
