@@ -23,6 +23,10 @@ pub struct SheetMeta {
     pub id: u32,
     /// Caminho da parte no zip (ex.: `xl/worksheets/sheet1.xml`).
     pub path: String,
+    /// Posição em `<sheets>` (conta também as abas de gráfico).
+    pub tab: usize,
+    /// Escondida de um jeito que só o VBA reexibe (`veryHidden`).
+    pub very_hidden: bool,
 }
 
 pub struct WorkbookMeta {
@@ -114,6 +118,8 @@ pub(crate) fn link_targets(pkg: &Package, part: &str) -> std::collections::HashM
             if let (Some(id), Some(target)) = (attr_str(a, b"Id"), attr_str(a, b"Target"))
                 && attr(a, b"Type").is_some_and(|t| t.ends_with(b"/hyperlink"))
             {
+                // Lugar dentro do arquivo: `#'Minha%20aba'!A1`.
+                let target = if target.starts_with('#') { percent_decode(&target) } else { target };
                 map.insert(id, target);
             }
         });
@@ -121,8 +127,28 @@ pub(crate) fn link_targets(pkg: &Package, part: &str) -> std::collections::HashM
     map
 }
 
+/// `%20` → espaço (o texto fica como está se não for UTF-8 válido).
+pub(crate) fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |k: usize| b.get(k).and_then(|c| (*c as char).to_digit(16));
+        if b[i] == b'%'
+            && let (Some(h), Some(l)) = (hex(i + 1), hex(i + 2))
+        {
+            out.push((h * 16 + l) as u8);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
 /// Junta `dir` + `target`, tratando caminhos absolutos e `..`.
-fn resolve(dir: &str, target: &str) -> String {
+pub(crate) fn resolve(dir: &str, target: &str) -> String {
     let joined = if let Some(abs) = target.strip_prefix('/') {
         abs.to_string()
     } else if dir.is_empty() {
@@ -169,6 +195,7 @@ pub fn read_workbook(pkg: &Package) -> Result<WorkbookMeta, Error> {
     for_each(&buf, b"sheet", |a, _| {
         let name = attr_str(a, b"name").unwrap_or_default();
         let hidden = matches!(attr(a, b"state"), Some(b"hidden") | Some(b"veryHidden"));
+        let very_hidden = attr(a, b"state") == Some(b"veryHidden");
         let this_tab = tab;
         tab += 1;
         let Some(rid) = attr_str(a, b"r:id") else { return };
@@ -180,7 +207,7 @@ pub fn read_workbook(pkg: &Package) -> Result<WorkbookMeta, Error> {
                 active = Some(sheets.len());
             }
             let id = attr(a, b"sheetId").and_then(parse_u32).unwrap_or(0);
-            sheets.push(SheetMeta { name, hidden, id, path: rel.target.clone() });
+            sheets.push(SheetMeta { name, hidden, id, path: rel.target.clone(), tab: this_tab, very_hidden });
         }
     });
     // Aba ativa escondida ou de gráfico: a primeira visível.

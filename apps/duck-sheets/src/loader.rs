@@ -195,7 +195,7 @@ fn load_csv(path: &PathBuf, send: &(dyn Fn(Msg) + Sync), t0: Instant) -> Result<
     let sheet = duck_xlsx::csv::read_csv(path).map_err(|e| e.to_string())?;
     let bytes = std::fs::metadata(path).map_or(0, |m| m.len());
     send(Msg::Opened {
-        sheets: vec![SheetInfo { name: sheet.name.clone(), hidden: false, xml_bytes: bytes, objects: false }],
+        sheets: vec![SheetInfo { name: sheet.name.clone(), xml_bytes: bytes, ..Default::default() }],
         active: 0,
         styles: Arc::new(Styles::default()),
         strings: Arc::new(StringTable::new()),

@@ -20,7 +20,10 @@ pub fn read_extras(pkg: &Package, meta: &WorkbookMeta) -> BookExtras {
         unescape_into(body, &mut formula);
         out.names.push(DefinedName {
             name,
-            sheet: attr(a, b"localSheetId").and_then(parse_u32),
+            // `localSheetId` conta também as abas de gráfico.
+            sheet: attr(a, b"localSheetId")
+                .and_then(parse_u32)
+                .map(|t| meta.sheets.iter().position(|s| s.tab == t as usize).map_or(u32::MAX, |i| i as u32)),
             formula,
             hidden: attr(a, b"hidden").is_some_and(|v| v == b"1" || v == b"true"),
         });

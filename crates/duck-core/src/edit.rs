@@ -29,8 +29,9 @@ impl RawCell {
 }
 
 /// Valor novo de uma célula.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum CellValue {
+    #[default]
     Empty,
     Number(f64),
     Text(String),
@@ -69,6 +70,14 @@ pub struct Edits {
     /// Tabelas dinâmicas ou segmentações de dados mudadas (as partes delas
     /// são remendadas ao salvar).
     pub pivots: bool,
+    /// Células movidas, inseridas ou excluídas (só células): quantos `shifts`
+    /// já tinham sido feitos e a operação, em ordem.
+    pub cell_ops: Vec<(usize, crate::cells::CellOp)>,
+    /// Cor da guia mudada (`<tabColor>` do `<sheetPr>`).
+    pub tab_color: bool,
+    /// Grupos de fórmula compartilhada (`si`) com o texto mudado: o `<f>`
+    /// original não vale mais para nenhuma célula do grupo.
+    pub retexted: BTreeSet<u32>,
 }
 
 impl Edits {
@@ -85,9 +94,11 @@ impl Edits {
             && self.tables.is_empty()
             && self.rewrite.is_empty()
             && !self.pivots
+            && !self.tab_color
+            && self.cell_ops.is_empty()
     }
 
-    fn mark(&mut self, row: u32, col: u32) {
+    pub(crate) fn mark(&mut self, row: u32, col: u32) {
         self.cells.entry(row).or_default().insert(col);
     }
 
@@ -639,6 +650,17 @@ pub enum Command {
     Shift(crate::Shift, OpsHandle),
     /// O layout inteiro de volta (desfazer de uma mudança de estrutura).
     Layout(Box<crate::Layout>),
+    /// Texto novo de definições de fórmula (índice, texto): referências a
+    /// uma aba renomeada ou excluída (ver [`Sheet::formula_text_changes`]).
+    FormulaTexts(Vec<(u32, String)>),
+    /// Células movidas ou deslocadas (só o registro para o gravador; `true` =
+    /// desfazer). As células andam por outros comandos do grupo.
+    CellOp(crate::cells::CellOp, bool),
+    /// Cor da guia (`None` = sem cor).
+    TabColor(Option<crate::Color>),
+    /// Trechos de texto rico de células de texto recém-escritas (depois de um
+    /// `SetCells` no mesmo grupo; o inverso dele já desfaz tudo).
+    RichText(Vec<(u32, u32, Vec<crate::RichRun>)>),
     /// Vários, em ordem (o inverso vem na ordem contrária).
     Group(Vec<Command>),
 }
@@ -696,6 +718,18 @@ impl Command {
                     }
                 }
                 Command::Layout(Box::new(old))
+            }
+            Command::FormulaTexts(list) => Command::FormulaTexts(sheet.set_formula_texts(list)),
+            Command::CellOp(op, undo) => {
+                sheet.note_cell_op(op, undo);
+                Command::CellOp(op, !undo)
+            }
+            Command::TabColor(c) => Command::TabColor(sheet.set_tab_color(c)),
+            Command::RichText(list) => {
+                for (r, c, runs) in list {
+                    sheet.set_rich_runs(r, c, runs);
+                }
+                Command::Group(Vec::new())
             }
             Command::Group(list) => {
                 let mut inv: Vec<Command> = list.into_iter().map(|c| c.apply(sheet)).collect();
