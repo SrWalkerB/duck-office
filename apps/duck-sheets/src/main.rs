@@ -47,6 +47,9 @@ mod ribbon;
 mod search;
 mod shape;
 mod tablestyle;
+mod tabs;
+#[cfg(test)]
+mod testing;
 mod theme;
 mod zoombar;
 

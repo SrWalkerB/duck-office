@@ -462,6 +462,7 @@ pub enum Event {
         button: MouseButton,
         x: f64,
         y: f64,
+        modifiers: Modifiers,
     },
     MouseLeft,
     Wheel {
@@ -707,7 +708,7 @@ impl<A: App> ApplicationHandler<()> for Runner<'_, A> {
                         let clicks = self.click_count(button);
                         Event::MouseDown { button, x, y, modifiers: self.modifiers, clicks }
                     }
-                    ElementState::Released => Event::MouseUp { button, x, y },
+                    ElementState::Released => Event::MouseUp { button, x, y, modifiers: self.modifiers },
                 };
                 self.dispatch(event_loop, ev);
             }

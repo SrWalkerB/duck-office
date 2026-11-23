@@ -94,6 +94,22 @@ impl Calc {
         Self { extras, stale: true, pending: Pending::Volatile, ..Default::default() }
     }
 
+    /// Abas entraram, saíram ou mudaram de lugar: `f` diz a posição nova de
+    /// cada uma.
+    pub fn remap(&mut self, f: impl Fn(usize) -> Option<usize>) {
+        self.cancel();
+        self.stale = true;
+        self.engine = None;
+        self.graph = None;
+        self.versions = self.versions.drain().filter_map(|(i, v)| Some((f(i)?, v))).collect();
+        let map = |s: Spills| -> Spills {
+            s.into_iter().filter_map(|((i, r, c), v)| Some(((f(i as usize)? as u32, r, c), v))).collect()
+        };
+        self.spills = map(std::mem::take(&mut self.spills));
+        self.blocked = map(std::mem::take(&mut self.blocked));
+        self.pending = Pending::All;
+    }
+
     pub fn version(&self, sheet: usize) -> u64 {
         self.versions.get(&sheet).copied().unwrap_or(0)
     }
@@ -111,6 +127,7 @@ impl Calc {
                 *self.versions.entry(sheet).or_default() += 1;
                 self.pending.add(Pending::Cells(cmd.cells().into_iter().map(|(r, c)| (s, r, c)).collect()));
             }
+            Command::FormulaTexts(_) => self.stale = true,
             Command::Shift(..) | Command::SortRows { .. } => {
                 self.stale = true;
                 *self.versions.entry(sheet).or_default() += 1;

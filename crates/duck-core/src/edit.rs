@@ -609,6 +609,17 @@ impl std::fmt::Debug for OpsHandle {
     }
 }
 
+/// Mudança no documento inteiro (a lista de abas), que só quem tem o
+/// documento sabe aplicar. Vai no histórico junto com os comandos das abas.
+#[derive(Clone)]
+pub struct BookOp(pub std::sync::Arc<dyn std::any::Any + Send + Sync>);
+
+impl std::fmt::Debug for BookOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BookOp")
+    }
+}
+
 /// Uma mudança numa aba. [`Command::apply`] devolve o comando que desfaz.
 #[derive(Clone, Debug)]
 pub enum Command {
@@ -661,6 +672,9 @@ pub enum Command {
     /// Trechos de texto rico de células de texto recém-escritas (depois de um
     /// `SetCells` no mesmo grupo; o inverso dele já desfaz tudo).
     RichText(Vec<(u32, u32, Vec<crate::RichRun>)>),
+    /// Mudança na lista de abas: quem aplica é o dono do documento (aqui não
+    /// muda nada).
+    Book(BookOp),
     /// Vários, em ordem (o inverso vem na ordem contrária).
     Group(Vec<Command>),
 }
@@ -724,6 +738,7 @@ impl Command {
                 sheet.note_cell_op(op, undo);
                 Command::CellOp(op, !undo)
             }
+            Command::Book(op) => Command::Book(op),
             Command::TabColor(c) => Command::TabColor(sheet.set_tab_color(c)),
             Command::RichText(list) => {
                 for (r, c, runs) in list {

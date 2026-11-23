@@ -108,6 +108,11 @@ pub(crate) fn sheet_mut(slot: &mut Slot) -> Option<&mut Sheet> {
     Arc::get_mut(arc)
 }
 
+/// Nenhuma aba está sendo lida por uma thread.
+fn free(doc: &mut crate::app::Doc) -> bool {
+    doc.sheets.iter_mut().all(|s| sheet_mut(s).is_some())
+}
+
 /// O formato sugerido pelo que foi digitado (`new`) substitui o da célula
 /// (`current`)? Como no Excel: sempre numa célula "Geral"; datas, horas e
 /// percentuais também trocam um formato de outro tipo (uma data digitada
@@ -232,9 +237,18 @@ impl SheetsApp {
         let user_cells: Vec<(usize, u32, u32)> =
             step.iter().flat_map(|(i, c)| c.cells().into_iter().map(move |(r, cc)| (*i, r, cc))).collect();
         let shifted = step.iter().any(|(_, c)| matches!(c, Command::Shift(..)));
+        let book = crate::tabs::has_book(&step);
+        if book && !free(doc) {
+            self.message = "Uma aba está em uso; tente de novo".into();
+            return false;
+        }
         let mut inverse = Vec::with_capacity(step.len());
         let mut touched = Vec::new();
         for (idx, cmd) in step {
+            if let Command::Book(op) = &cmd {
+                inverse.extend(crate::tabs::apply(doc, op).map(|c| (idx, c)));
+                continue;
+            }
             let st = affected(&cmd);
             let Some(sheet) = doc.sheets.get_mut(idx).and_then(sheet_mut) else { continue };
             doc.calc.note(idx, &cmd);
@@ -248,10 +262,8 @@ impl SheetsApp {
         doc.history.undo.push(inverse);
         doc.history.redo.clear();
         doc.dirty = true;
-        for (idx, st) in touched {
-            self.after_change(idx, st);
-        }
-        if shifted {
+        self.after_step(touched, book);
+        if shifted || book {
             self.init_spills();
         } else {
             self.check_spills(&user_cells);
@@ -259,6 +271,31 @@ impl SheetsApp {
         self.refresh_charts();
         self.calc_kick();
         true
+    }
+
+    /// Depois de aplicar um passo: atualiza as abas tocadas. Com a lista de
+    /// abas mudada, os índices do passo não valem mais: atualiza todas.
+    fn after_step(&mut self, touched: Vec<(usize, Affected)>, book: bool) {
+        if !book {
+            for (idx, st) in touched {
+                self.after_change(idx, st);
+            }
+            return;
+        }
+        let rebuild = touched.iter().any(|(_, a)| a.rebuild);
+        let n = self.doc.as_ref().map_or(0, |d| d.sheets.len());
+        for i in 0..n {
+            self.after_change(i, Affected { rebuild, ..Default::default() });
+        }
+        self.clip = None;
+        self.tab_edit = None;
+        self.tab_revealed = None;
+        self.drag = None;
+        if let Some(doc) = &mut self.doc {
+            doc.pivots.cube = Default::default();
+        }
+        self.refresh_table_slicers();
+        self.clamp_scroll();
     }
 
     pub fn undo(&mut self) {
@@ -289,14 +326,16 @@ impl SheetsApp {
             f.done_query.clear();
         }
         let Some(doc) = &mut self.doc else { return };
-        let (from, to) = if undo {
-            (&mut doc.history.undo, &mut doc.history.redo)
-        } else {
-            (&mut doc.history.redo, &mut doc.history.undo)
-        };
+        let from = if undo { &mut doc.history.undo } else { &mut doc.history.redo };
         let Some(step) = from.pop() else { return };
         // Confere antes que todas as abas do passo estão livres.
-        if step.iter().any(|(i, _)| doc.sheets.get_mut(*i).and_then(sheet_mut).is_none()) {
+        let book = crate::tabs::has_book(&step);
+        let busy = if book {
+            doc.sheets.iter_mut().any(|s| sheet_mut(s).is_none())
+        } else {
+            step.iter().any(|(i, _)| doc.sheets.get_mut(*i).and_then(sheet_mut).is_none())
+        };
+        if busy {
             from.push(step);
             self.message = "A aba está em uso; tente de novo".into();
             return;
@@ -308,19 +347,22 @@ impl SheetsApp {
         let mut inverse = Vec::with_capacity(step.len());
         let mut touched = Vec::new();
         for (idx, cmd) in step {
+            if let Command::Book(op) = &cmd {
+                inverse.extend(crate::tabs::apply(doc, op).map(|c| (idx, c)));
+                continue;
+            }
             let st = affected(&cmd);
             doc.calc.note(idx, &cmd);
-            let sheet = doc.sheets.get_mut(idx).and_then(sheet_mut).expect("aba livre");
+            let Some(sheet) = doc.sheets.get_mut(idx).and_then(sheet_mut) else { continue };
             inverse.push((idx, cmd.apply(sheet)));
             touched.push((idx, st));
         }
         inverse.reverse();
-        to.push(inverse);
+        let (undo_list, redo_list) = (&mut doc.history.undo, &mut doc.history.redo);
+        if undo { redo_list } else { undo_list }.push(inverse);
         doc.dirty = true;
-        for (idx, st) in touched {
-            self.after_change(idx, st);
-        }
-        if shifted {
+        self.after_step(touched, book);
+        if shifted || book {
             self.init_spills();
         } else {
             self.check_spills(&user_cells);
@@ -339,7 +381,7 @@ impl SheetsApp {
         self.stats = None;
         let Some(doc) = &mut self.doc else { return };
         let mdw = doc.mdw;
-        let slot = &mut doc.sheets[idx];
+        let Some(slot) = doc.sheets.get_mut(idx) else { return };
         if aff.rebuild {
             // Linhas/colunas andaram: a visão (tamanhos, mesclagens, estilos
             // de linha e coluna) é refeita do layout novo.
@@ -639,6 +681,9 @@ impl SheetsApp {
         let edits = std::mem::take(&mut self.opts.edits);
         let mut clipboard = String::new();
         for e in &edits {
+            if self.scripted_tabs(e) {
+                continue;
+            }
             // `formatar:negrito:A1:B2` (ver `format::by_name`).
             if let Some(rest) = e.strip_prefix("formatar:")
                 && let Some((name, range)) = rest.split_once(':')
@@ -974,6 +1019,7 @@ impl SheetsApp {
         let sheets: Vec<Option<Arc<Sheet>>> =
             doc.sheets.iter().map(|s| if s.preview { None } else { s.data.clone() }).collect();
         let (strings, styles) = (doc.strings.clone(), doc.styles.clone());
+        let tabs = Some(crate::tabs::plan(doc));
         let (tx, rx) = channel();
         let Some(waker) = self.waker.clone() else { return };
         let d = dest.clone();
@@ -989,7 +1035,7 @@ impl SheetsApp {
                         &refs,
                         &strings,
                         &styles,
-                        &duck_xlsx::SaveOptions::default(),
+                        &duck_xlsx::SaveOptions { tabs, ..Default::default() },
                     )
                 });
                 // As abas voltam a ter um dono só antes de avisar a janela.
@@ -1046,6 +1092,7 @@ impl SheetsApp {
                     st.new_num_fmts.clear();
                     doc.path = job.dest.clone();
                     doc.dirty = false;
+                    crate::tabs::saved(doc, &rep);
                 }
                 self.remember_recent(&job.dest);
                 self.message = format!(
@@ -1202,6 +1249,10 @@ impl SheetsApp {
             if !cmds.is_empty() {
                 step.push((i, Command::Group(cmds)));
             }
+        }
+        let names = duck_calc::tabs::shift_names(&doc.calc.extras, shift, &name);
+        if names.names != doc.calc.extras.names {
+            step.push((doc.active, crate::tabs::book(crate::tabs::TabOp::Refs(names))));
         }
         let t = Instant::now();
         if self.run_step(step) {

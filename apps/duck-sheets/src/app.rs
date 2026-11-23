@@ -158,6 +158,8 @@ pub struct Slot {
     /// `data` é só a prévia (primeiras linhas).
     pub preview: bool,
     pub view: Option<View>,
+    /// De onde vem o XML da aba ao salvar.
+    pub origin: duck_xlsx::TabOrigin,
 }
 
 pub struct Doc {
@@ -389,6 +391,11 @@ pub enum Drag {
     },
     /// Apontando um intervalo para a fórmula em edição.
     Point,
+    /// Arrastando a guia da aba `sheet` (x do clique).
+    Tab {
+        sheet: usize,
+        x: f32,
+    },
     /// Barra deslizante do zoom.
     Zoom,
     /// Arrastando a borda direita da coluna `col` (tamanho inicial e x do mouse).
@@ -469,6 +476,10 @@ pub struct SheetsApp {
     pub tabbar: TabBar,
     /// Aba que a barra já trouxe para a vista.
     pub tab_revealed: Option<usize>,
+    /// Guia sendo renomeada, a do menu aberto e o maior `sheetId` já usado.
+    pub tab_edit: Option<crate::tabs::TabEdit>,
+    pub tab_menu: Option<usize>,
+    pub last_tab_id: u32,
     pub drag: Option<Drag>,
     pub mouse: (f32, f32),
     pub message: String,
@@ -532,6 +543,11 @@ pub struct SheetsApp {
 impl SheetsApp {
     pub fn new(t0: Instant, opts: Opts) -> Self {
         let gpu_early = Gfx::start_early();
+        Self::build(t0, opts, gpu_early)
+    }
+
+    /// Sem abrir a GPU (`None`): também serve para os testes.
+    pub(crate) fn build(t0: Instant, opts: Opts, gpu_early: Option<duck_gfx::EarlyGpu>) -> Self {
         let fonts_loading = std::thread::spawn(|| TextSystem::new_fast(UI_FONT_PX, ATLAS));
         let bench = opts.bench.then(|| Bench {
             phase: 0,
@@ -570,6 +586,9 @@ impl SheetsApp {
             find: None,
             tabbar: TabBar::default(),
             tab_revealed: None,
+            tab_edit: None,
+            tab_menu: None,
+            last_tab_id: 0,
             drag: None,
             mouse: (0.0, 0.0),
             message: String::new(),
@@ -690,7 +709,13 @@ impl SheetsApp {
                         path: path.clone(),
                         sheets: sheets
                             .into_iter()
-                            .map(|info| Slot { info, data: None, preview: false, view: None })
+                            .map(|info| Slot {
+                                origin: duck_xlsx::TabOrigin::File(info.part.clone()),
+                                info,
+                                data: None,
+                                preview: false,
+                                view: None,
+                            })
                             .collect(),
                         active,
                         styles,
@@ -1429,6 +1454,9 @@ impl SheetsApp {
             }
             return;
         }
+        if self.tab_edit.is_some() {
+            self.tab_edit_commit();
+        }
         // Barra de fórmulas: edita a célula ativa ali.
         if g.formula.contains(x, y) && self.doc.as_ref().and_then(|d| d.current()).is_some() {
             match &mut self.editor {
@@ -1472,11 +1500,8 @@ impl SheetsApp {
         }
         // Abas.
         if g.tabs.contains(x, y) {
-            if let Some(i) = self.tabbar.hit(x - g.tabs.x0) {
-                let idx = self.visible_sheet_indices().get(i).copied();
-                if let Some(idx) = idx {
-                    self.switch_sheet(idx);
-                }
+            if let Some(sheet) = self.tab_click(&g, x, y, clicks) {
+                self.drag = Some(Drag::Tab { sheet, x });
             }
             return;
         }
@@ -1715,7 +1740,7 @@ impl SheetsApp {
                 let t = ((x - grab - g.hscroll.x0) / track.max(1.0)).clamp(0.0, 1.0) as f64;
                 v.scroll_x = min + t * (max - min);
             }
-            Drag::Zoom => {}
+            Drag::Zoom | Drag::Tab { .. } => {}
             Drag::Select | Drag::Cols | Drag::Rows | Drag::Point => {
                 // Fora da grade: rola na direção do mouse.
                 let main = g.quads[3].rect;
@@ -1909,6 +1934,9 @@ impl SheetsApp {
             }
             return true;
         }
+        if let Some(handled) = self.tab_edit_key(cx.clipboard(), &key, mods, text.as_deref()) {
+            return handled;
+        }
         if let Some(handled) = self.editor_key(cx.clipboard(), &key, mods, text.as_deref()) {
             return handled;
         }
@@ -1996,6 +2024,10 @@ impl SheetsApp {
             },
             Key::F(3) => self.find_next(cx.waker(), shift),
             Key::F(2) => self.start_edit(None, false),
+            Key::F(11) if shift => {
+                let at = self.doc.as_ref().map(|d| d.active);
+                self.tab_new(None, at);
+            }
             // F9: recalcula os voláteis; Ctrl+Alt+F9 (ou Shift+F9): tudo.
             Key::F(9) => {
                 let all = shift || (mods.ctrl && mods.alt);
@@ -2368,12 +2400,22 @@ impl App for SheetsApp {
             }
             Event::MouseDown { button: MouseButton::Right, x, y, .. } => {
                 self.popup = None;
-                if self.prompt.is_none() {
+                if self.prompt.is_none() && self.geom().tabs.contains(x as f32, y as f32) {
+                    self.tab_context_menu(x as f32, y as f32);
+                } else if self.prompt.is_none() {
                     self.context_menu(x as f32, y as f32);
                 }
                 true
             }
-            Event::MouseUp { button: MouseButton::Left, .. } => match self.drag.take() {
+            Event::MouseUp { button: MouseButton::Left, modifiers, .. } => match self.drag.take() {
+                Some(Drag::Tab { sheet, x }) => {
+                    let g = self.geom();
+                    if (self.mouse.0 - x).abs() > 6.0 * g.s {
+                        let slot = self.tab_drop_slot(&g, self.mouse.0);
+                        self.tab_drop(sheet, slot, modifiers.ctrl || modifiers.logo);
+                    }
+                    true
+                }
                 Some(Drag::ResizeCol { col, .. }) => {
                     self.commit_col_size(col);
                     true

@@ -715,6 +715,31 @@ impl TabBar {
         }
     }
 
+    /// Largura visível ocupada pelas abas no último desenho (já rolada).
+    pub fn content_w(&self) -> f32 {
+        self.content_w - self.scroll
+    }
+
+    /// Posição (x0, x1) da aba `i` no último desenho, relativa à barra.
+    pub fn span(&self, i: usize) -> Option<(f32, f32)> {
+        self.spans.get(i).map(|&(a, b)| (a - self.scroll, b - self.scroll))
+    }
+
+    /// Entre que abas cai o ponto `x` (0 = antes da primeira).
+    pub fn slot(&self, x: f32) -> usize {
+        let x = x + self.scroll;
+        self.spans.iter().take_while(|&&(a, b)| x > (a + b) / 2.0).count()
+    }
+
+    /// Posição da divisa `k` (ver [`TabBar::slot`]).
+    pub fn slot_x(&self, k: usize) -> f32 {
+        let x = match self.spans.get(k) {
+            Some(s) => s.0,
+            None => self.content_w,
+        };
+        x - self.scroll
+    }
+
     /// Aba sob o ponto `x` (relativo ao início da barra), pelas posições do último desenho.
     pub fn hit(&self, x: f32) -> Option<usize> {
         let x = x + self.scroll;

@@ -78,6 +78,7 @@ impl SheetsApp {
                 }
             }
             Act::Drop(_) => {}
+            Act::Tab(t) => self.run_tab_act(t),
             Act::Shift { insert, cols } => {
                 let axis = if cols { duck_core::Axis::Cols } else { duck_core::Axis::Rows };
                 self.shift_selection(insert, Some(axis));
@@ -614,6 +615,9 @@ impl SheetsApp {
             self.scripted_typing(&t);
         }
         let Some(m) = self.opts.menu.take() else { return };
+        if self.scripted_tab_menu(&m) {
+            return;
+        }
         let g = self.geom();
         if m == "filtro" {
             let cur = self.doc.as_ref().and_then(|d| d.current()).map(|(_, v)| v.cur);

@@ -42,6 +42,8 @@ pub enum Kind {
     List(Vec<Item>),
     /// Paleta de cores: do texto (`true`) ou do fundo.
     Palette(bool),
+    /// Paleta da cor da guia.
+    TabPalette,
 }
 
 /// Menu aberto.
@@ -93,6 +95,15 @@ impl Popup {
         }
     }
 
+    /// Paleta da cor da guia, acima de `b` (as guias ficam embaixo).
+    pub fn tab_palette(b: Rect, g: &Geom) -> Self {
+        let mut p = Self::palette(false, b, g);
+        let (w, h) = (p.rect.w(), p.rect.h());
+        p.kind = Kind::TabPalette;
+        p.rect = Rect::new(p.rect.x0, b.y0 - h - 2.0 * g.s, p.rect.x0 + w, b.y0 - 2.0 * g.s);
+        p
+    }
+
     /// Retângulos dos itens de uma lista.
     fn rows(&self, s: f32) -> Vec<(Rect, Option<&Item>)> {
         let Kind::List(items) = &self.kind else { return Vec::new() };
@@ -118,7 +129,7 @@ impl Popup {
             Kind::List(_) => {
                 self.rows(s).into_iter().find(|r| r.0.contains(x, y)).and_then(|r| r.1).and_then(|i| i.act)
             }
-            Kind::Palette(text) => {
+            Kind::Palette(_) | Kind::TabPalette => {
                 let (lx, ly) = ((x - self.rect.x0) / s, (y - self.rect.y0) / s);
                 let color = if ly < 26.0 {
                     None
@@ -130,7 +141,11 @@ impl Popup {
                     }
                     Some(PALETTE[(row as usize) * 10 + col as usize])
                 };
-                Some(Act::Fmt(if *text { Fmt::FontColor(color) } else { Fmt::FillColor(color) }))
+                Some(match self.kind {
+                    Kind::TabPalette => Act::Tab(crate::tabs::TabAct::SetColor(color)),
+                    Kind::Palette(true) => Act::Fmt(Fmt::FontColor(color)),
+                    _ => Act::Fmt(Fmt::FillColor(color)),
+                })
             }
         }
     }
@@ -178,8 +193,12 @@ impl Popup {
                     }
                 }
             }
-            Kind::Palette(text) => {
-                let label = if *text { "Automática" } else { "Sem preenchimento" };
+            Kind::Palette(_) | Kind::TabPalette => {
+                let label = match self.kind {
+                    Kind::Palette(true) => "Automática",
+                    Kind::TabPalette => "Sem cor",
+                    _ => "Sem preenchimento",
+                };
                 let top = Rect::new(r.x0, r.y0, r.x1, r.y0 + 26.0 * s);
                 if top.contains(mouse.0, mouse.1) {
                     p.fill(top, &all, th.hover);

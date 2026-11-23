@@ -563,12 +563,27 @@ impl SheetsApp {
             }
         }
         let tabs_rect = geom.tabs;
-        self.tabbar.draw(&mut p, tabs_rect, &tabs, active_tab, ui, 14.0 * s, &th.tabs);
+        let room = crate::tabs::strip(&geom, 0.0).0;
+        p.fill(tabs_rect, &tabs_rect, th.tabs.background);
+        self.tabbar.draw(&mut p, room, &tabs, active_tab, ui, 14.0 * s, &th.tabs);
         // Aba ativa nova: traz para a vista (depois o usuário rola à vontade).
         let active_sheet = self.doc.as_ref().map(|d| d.active);
         if tabs.len() > 1 && self.tab_revealed != active_sheet {
-            self.tabbar.reveal(active_tab, tabs_rect.w());
+            self.tabbar.reveal(active_tab, room.w());
             self.tab_revealed = active_sheet;
+        }
+        if let Some(doc) = &self.doc {
+            let edit = self.tab_edit.as_ref().and_then(|e| {
+                let k = (0..e.sheet).filter(|&i| !doc.sheets[i].info.hidden).count();
+                (e.sheet < doc.sheets.len()).then_some((k, &e.input))
+            });
+            let drop = match self.drag {
+                Some(crate::app::Drag::Tab { x, .. }) if (self.mouse.0 - x).abs() > 6.0 * s => {
+                    Some(self.tabbar.slot(self.mouse.0 - room.x0))
+                }
+                _ => None,
+            };
+            crate::tabs::draw(&mut p, &geom, &self.tabbar, edit, drop, self.mouse, ui, th);
         }
         p.fill(Rect::new(tabs_rect.x1, tabs_rect.y0, geom.w, tabs_rect.y1), &Rect::everything(), th.bg);
         p.fill(

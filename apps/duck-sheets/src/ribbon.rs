@@ -36,6 +36,8 @@ pub enum Act {
     Quit,
     /// Abre uma lista ou paleta.
     Drop(Drop),
+    /// Guias das abas.
+    Tab(crate::tabs::TabAct),
     Shift {
         insert: bool,
         cols: bool,
