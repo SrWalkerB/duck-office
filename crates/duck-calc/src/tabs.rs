@@ -262,6 +262,18 @@ pub fn insert(extras: &BookExtras, at: usize) -> BookRefs {
     refs
 }
 
+/// Linhas ou colunas inseridas ou apagadas na aba `sheet`: os nomes definidos
+/// que apontam para ela acompanham. (As fontes das dinâmicas andam no layout.)
+pub fn shift_names(extras: &BookExtras, s: duck_core::Shift, sheet: &str) -> BookRefs {
+    let mut refs = BookRefs::of(extras);
+    for n in &mut refs.names {
+        if let Some((f, _)) = crate::adjust_refs(&n.formula, s, false, sheet) {
+            n.formula = f;
+        }
+    }
+    refs
+}
+
 /// Mover a aba `from` para a posição `to`.
 pub fn reorder(extras: &BookExtras, from: usize, to: usize) -> BookRefs {
     let mut refs = BookRefs::of(extras);
@@ -534,6 +546,20 @@ mod tests {
         // A única visível não sai.
         a.hidden = true;
         assert!(delete(&[&a, &b], &extras, 1).is_err());
+    }
+
+    #[test]
+    fn names_follow_rows() {
+        let mut extras = BookExtras {
+            names: vec![name("Total", None, "Dados!$A$5:$A$9"), name("Outro", None, "Conta!$A$5")],
+            ..Default::default()
+        };
+        let s = duck_core::Shift { axis: duck_core::Axis::Rows, at: 2, n: 3, insert: true };
+        let undo = shift_names(&extras, s, "Dados").swap(&mut extras);
+        assert_eq!(extras.names[0].formula, "Dados!$A$8:$A$12");
+        assert_eq!(extras.names[1].formula, "Conta!$A$5");
+        undo.swap(&mut extras);
+        assert_eq!(extras.names[0].formula, "Dados!$A$5:$A$9");
     }
 
     #[test]

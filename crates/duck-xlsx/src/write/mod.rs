@@ -130,7 +130,8 @@ impl Book {
         let views = || sheets.iter().zip(&layouts).filter_map(|(s, l)| Some(((*s)?, (*l)?)));
         let new_styles = styles.has_new();
         let values = sheets.iter().flatten().any(|s| s.edits().values || s.edits().formulas);
-        let values = values || work.structure;
+        let moved = sheets.iter().flatten().any(|s| !s.edits().cell_ops.is_empty());
+        let values = values || work.structure || moved;
         let formulas = sheets.iter().flatten().any(|s| s.edits().formulas) || work.structure;
         let calc_chain = self.meta.calc_chain.as_deref().filter(|_| formulas);
 
@@ -141,19 +142,15 @@ impl Book {
             // Nomes definidos (áreas de impressão, intervalos nomeados) andam
             // com as linhas/colunas inseridas ou apagadas.
             // (com abas mudadas, isso já foi feito na preparação).
-            let changes: Vec<(&str, &[duck_core::Shift])> = self
+            let changes: Vec<(&str, &duck_core::Edits)> = self
                 .meta
                 .sheets
                 .iter()
                 .zip(sheets)
                 .filter(|_| !tabs_changed)
-                .filter_map(|(m, s)| {
-                    s.filter(|s| s.edits().structure).map(|s| (m.name.as_str(), &s.edits().shifts[..]))
-                })
+                .filter_map(|(m, s)| Some((m.name.as_str(), (*s)?.edits())))
                 .collect();
-            if !changes.is_empty() {
-                wb = regen::defined_names(&wb, &changes);
-            }
+            wb = workbook::moved_names(wb, &changes);
             small.insert(self.meta.path.clone(), force_full_calc(&wb));
             rep.full_calc = true;
         }
@@ -172,7 +169,7 @@ impl Book {
         // dos caches de tabela dinâmica; gráficos com referências mudadas.
         let mut charts_done: std::collections::HashSet<&str> = Default::default();
         for (s, l) in views() {
-            if s.edits().structure {
+            if s.edits().structure || !s.edits().cell_ops.is_empty() {
                 let mut parts: Vec<(&str, Vec<duck_core::drawing::Anchor>)> = Vec::new();
                 for a in &l.drawing_anchors {
                     match parts.iter_mut().find(|p| p.0 == a.part) {

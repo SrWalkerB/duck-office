@@ -39,7 +39,7 @@ pub fn cmd(args: &[String]) -> Res {
         println!("{n} edições na aba {} ({} linhas)", sheet + 1, wb.sheets[sheet].rows());
     }
     if structure {
-        let (sheet, ms) = restructure(&mut wb.sheets);
+        let (sheet, ms) = restructure(&mut wb);
         println!("linhas e colunas inseridas/apagadas na aba {} em {ms:.0} ms", sheet + 1);
     }
 
@@ -190,7 +190,7 @@ fn shift_cells(wb: &mut duck_core::Workbook) -> Result<String, String> {
         ];
         for op in ops {
             let refs: Vec<&Sheet> = wb.sheets.iter().collect();
-            let (cmds, _) = match cellops::plan(&refs, &wb.shared_strings, &wb.extras, i, op) {
+            let (cmds, book_refs) = match cellops::plan(&refs, &wb.shared_strings, &wb.extras, i, op) {
                 Ok(x) => x,
                 Err(_) => {
                     refused += 1;
@@ -225,6 +225,7 @@ fn shift_cells(wb: &mut duck_core::Workbook) -> Result<String, String> {
             if snap(wb) != after {
                 return Err(format!("aba {}: refazer {op:?} deu outro resultado", i + 1));
             }
+            book_refs.swap(&mut wb.extras);
             done += 1;
             cells += touched.len();
         }
@@ -444,8 +445,9 @@ fn check_tabs(src: &Path, out: &Path, wb: &duck_core::Workbook, args: &[String])
 }
 
 /// Insere e apaga linhas e colunas na maior aba (como o app faz).
-fn restructure(sheets: &mut [Sheet]) -> (usize, f64) {
+fn restructure(wb: &mut duck_core::Workbook) -> (usize, f64) {
     use duck_core::{Axis, Command, OpsHandle, Shift};
+    let sheets = &mut wb.sheets;
     let (i, _) = sheets
         .iter()
         .enumerate()
@@ -465,6 +467,7 @@ fn restructure(sheets: &mut [Sheet]) -> (usize, f64) {
         let ops =
             OpsHandle(std::sync::Arc::new(duck_calc::ShiftOps { shift, sheet: name.clone(), own: true }));
         Command::Shift(shift, ops).apply(s);
+        duck_calc::tabs::shift_names(&wb.extras, shift, &name).swap(&mut wb.extras);
     }
     (i, t.elapsed().as_secs_f64() * 1000.0)
 }

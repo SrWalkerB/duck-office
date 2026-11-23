@@ -138,6 +138,27 @@ impl TabPlan {
     }
 }
 
+/// Os nomes definidos do `workbook.xml` ajustados às linhas e colunas
+/// inseridas ou apagadas e às células movidas, na ordem em que foi feito.
+pub(super) fn moved_names(wb: Vec<u8>, sheets: &[(&str, &duck_core::Edits)]) -> Vec<u8> {
+    let mut wb = wb;
+    for (name, e) in sheets {
+        let mut done = 0;
+        for (at, op) in &e.cell_ops {
+            if *at > done {
+                wb = super::regen::defined_names(&wb, &[(name, &e.shifts[done..*at])]);
+                done = *at;
+            }
+            let moved = |t: &str| duck_calc::cellops::adjust(t, op, false, name);
+            wb = map_texts(&wb, &|n| n == b"definedName", &moved).unwrap_or(wb);
+        }
+        if done < e.shifts.len() {
+            wb = super::regen::defined_names(&wb, &[(name, &e.shifts[done..])]);
+        }
+    }
+    wb
+}
+
 /// Desenhos VML das relações de uma aba.
 pub(super) fn vml_parts(rels: &[u8], part: &str) -> Vec<String> {
     parse_rels(rels, part).into_iter().filter(|r| r.kind.ends_with("/vmlDrawing")).map(|r| r.part).collect()
@@ -915,7 +936,7 @@ impl Builder<'_> {
     }
 
     /// `<sheets>`, nomes definidos e a aba ativa.
-    fn workbook(&mut self, plan: &TabPlan, shifts: &[(&str, &[duck_core::Shift])]) {
+    fn workbook(&mut self, plan: &TabPlan, edits: &[(&str, &duck_core::Edits)]) {
         let wb = std::mem::take(&mut self.wb);
         let meta = &self.book.meta.sheets;
         let rels = parse_rels(&self.wb_rels, &self.book.meta.path);
@@ -1019,7 +1040,7 @@ impl Builder<'_> {
             }
         }
         // Nomes definidos.
-        new = super::regen::defined_names(&new, shifts);
+        new = moved_names(new, edits);
         self.wb = self.names(&new, plan, &new_index, &model_index);
     }
 
@@ -1242,17 +1263,17 @@ pub(super) fn prepare(book: &Book, plan: &TabPlan, sheets: &[Option<&Sheet>]) ->
         b.drop_tabs(&gone);
     }
     // Mudanças de linhas e colunas nas abas do arquivo (nomes definidos).
-    let shifts: Vec<(&str, &[duck_core::Shift])> = plan
+    let edits: Vec<(&str, &duck_core::Edits)> = plan
         .tabs
         .iter()
         .zip(sheets)
         .filter_map(|(t, s)| {
             let TabOrigin::File(p) = &t.origin else { return None };
             let m = meta.sheets.iter().find(|m| m.path == *p)?;
-            s.filter(|s| s.edits().structure).map(|s| (m.name.as_str(), &s.edits().shifts[..]))
+            s.map(|s| (m.name.as_str(), s.edits()))
         })
         .collect();
-    b.workbook(plan, &shifts);
+    b.workbook(plan, &edits);
     if !gone.is_empty() {
         let before = b.reachable(false);
         let after = b.reachable(true);
