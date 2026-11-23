@@ -25,6 +25,7 @@ mod actions;
 mod app;
 mod axis;
 mod calc;
+mod cficon;
 mod chart;
 mod control;
 mod cube;

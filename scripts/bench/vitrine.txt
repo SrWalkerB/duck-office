@@ -1,6 +1,10 @@
 vitrine.dinâmicas = 0
 vitrine.dinâmicas: células iguais = 0
 vitrine.dinâmicas: mesmo layout = 0
+vitrine.formatação condicional: barras completas = 2
+vitrine.formatação condicional: entendidas = 19
+vitrine.formatação condicional: regras = 19
+vitrine.formatação condicional: ícones próprios = 1
 vitrine.fórmulas = 2
 vitrine.fórmulas iguais ao Excel = 1
 vitrine.gráficos: séries = 3

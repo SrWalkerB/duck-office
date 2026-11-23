@@ -468,7 +468,7 @@ pub(crate) fn parse_styles(buf: &[u8]) -> Styles {
 
 /// Um `<dxf>`: marcas de fonte presentes valem (`val="0"` desliga), o resto
 /// fica `None`. Preenchimento sólido de dxf vem em `bgColor`.
-fn dxf(c: &[u8]) -> Dxf {
+pub(crate) fn dxf(c: &[u8]) -> Dxf {
     let mut d = Dxf::default();
     if let Some(t) = find_tag(c, 0, b"font") {
         let f = inner(c, &t, b"font");

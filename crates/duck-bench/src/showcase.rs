@@ -328,9 +328,21 @@ fn recursos(st: &mut Strings) -> String {
     x.push_str(r#"</row><row r="4" s="28" customFormat="1">"#);
     s(&mut x, st, "A4", 28, "Linha inteira com estilo (as vazias também)");
     x.push_str("</row>");
-    let heads = ["Escala", "Barra", "Setas", "Maior que 5", "Linhas pares", "Repetidos", "3 maiores"];
+    let heads = [
+        "Escala",
+        "Barra",
+        "Setas",
+        "Maior que 5",
+        "Linhas pares",
+        "Repetidos",
+        "3 maiores",
+        "Ícones",
+        "Barra cheia",
+        "Negativos",
+    ];
     x.push_str(r#"<row r="5">"#);
-    for (i, h) in heads.iter().enumerate() {
+    let sets = ICON_COLS.iter().map(|c| c.0);
+    for (i, h) in heads.into_iter().chain(sets).enumerate() {
         s(&mut x, st, &format!("{}5", (b'A' + i as u8) as char), 2, h);
     }
     x.push_str("</row>");
@@ -345,9 +357,18 @@ fn recursos(st: &mut Strings) -> String {
         s(&mut x, st, &format!("E{r}"), 3, &format!("linha {r}"));
         s(&mut x, st, &format!("F{r}"), 3, names[k as usize]);
         n(&mut x, &format!("G{r}"), 3, v * 11.0);
+        // Ícones e barras da extensão do Excel 2010, e os outros conjuntos.
+        n(&mut x, &format!("H{r}"), 19, (k % 3) as f64 - 1.0);
+        n(&mut x, &format!("I{r}"), 3, v / 10.0);
+        n(&mut x, &format!("J{r}"), 3, v - 5.0);
+        for (i, (_, sets)) in ICON_COLS.iter().enumerate() {
+            n(&mut x, &format!("{}{r}", (b'K' + i as u8) as char), 19, (k as usize % sets) as f64);
+        }
         x.push_str("</row>");
     }
-    x.push_str(r#"<row r="17" ht="48" customHeight="1">"#);
+    x.push_str(r#"<row r="16">"#);
+    n(&mut x, "I16", 19, 0.6);
+    x.push_str(r#"</row><row r="17" ht="48" customHeight="1">"#);
     let rich = format!(
         "{RICH}<r><t xml:space=\"preserve\">Texto rico: </t></r><r><rPr><b/><sz val=\"11\"/><color rgb=\"FFC00000\"/><rFont val=\"Calibri\"/></rPr><t xml:space=\"preserve\">negrito vermelho, </t></r><r><rPr><i/><sz val=\"14\"/><color theme=\"4\"/><rFont val=\"Calibri\"/></rPr><t xml:space=\"preserve\">itálico maior, </t></r><r><rPr><strike/><sz val=\"11\"/><rFont val=\"Calibri\"/></rPr><t xml:space=\"preserve\">tachado</t></r><r><rPr><sz val=\"11\"/><rFont val=\"Calibri\"/></rPr><t xml:space=\"preserve\"> e m</t></r><r><rPr><vertAlign val=\"superscript\"/><sz val=\"11\"/><rFont val=\"Calibri\"/></rPr><t>2</t></r>"
     );
@@ -411,7 +432,7 @@ fn recursos(st: &mut Strings) -> String {
         n(&mut x, &format!("B{r}"), 0, r as f64);
         x.push_str("</row>");
     }
-    x.push_str("</sheetData>");
+    x.push_str(r#"</sheetData><mergeCells count="1"><mergeCell ref="I16:J16"/></mergeCells>"#);
     x.push_str(r#"<conditionalFormatting sqref="A6:A15"><cfRule type="colorScale" priority="1"><colorScale><cfvo type="min"/><cfvo type="percentile" val="50"/><cfvo type="max"/><color rgb="FFF8696B"/><color rgb="FFFFEB84"/><color rgb="FF63BE7B"/></colorScale></cfRule></conditionalFormatting>"#);
     x.push_str(r#"<conditionalFormatting sqref="B6:B15"><cfRule type="dataBar" priority="2"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar></cfRule></conditionalFormatting>"#);
     x.push_str(r#"<conditionalFormatting sqref="C6:C15"><cfRule type="iconSet" priority="3"><iconSet iconSet="3Arrows"><cfvo type="percent" val="0"/><cfvo type="percent" val="33"/><cfvo type="percent" val="67"/></iconSet></cfRule></conditionalFormatting>"#);
@@ -419,9 +440,51 @@ fn recursos(st: &mut Strings) -> String {
     x.push_str(r#"<conditionalFormatting sqref="E6:E15"><cfRule type="expression" dxfId="1" priority="5"><formula>MOD(ROW(),2)=0</formula></cfRule></conditionalFormatting>"#);
     x.push_str(r#"<conditionalFormatting sqref="F6:F15"><cfRule type="duplicateValues" dxfId="0" priority="6"/></conditionalFormatting>"#);
     x.push_str(r#"<conditionalFormatting sqref="G6:G15"><cfRule type="top10" dxfId="2" priority="7" rank="3"/></conditionalFormatting>"#);
-    x.push_str(r#"<hyperlinks><hyperlink ref="A18" location="Vitrine!D5" display="Ir para Vitrine!D5"/><hyperlink ref="C18" r:id="rId1" tooltip="Site de exemplo"/></hyperlinks><drawing r:id="rId3"/><tableParts count="1"><tablePart r:id="rId2"/></tableParts></worksheet>"#);
+    for (i, (set, count)) in ICON_COLS.iter().enumerate() {
+        let c = (b'K' + i as u8) as char;
+        let limits: String = (0..*count).map(|k| format!(r#"<cfvo type="num" val="{k}"/>"#)).collect();
+        let _ = write!(
+            x,
+            r#"<conditionalFormatting sqref="{c}6:{c}15"><cfRule type="iconSet" priority="{}"><iconSet iconSet="{set}" showValue="0">{limits}</iconSet></cfRule></conditionalFormatting>"#,
+            20 + i
+        );
+    }
+    for (refs, id, lo, hi) in [("I6:I16", BAR_FULL, "0", "1"), ("J6:J15", BAR_NEG, "-5", "5")] {
+        let _ = write!(
+            x,
+            r#"<conditionalFormatting sqref="{refs}"><cfRule type="dataBar" priority="8"><dataBar><cfvo type="num" val="{lo}"/><cfvo type="num" val="{hi}"/><color rgb="FF63C384"/></dataBar><extLst><ext uri="{{B025F937-C7B1-47D3-B67F-A62EFF666E3E}}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><x14:id>{id}</x14:id></ext></extLst></cfRule></conditionalFormatting>"#
+        );
+    }
+    x.push_str(r#"<hyperlinks><hyperlink ref="A18" location="Vitrine!D5" display="Ir para Vitrine!D5"/><hyperlink ref="C18" r:id="rId1" tooltip="Site de exemplo"/></hyperlinks><drawing r:id="rId3"/><tableParts count="1"><tablePart r:id="rId2"/></tableParts>"#);
+    x.push_str(r#"<extLst><ext uri="{78C0D931-6437-407d-A8EE-F0AAD7539E65}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><x14:conditionalFormattings>"#);
+    x.push_str(r#"<x14:conditionalFormatting xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><x14:cfRule type="iconSet" priority="9" id="{3D6E0A11-0C0B-4C52-9B0E-000000000003}"><x14:iconSet iconSet="3Arrows" showValue="0" custom="1"><x14:cfvo type="percent"><xm:f>0</xm:f></x14:cfvo><x14:cfvo type="num"><xm:f>0</xm:f></x14:cfvo><x14:cfvo type="num" gte="0"><xm:f>0</xm:f></x14:cfvo><x14:cfIcon iconSet="3TrafficLights1" iconId="0"/><x14:cfIcon iconSet="3Triangles" iconId="1"/><x14:cfIcon iconSet="3TrafficLights1" iconId="2"/></x14:iconSet></x14:cfRule><xm:sqref>H6:H15</xm:sqref></x14:conditionalFormatting>"#);
+    for (refs, id, lo, hi, more) in [
+        ("I6:I16", BAR_FULL, "0", "1", r#" gradient="0""#),
+        ("J6:J15", BAR_NEG, "-5", "5", r#" border="1" negativeBarBorderColorSameAsPositive="0""#),
+    ] {
+        let _ = write!(
+            x,
+            r#"<x14:conditionalFormatting xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><x14:cfRule type="dataBar" id="{id}"><x14:dataBar minLength="0" maxLength="100"{more}><x14:cfvo type="num"><xm:f>{lo}</xm:f></x14:cfvo><x14:cfvo type="num"><xm:f>{hi}</xm:f></x14:cfvo><x14:borderColor rgb="FF63C384"/><x14:negativeFillColor rgb="FFFF0000"/><x14:negativeBorderColor rgb="FFFF0000"/><x14:axisColor rgb="FF000000"/></x14:dataBar></x14:cfRule><xm:sqref>{refs}</xm:sqref></x14:conditionalFormatting>"#
+        );
+    }
+    x.push_str("</x14:conditionalFormattings></ext></extLst></worksheet>");
     x
 }
+
+/// Colunas com um conjunto de ícones cada: nome e quantos ícones.
+const ICON_COLS: [(&str, usize); 9] = [
+    ("5Arrows", 5),
+    ("3Flags", 3),
+    ("3Symbols", 3),
+    ("3Symbols2", 3),
+    ("3Signs", 3),
+    ("3Stars", 3),
+    ("5Quarters", 5),
+    ("5Rating", 5),
+    ("5Boxes", 5),
+];
+const BAR_FULL: &str = "{3D6E0A11-0C0B-4C52-9B0E-000000000001}";
+const BAR_NEG: &str = "{3D6E0A11-0C0B-4C52-9B0E-000000000002}";
 
 fn resumo(st: &mut Strings) -> String {
     let mut x = String::from(

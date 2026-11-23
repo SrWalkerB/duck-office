@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use crate::{CellRange, Color, Sheet, StringTable, Value};
+use crate::{CellRange, Color, Dxf, Sheet, StringTable, Value};
 
 /// Uma regra (`<cfRule>`) com os intervalos do bloco a que pertence.
 #[derive(Clone, Debug, PartialEq)]
@@ -26,7 +26,152 @@ pub struct CfRule {
     pub stop: bool,
     /// Índice em [`crate::Styles::dxfs`].
     pub dxf: Option<u32>,
+    /// Formato da própria regra (regras da extensão do Excel 2010).
+    pub own: Option<Box<Dxf>>,
+    /// Ligação entre a regra comum e a metade dela na extensão (só na leitura).
+    pub ext: Option<Box<ExtId>>,
     pub kind: CfKind,
+}
+
+/// `id` em comum das duas metades de uma regra.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtId {
+    pub id: String,
+    /// A metade que está na extensão (`<x14:cfRule>`).
+    pub extension: bool,
+}
+
+/// Junta as metades (barras de dados: o arquivo guarda a versão de 2007 na
+/// regra comum e o resto na extensão).
+pub fn join_extensions(rules: &mut Vec<CfRule>) {
+    if rules.iter().all(|r| r.ext.is_none()) {
+        return;
+    }
+    let mut halves: Vec<(String, CfRule)> = Vec::new();
+    let mut k = 0;
+    while k < rules.len() {
+        if rules[k].ext.as_ref().is_some_and(|e| e.extension) {
+            let mut r = rules.remove(k);
+            let id = r.ext.take().map(|e| e.id).unwrap_or_default();
+            halves.push((id, r));
+        } else {
+            k += 1;
+        }
+    }
+    for r in rules.iter_mut() {
+        let Some(e) = r.ext.take() else { continue };
+        let Some(i) = halves.iter().position(|h| h.0 == e.id) else { continue };
+        let half = halves.remove(i).1;
+        if let (
+            CfKind::DataBar { color, show_value, .. },
+            CfKind::DataBar { min, max, color: c2, show_value: s2, look },
+        ) = (&r.kind, half.kind)
+        {
+            // A cor da barra fica na regra comum, se a extensão não disser.
+            let color = if c2 == Color::Auto { *color } else { c2 };
+            r.kind = CfKind::DataBar { min, max, color, show_value: *show_value && s2, look };
+        }
+    }
+    // As que só existem na extensão (ícones personalizados, fórmulas com
+    // outras abas...) são regras inteiras. Sem prioridade é metade sem par.
+    rules.extend(halves.into_iter().map(|h| h.1).filter(|r| r.priority != i32::MAX));
+}
+
+/// Aparência de uma barra de dados (a de 2007 é o [`Default`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BarLook {
+    /// Menor e maior comprimento, em fração da célula.
+    pub min_len: f32,
+    pub max_len: f32,
+    pub gradient: bool,
+    pub border: Option<Color>,
+    /// Cor e contorno das barras negativas (`None` = iguais às positivas).
+    pub negative: Option<Color>,
+    pub negative_border: Option<Color>,
+    /// Onde fica o zero quando há negativos.
+    pub axis: BarAxis,
+    pub axis_color: Option<Color>,
+    /// Da direita para a esquerda.
+    pub rtl: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarAxis {
+    /// Proporcional aos limites.
+    Auto,
+    Middle,
+    /// Sem eixo: as negativas vão para o mesmo lado.
+    None,
+}
+
+impl Default for BarLook {
+    fn default() -> Self {
+        Self {
+            min_len: 0.1,
+            max_len: 0.9,
+            gradient: true,
+            border: None,
+            negative: None,
+            negative_border: None,
+            axis: BarAxis::None,
+            axis_color: None,
+            rtl: false,
+        }
+    }
+}
+
+/// Uma barra de dados numa célula: de `from` a `to` (frações da largura; a cor
+/// é mais forte em `from`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bar {
+    pub from: f32,
+    pub to: f32,
+    pub color: Color,
+    pub gradient: bool,
+    pub border: Option<Color>,
+    /// Linha do zero.
+    pub axis: Option<(f32, Color)>,
+}
+
+impl BarLook {
+    /// A barra do valor `x` entre os limites `lo` e `hi`.
+    fn bar(&self, x: f64, lo: f64, hi: f64, color: Color) -> Bar {
+        let (lo, hi) = if lo > hi { (hi, lo) } else { (lo, hi) };
+        let neg = x < 0.0;
+        let fill = if neg { self.negative.unwrap_or(color) } else { color };
+        let border = match (self.border, neg) {
+            (Some(b), true) => Some(self.negative_border.unwrap_or(b)),
+            (b, _) => b,
+        };
+        let unit = |v: f64, full: f64| if full > 0.0 { (v / full).clamp(0.0, 1.0) as f32 } else { 1.0 };
+        let (mut from, mut axis) = (0.0, None);
+        let mut to;
+        if lo < 0.0 && self.axis != BarAxis::None {
+            let (zero, left, right) = match self.axis {
+                BarAxis::Middle => {
+                    let m = lo.abs().max(hi.abs());
+                    (0.5, m, m)
+                }
+                _ if hi <= 0.0 => (1.0, -lo, 0.0),
+                _ => ((-lo / (hi - lo)) as f32, -lo, hi),
+            };
+            from = zero;
+            to = match neg {
+                true => zero - zero * unit(-x, left) * self.max_len,
+                false if right > 0.0 => zero + (1.0 - zero) * unit(x, right) * self.max_len,
+                false => zero,
+            };
+            axis = Some((zero, self.axis_color.unwrap_or(Color::Rgb(0xFF00_0000))));
+        } else {
+            let t = if hi > lo { unit(x - lo, hi - lo) } else { 1.0 };
+            to = self.min_len + (self.max_len - self.min_len) * t;
+        }
+        if self.rtl {
+            (from, to) = (1.0 - from, 1.0 - to);
+            axis = axis.map(|(a, c)| (1.0 - a, c));
+        }
+        Bar { from, to, color: fill, gradient: self.gradient, border, axis }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +212,10 @@ pub enum Period {
 pub enum CfvoKind {
     Min,
     Max,
+    /// O menor valor, ou zero se todos são positivos (barras da extensão).
+    AutoMin,
+    /// O maior valor, ou zero se todos são negativos.
+    AutoMax,
     Num,
     Percent,
     Percentile,
@@ -97,10 +246,13 @@ pub enum CfKind {
         max: Cfvo,
         color: Color,
         show_value: bool,
+        look: Box<BarLook>,
     },
     IconSet {
         set: String,
         cfvos: Vec<Cfvo>,
+        /// Ícones personalizados (conjunto e posição), um por limite.
+        icons: Vec<(String, u8)>,
         reverse: bool,
         show_value: bool,
     },
@@ -151,12 +303,25 @@ impl CfRule {
 pub enum CfApply<'a> {
     /// Formato diferencial (`dxf`).
     Dxf(u32),
+    /// Formato diferencial da própria regra.
+    Own(&'a Dxf),
     /// Escala de cor: entre `lo` e `hi`, na posição `t` (0–1).
-    Scale { lo: Color, hi: Color, t: f32 },
-    /// Barra de dados ocupando `frac` (0–1) da largura.
-    Bar { frac: f32, color: Color, show_value: bool },
+    Scale {
+        lo: Color,
+        hi: Color,
+        t: f32,
+    },
+    Bar {
+        bar: Bar,
+        show_value: bool,
+    },
     /// Ícone `idx` (0 = o mais baixo) de um conjunto de `n`.
-    Icon { set: &'a str, idx: usize, n: usize, show_value: bool },
+    Icon {
+        set: &'a str,
+        idx: usize,
+        n: usize,
+        show_value: bool,
+    },
 }
 
 /// Dados de uma regra calculados uma vez (ver o módulo).
@@ -211,7 +376,11 @@ impl CfCtx<'_> {
         value: Value,
     ) -> Option<CfApply<'r>> {
         let st = state.stats.get_or_init(|| self.stats(rule));
-        let dxf = |hit: bool| if hit { rule.dxf.map(CfApply::Dxf) } else { None };
+        let dxf = |hit: bool| match &rule.own {
+            _ if !hit => None,
+            Some(d) => Some(CfApply::Own(d)),
+            None => rule.dxf.map(CfApply::Dxf),
+        };
         match &rule.kind {
             CfKind::CellIs { op, .. } => {
                 let (base_r, base_c) = rule.base();
@@ -263,14 +432,12 @@ impl CfCtx<'_> {
                 };
                 Some(CfApply::Scale { lo: stops[k - 1].1, hi: stops[k].1, t: t as f32 })
             }
-            CfKind::DataBar { color, show_value, .. } => {
+            CfKind::DataBar { color, show_value, look, .. } => {
                 let x = number(value)?;
                 let (lo, hi) = (*st.limits.first()?, *st.limits.get(1)?);
-                let t = if hi > lo { ((x - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 1.0 };
-                // Como no Excel 2007: de 10% a 90% da largura.
-                Some(CfApply::Bar { frac: (0.1 + 0.8 * t) as f32, color: *color, show_value: *show_value })
+                Some(CfApply::Bar { bar: look.bar(x, lo, hi, *color), show_value: *show_value })
             }
-            CfKind::IconSet { set, cfvos, reverse, show_value } => {
+            CfKind::IconSet { set, cfvos, icons, reverse, show_value } => {
                 let x = number(value)?;
                 let n = cfvos.len().max(1);
                 let mut idx = 0;
@@ -282,6 +449,11 @@ impl CfCtx<'_> {
                 }
                 if *reverse {
                     idx = n - 1 - idx;
+                }
+                if let Some((set, k)) = icons.get(idx) {
+                    // `3Triangles` tem 3 ícones; `NoIcons`, nenhum.
+                    let n = set.bytes().next().filter(u8::is_ascii_digit).map_or(0, |d| (d - b'0') as usize);
+                    return Some(CfApply::Icon { set, idx: *k as usize, n, show_value: *show_value });
                 }
                 Some(CfApply::Icon { set, idx, n, show_value: *show_value })
             }
@@ -460,6 +632,8 @@ impl CfCtx<'_> {
             let v = match c.kind {
                 CfvoKind::Min => min,
                 CfvoKind::Max => max,
+                CfvoKind::AutoMin => min.min(0.0),
+                CfvoKind::AutoMax => max.max(0.0),
                 CfvoKind::Num | CfvoKind::Formula => num().unwrap_or(min),
                 CfvoKind::Percent => min + (max - min) * num().unwrap_or(0.0) / 100.0,
                 CfvoKind::Percentile => percentile(&st.sorted, num().unwrap_or(0.0) / 100.0),
@@ -1033,7 +1207,7 @@ mod tests {
     }
 
     fn rule(r: &str, kind: CfKind) -> CfRule {
-        CfRule { ranges: vec![range(r)], priority: 1, stop: false, dxf: Some(7), kind }
+        CfRule { ranges: vec![range(r)], priority: 1, stop: false, dxf: Some(7), own: None, ext: None, kind }
     }
 
     #[test]
@@ -1121,6 +1295,7 @@ mod tests {
             CfKind::IconSet {
                 set: "3Arrows".into(),
                 cfvos: vec![pct("0"), pct("33"), pct("67")],
+                icons: Vec::new(),
                 reverse: false,
                 show_value: true,
             },
@@ -1131,12 +1306,107 @@ mod tests {
             x => panic!("{x:?}"),
         };
         assert_eq!((icon(0.0), icon(40.0), icon(90.0)), (0, 1, 2));
-        let r = rule("A1:A10", CfKind::DataBar { min, max, color: Color::Rgb(0), show_value: true });
+        let r = rule(
+            "A1:A10",
+            CfKind::DataBar { min, max, color: Color::Rgb(0), show_value: true, look: Box::default() },
+        );
         let st = CfState::default();
         match cx.apply(&r, &st, 0, 0, Value::Number(90.0)) {
-            Some(CfApply::Bar { frac, .. }) => assert!((frac - 0.9).abs() < 1e-6),
+            Some(CfApply::Bar { bar, .. }) => assert!((bar.to - 0.9).abs() < 1e-6),
             x => panic!("{x:?}"),
         }
+    }
+
+    /// Ícones personalizados: cada limite com o ícone dele (menor que zero,
+    /// zero, maior que zero).
+    #[test]
+    fn custom_icons() {
+        let s = sheet(&[], &[]);
+        let shared = StringTable::new();
+        let cx = CfCtx { sheet: &s, shared: &shared, today: 45_000.0 };
+        let at = |kind, v: &str, gte| Cfvo { kind, val: v.into(), gte };
+        let r = rule(
+            "A1:A3",
+            CfKind::IconSet {
+                set: "3Arrows".into(),
+                cfvos: vec![
+                    at(CfvoKind::Percent, "0", true),
+                    at(CfvoKind::Num, "0", true),
+                    at(CfvoKind::Num, "0", false),
+                ],
+                icons: vec![("3TrafficLights1".into(), 2), ("3Triangles".into(), 1), ("NoIcons".into(), 0)],
+                reverse: false,
+                show_value: false,
+            },
+        );
+        let st = CfState::default();
+        let icon = |v| match cx.apply(&r, &st, 0, 0, Value::Number(v)) {
+            Some(CfApply::Icon { set, idx, n, show_value: false }) => (set.to_string(), idx, n),
+            x => panic!("{x:?}"),
+        };
+        assert_eq!(icon(-0.1), ("3TrafficLights1".into(), 2, 3));
+        assert_eq!(icon(0.0), ("3Triangles".into(), 1, 3));
+        assert_eq!(icon(2.0), ("NoIcons".into(), 0, 0));
+        assert_eq!(cx.apply(&r, &st, 0, 0, Value::Text("x")), None);
+    }
+
+    #[test]
+    fn data_bars_of_the_extension() {
+        let c = Color::Rgb(1);
+        let look = BarLook {
+            min_len: 0.0,
+            max_len: 1.0,
+            gradient: false,
+            negative: Some(Color::Rgb(2)),
+            axis: BarAxis::Auto,
+            ..Default::default()
+        };
+        let b = look.bar(0.25, 0.0, 1.0, c);
+        assert_eq!((b.from, b.to, b.color, b.gradient, b.axis), (0.0, 0.25, c, false, None));
+        // Fora dos limites: cheia ou vazia.
+        assert_eq!((look.bar(3.0, 0.0, 1.0, c).to, look.bar(0.0, 0.0, 1.0, c).to), (1.0, 0.0));
+        // Com negativos: o zero fica na proporção dos limites.
+        let b = look.bar(-5.0, -10.0, 30.0, c);
+        assert_eq!((b.from, b.to, b.color), (0.25, 0.125, Color::Rgb(2)));
+        let b = look.bar(15.0, -10.0, 30.0, c);
+        assert_eq!((b.from, b.to, b.axis.map(|a| a.0)), (0.25, 0.625, Some(0.25)));
+        // Só negativos: do fim para o começo.
+        let b = look.bar(-5.0, -10.0, 0.0, c);
+        assert_eq!((b.from, b.to), (1.0, 0.5));
+        let mid = BarLook { axis: BarAxis::Middle, ..look.clone() };
+        assert_eq!((mid.bar(5.0, -10.0, 10.0, c).from, mid.bar(5.0, -10.0, 10.0, c).to), (0.5, 0.75));
+        let rtl = BarLook { rtl: true, ..look };
+        assert_eq!((rtl.bar(0.25, 0.0, 1.0, c).from, rtl.bar(0.25, 0.0, 1.0, c).to), (1.0, 0.75));
+        // A de 2007 vai de 10% a 90%.
+        assert_eq!(BarLook::default().bar(0.0, 0.0, 1.0, c).to, 0.1);
+    }
+
+    #[test]
+    fn joins_the_two_halves() {
+        let cfvo = |v: &str| Cfvo { kind: CfvoKind::Num, val: v.into(), gte: true };
+        let bar = |color, look| CfKind::DataBar {
+            min: cfvo("0"),
+            max: cfvo("1"),
+            color,
+            show_value: true,
+            look: Box::new(look),
+        };
+        let id = |extension| Some(Box::new(ExtId { id: "{A}".into(), extension }));
+        let mut common = rule("A1:A9", bar(Color::Rgb(5), BarLook::default()));
+        common.ext = id(false);
+        let mut half = rule("A1:A9", bar(Color::Auto, BarLook { gradient: false, ..Default::default() }));
+        (half.ext, half.priority) = (id(true), i32::MAX);
+        let mut alone = rule("B1", CfKind::Blanks(true));
+        alone.ext = Some(Box::new(ExtId { id: "{B}".into(), extension: true }));
+        let mut rules = vec![common, half, alone];
+        join_extensions(&mut rules);
+        assert_eq!(rules.len(), 2);
+        match &rules[0].kind {
+            CfKind::DataBar { color: Color::Rgb(5), look, .. } => assert!(!look.gradient),
+            k => panic!("{k:?}"),
+        }
+        assert_eq!(rules[1].kind, CfKind::Blanks(true));
+        assert!(rules.iter().all(|r| r.ext.is_none()));
     }
 
     #[test]

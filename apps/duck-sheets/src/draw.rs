@@ -61,6 +61,17 @@ struct Ctx<'a> {
     tables: Vec<(CellRange, u32, u32, bool, crate::tablestyle::TableLook)>,
 }
 
+/// Barra de dados com as cores resolvidas (posições em frações da largura).
+#[derive(Clone, Copy)]
+struct BarFx {
+    from: f32,
+    to: f32,
+    color: Rgba,
+    gradient: bool,
+    border: Option<Rgba>,
+    axis: Option<(f32, Rgba)>,
+}
+
 /// O que a formatação condicional muda numa célula (o que não vier fica do estilo).
 #[derive(Clone, Copy, Default)]
 struct Fx {
@@ -71,10 +82,8 @@ struct Fx {
     underline: Option<bool>,
     strike: Option<bool>,
     edges: [Option<Edge>; 4],
-    /// Barra de dados: fração da largura e cor.
-    bar: Option<(f32, Rgba)>,
-    /// Ícone: caractere e cor.
-    icon: Option<(char, Rgba)>,
+    bar: Option<BarFx>,
+    icon: Option<crate::cficon::Icon>,
     /// Barra ou ícone sem o valor (`showValue="0"`).
     hide: bool,
     /// Preenchimento do estilo da tabela: só vale se a célula não tiver um.
@@ -116,8 +125,13 @@ impl Ctx<'_> {
             let Some(a) = self.cf.apply(rule, &self.view.cf[k], r, c, value) else { continue };
             any = true;
             match a {
-                CfApply::Dxf(i) => {
-                    if let Some(d) = self.styles.dxfs.get(i as usize) {
+                CfApply::Dxf(_) | CfApply::Own(_) => {
+                    let d = match a {
+                        CfApply::Own(d) => Some(d),
+                        CfApply::Dxf(i) => self.styles.dxfs.get(i as usize),
+                        _ => None,
+                    };
+                    if let Some(d) = d {
                         let color = |c| self.styles.rgb(c).map(rgb);
                         fx.fill = fx.fill.or(d.fill.and_then(color));
                         fx.color = fx.color.or(d.color.and_then(color));
@@ -150,15 +164,23 @@ impl Ctx<'_> {
                         fx.fill = Some(rgb((mix(16) << 16) | (mix(8) << 8) | mix(0)));
                     }
                 }
-                CfApply::Bar { frac, color, show_value } => {
+                CfApply::Bar { bar, show_value } => {
                     if fx.bar.is_none() {
-                        fx.bar = Some((frac, self.styles.rgb(color).map_or(rgb(0x638EC6), rgb)));
+                        let color = |c| self.styles.rgb(c).map(rgb);
+                        fx.bar = Some(BarFx {
+                            from: bar.from,
+                            to: bar.to,
+                            color: color(bar.color).unwrap_or(rgb(0x638EC6)),
+                            gradient: bar.gradient,
+                            border: bar.border.and_then(color),
+                            axis: bar.axis.map(|(x, c)| (x, color(c).unwrap_or([0, 0, 0, 255]))),
+                        });
                         fx.hide |= !show_value;
                     }
                 }
                 CfApply::Icon { set, idx, n, show_value } => {
                     if fx.icon.is_none() {
-                        fx.icon = Some(icon(set, idx, n));
+                        fx.icon = Some(crate::cficon::icon(set, idx, n));
                         fx.hide |= !show_value;
                     }
                 }
@@ -799,8 +821,8 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
             {
                 p.fill(Rect::new(c.a - px, r.a - px, c.b, r.b), &clip, fill);
             }
-            if let Some((frac, color)) = fx.and_then(|f| f.bar) {
-                data_bar(p, Rect::new(c.a, r.a, c.b - px, r.b - px), frac, color, px, &clip);
+            if let Some(bar) = fx.and_then(|f| f.bar) {
+                data_bar(p, Rect::new(c.a, r.a, c.b - px, r.b - px), &bar, px, &clip);
             }
         }
     }
@@ -809,9 +831,6 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
             Rect::new(x_of(m.first_col), y_of(m.first_row), x_of(m.last_col + 1), y_of(m.last_row + 1));
         let anchor = cx.sheet.cell(m.first_row, m.first_col, cx.strings);
         let fx = merge_fx[mi];
-        if let Some((frac, color)) = fx.and_then(|f| f.bar) {
-            data_bar(p, Rect::new(rect.x0, rect.y0, rect.x1 - px, rect.y1 - px), frac, color, px, &clip);
-        }
         match fx
             .and_then(|f| f.fill)
             .or(cx.look_of(anchor.style, m.first_row, m.first_col).fill)
@@ -820,6 +839,9 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
             Some(fill) => p.fill(Rect::new(rect.x0 - px, rect.y0 - px, rect.x1, rect.y1), &clip, fill),
             // Sem preenchimento: apaga as linhas de grade de dentro.
             None => p.fill(Rect::new(rect.x0, rect.y0, rect.x1 - px, rect.y1 - px), &clip, WHITE),
+        }
+        if let Some(bar) = fx.and_then(|f| f.bar) {
+            data_bar(p, Rect::new(rect.x0, rect.y0, rect.x1 - px, rect.y1 - px), &bar, px, &clip);
         }
     }
 
@@ -1100,16 +1122,24 @@ fn draw_cell_text(
                 fx.italic.unwrap_or(f.italic),
             );
         }
-        if let Some((ch, ic)) = fx.icon {
-            // Ícone à esquerda; o texto fica no resto da célula.
-            let lh = p.text.line_height_of(style);
-            let mut tmp = [0u8; 4];
-            let s = ch.encode_utf8(&mut tmp);
-            let w = p.text.measure_styled(s, style);
-            let y = (cell.y1 - px - lh).max(cell.y0 + px).floor();
+        if let Some(ic) = fx.icon {
+            // Do tamanho da fonte, na altura do texto: à esquerda (o texto fica
+            // no resto da célula) ou, sozinho, no alinhamento da célula.
+            let side = (style.px() * 1.1).round().min(cell.h() - 2.0 * px).max(4.0);
+            let free = cell.w() - side;
+            let x = match look.h {
+                HAlign::Center | HAlign::CenterContinuous if fx.hide => cell.x0 + free / 2.0,
+                HAlign::Right if fx.hide => cell.x0 + free - pad,
+                _ => cell.x0 + pad,
+            };
+            let y = match look.v {
+                VAlign::Top => cell.y0 + px,
+                VAlign::Bottom => cell.y1 - 2.0 * px - side,
+                _ => (cell.y0 + cell.y1 - px - side) / 2.0,
+            };
             let clip = Rect::new(cell.x0, cell.y0, cell.x1 - px, cell.y1 - px).intersect(&q.rect);
-            p.text(s, style, cell.x0 + pad, y, &clip, ic);
-            cell.x0 += w + pad;
+            crate::cficon::draw(p, ic, x.round(), y.round(), side, &clip);
+            cell.x0 += side + pad;
         }
         if fx.hide {
             return;
@@ -1369,54 +1399,34 @@ fn draw_cell_text(
     }
 }
 
-/// Barra de dados: da esquerda até `frac` da largura, com contorno na cor.
-fn data_bar(p: &mut Painter, cell: Rect, frac: f32, color: Rgba, px: f32, clip: &Rect) {
+/// Barra de dados numa célula.
+fn data_bar(p: &mut Painter, cell: Rect, b: &BarFx, px: f32, clip: &Rect) {
     let inset = (2.0 * px).max(1.0);
-    let r = Rect::new(
-        cell.x0 + px,
-        cell.y0 + inset,
-        cell.x0 + px + (cell.w() - 2.0 * px) * frac,
-        cell.y1 - inset,
-    );
-    let light = [color[0], color[1], color[2], 150];
-    p.fill(r, clip, light);
-    p.stroke(r, clip, px, color);
-}
-
-/// Ícone de um conjunto (`iconSet`): caractere e cor. `idx` 0 = o mais baixo.
-fn icon(set: &str, idx: usize, n: usize) -> (char, Rgba) {
-    const RED: Rgba = rgb(0xE0443E);
-    const YELLOW: Rgba = rgb(0xF1C232);
-    const GREEN: Rgba = rgb(0x3E9B3E);
-    const GRAY: Rgba = rgb(0x808080);
-    const BLACK: Rgba = rgb(0x202124);
-    let ramp = |colors: &[Rgba]| colors[(idx * colors.len() / n.max(1)).min(colors.len() - 1)];
-    let traffic = ramp(&[RED, YELLOW, GREEN]);
-    let arrows = |gray: bool| {
-        let ch = match (n, idx) {
-            (_, 0) => '↓',
-            (3, 1) | (5, 2) => '→',
-            (4, 1) | (5, 1) => '↘',
-            (4, 2) | (5, 3) => '↗',
-            _ => '↑',
-        };
-        (ch, if gray { GRAY } else { traffic })
-    };
-    match set {
-        "3Arrows" | "4Arrows" | "5Arrows" => arrows(false),
-        "3ArrowsGray" | "4ArrowsGray" | "5ArrowsGray" => arrows(true),
-        "3Flags" => ('⚑', traffic),
-        "3Symbols" | "3Symbols2" => (['✖', '!', '✔'][idx.min(2)], traffic),
-        "3Signs" => (['◆', '▲', '●'][idx.min(2)], traffic),
-        "3Stars" => (['☆', '⯪', '★'][idx.min(2)], YELLOW),
-        "3Triangles" => (['▼', '▬', '▲'][idx.min(2)], traffic),
-        "4RedToBlack" => ('●', [BLACK, GRAY, rgb(0xF4A6A6), RED][idx.min(3)]),
-        "4Rating" | "5Rating" | "5Boxes" => {
-            (['▁', '▃', '▅', '▇', '█'][(idx * 5 / n.max(1)).min(4)], rgb(0x4472C4))
+    let (x0, w) = (cell.x0 + px, cell.w() - 2.0 * px);
+    let at = |f: f32| (x0 + w * f).round();
+    let r = Rect::new(at(b.from.min(b.to)), cell.y0 + inset, at(b.from.max(b.to)), cell.y1 - inset);
+    if b.gradient {
+        // Da cor cheia até quase branco, em faixas verticais.
+        let steps = ((r.w() / (2.0 * px)).ceil() as usize).clamp(1, 48);
+        for k in 0..steps {
+            let (t0, t1) = (k as f32 / steps as f32, (k + 1) as f32 / steps as f32);
+            let t = (t0 + t1) / 2.0 * 0.85;
+            let t = if b.from > b.to { 0.85 - t } else { t };
+            let c = |v: u8| (v as f32 + (255.0 - v as f32) * t).round() as u8;
+            let part = Rect::new((r.x0 + r.w() * t0).round(), r.y0, (r.x0 + r.w() * t1).round(), r.y1);
+            p.fill(part, clip, [c(b.color[0]), c(b.color[1]), c(b.color[2]), 255]);
         }
-        "5Quarters" => (['○', '◔', '◑', '◕', '●'][idx.min(4)], BLACK),
-        // Semáforos e o padrão.
-        _ => ('●', if n >= 4 { ramp(&[BLACK, RED, YELLOW, GREEN]) } else { traffic }),
+    } else {
+        p.fill(r, clip, b.color);
+    }
+    if let Some(c) = b.border
+        && r.w() > 0.0
+    {
+        p.stroke(r, clip, px, c);
+    }
+    if let Some((x, c)) = b.axis {
+        let x = at(x);
+        p.dashed(Rect::new(x, cell.y0, x + px, cell.y1), clip, c, 4.0 * px, 2.0 * px);
     }
 }
 

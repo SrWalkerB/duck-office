@@ -141,6 +141,27 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// Círculo cheio, suavizado.
+    pub fn disc(&mut self, c: [f32; 2], r: f32, clip: &Rect, color: Rgba) {
+        if r <= 0.0 || color[3] == 0 {
+            return;
+        }
+        let whole = c[0] - r >= clip.x0 && c[0] + r <= clip.x1 && c[1] - r >= clip.y0 && c[1] + r <= clip.y1;
+        if whole {
+            // Um segmento sem comprimento, com as pontas redondas.
+            self.out.push(Instance::line(c, [c[0] + 0.01, c[1]], 2.0 * r, color));
+            return;
+        }
+        let n = 24;
+        let pts: Vec<[f32; 2]> = (0..n)
+            .map(|i| {
+                let (s, k) = (i as f32 / n as f32 * std::f32::consts::TAU).sin_cos();
+                [c[0] + r * k, c[1] + r * s]
+            })
+            .collect();
+        self.polygon(&pts, clip, color);
+    }
+
     /// Polígono simples (convexo ou não), com as bordas suavizadas.
     pub fn shape(&mut self, pts: &[[f32; 2]], clip: &Rect, color: Rgba) {
         for t in triangulate(pts) {

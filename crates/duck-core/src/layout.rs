@@ -299,6 +299,7 @@ impl Layout {
         self.outline.rows.finish();
         self.outline.cols.finish();
         self.merges.sort_by_key(|m| (m.first_row, m.first_col));
+        crate::cond::join_extensions(&mut self.cond);
         self.cond.sort_by_key(|r| r.priority);
         self.links.sort_by_key(|l| (l.range.first_row, l.range.first_col));
     }

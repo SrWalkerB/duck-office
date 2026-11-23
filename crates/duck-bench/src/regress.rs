@@ -164,11 +164,32 @@ fn measure(path: &Path) -> Result<Metrics, String> {
     );
     objects(&wb, &mut m);
     charts(&wb, &mut m);
+    conditional(&wb, &mut m);
     links(&wb, &mut m);
     macros(path, &mut m);
     drop(wb);
     others(path, &mut m)?;
     Ok(m)
+}
+
+/// Regras de formatação condicional lidas e as que o app sabe desenhar.
+fn conditional(wb: &Workbook, m: &mut Metrics) {
+    use duck_core::CfKind;
+    let count = |f: &dyn Fn(&CfKind) -> bool| {
+        wb.sheets.iter().flat_map(|s| &s.layout.cond).filter(|r| f(&r.kind)).count() as f64
+    };
+    m.add("formatação condicional: regras", count(&|_| true), Rule::Same);
+    m.add("formatação condicional: entendidas", count(&|k| *k != CfKind::Unsupported), Rule::AtLeast);
+    m.add(
+        "formatação condicional: ícones próprios",
+        count(&|k| matches!(k, CfKind::IconSet { icons, .. } if !icons.is_empty())),
+        Rule::Same,
+    );
+    m.add(
+        "formatação condicional: barras completas",
+        count(&|k| matches!(k, CfKind::DataBar { look, .. } if **look != duck_core::BarLook::default())),
+        Rule::Same,
+    );
 }
 
 /// Links de objetos que levam a uma aba e célula que existem.

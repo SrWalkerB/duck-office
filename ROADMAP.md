@@ -73,7 +73,7 @@ Falta na F2:
 - [x] Abrir a GPU antes da janela existir: primeira tela de 212–245 para 190–199 ms no Windows (no Linux a escolha do adaptador depende da janela e fica como estava).
 - [ ] Teste manual de teclado e mouse na janela (redimensionar e Ctrl+clique em link ainda não foram usados à mão).
 - [x] Texto girado (`textRotation`) e empilhado.
-- [x] Formatação condicional (fora: regras `x14` do Excel 2010 e fórmulas com outras abas, intervalos ou funções fora do avaliador).
+- [x] Formatação condicional (inclusive as regras `x14` do Excel 2010; fora: fórmulas com outras abas, intervalos ou funções fora do avaliador).
 - [x] Estilo de linha inteira (`<row s>`).
 - [x] Várias fontes na mesma célula (rich text) nas strings compartilhadas.
 - [x] Redimensionar colunas e linhas com o mouse (duplo clique ajusta a coluna ao texto).
@@ -188,6 +188,7 @@ Tudo o que as duas planilhas reais de teste usam, com os mesmos resultados do Ex
 - [x] **Links, macros e controles**: clicar em formas, imagens e gráficos segue o link ou roda a macro; botões de opção, caixas de seleção e listas desenhados, clicáveis, ligados à célula e gravados.
 - [x] **Grupos** de linhas e colunas com +/− e níveis; **reduzir para caber**; grade que cresce ao rolar.
 - [x] **Macros VBA** (`duck-vba`): as 6 macros da planilha maior rodam, salvam e desfazem num passo. Sem acesso a arquivos, rede ou outros programas; pergunta uma vez por arquivo.
+- [x] **Formatação condicional do Excel 2010**: ícones personalizados e todos os conjuntos de ícones desenhados como formas, barras de dados sólidas ou em degradê com negativos, eixo e contorno (também em células mescladas). Nas planilhas de teste, 42 de 42 ícones com a cor esperada e as barras na proporção certa.
 - [x] **Modelo de Dados** (`duck-dax`): 34 dinâmicas e 13 segmentações recalculadas a partir das tabelas das abas, com as medidas DAX e as relações do arquivo. 28 idênticas; 13.129 de 13.144 valores iguais, ~0,2 s para todas. Das 6 diferentes, 4 são dados que mudaram nas tabelas depois da última atualização no Excel, e 2 são ordem de empates e de texto concatenado.
 - [x] **Regressão** (`duck-bench regress`): contagens, acertos, tempo e memória contra uma linha de base; no CI, com a vitrine.
 - [ ] Macros que excluem abas ou usam outros programas (PowerPoint, Outlook) param com um erro claro.

@@ -343,6 +343,14 @@ pub fn parse_rows(
             pos = close;
             continue;
         }
+        if starts_tag(rest, b"x14:conditionalFormatting") {
+            let Some(end) = tag_end(buf, i) else { break };
+            let close =
+                memmem::find(&buf[end..], b"</x14:conditionalFormatting>").map_or(buf.len(), |x| end + x);
+            crate::cond::parse_ext_block(&buf[end..close], &mut part.layout.cond);
+            pos = close;
+            continue;
+        }
         if starts_tag(rest, b"hyperlink") {
             let Some(end) = tag_end(buf, i) else { break };
             let attrs = &buf[i + 10..end - 1];
