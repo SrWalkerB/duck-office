@@ -385,6 +385,7 @@ fn axis(xml: &[u8]) -> ChartAxis {
 }
 
 pub fn parse_chart(xml: &[u8]) -> Option<Chart> {
+    let xml = &*crate::ns::canonical(xml);
     let cs = find_tag(xml, 0, b"c:chartSpace")?;
     let space = inner(xml, &cs, b"c:chartSpace");
     let chart_el = child(space, b"c:chart")?;
@@ -970,6 +971,7 @@ pub fn read_objects(
             continue;
         }
         let Ok(xml) = pkg.read(&drawing) else { continue };
+        let xml = crate::ns::canonical(&xml);
         let Some(root) = find_tag(&xml, 0, b"xdr:wsDr") else { continue };
         let body = inner(&xml, &root, b"xdr:wsDr");
         let rels = parts::rel_targets_typed(pkg, &drawing);
@@ -1033,4 +1035,146 @@ pub fn read_objects(
         }
     }
     (out, anchors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use duck_core::shape::{Fill, Geom};
+
+    const XDR: &str = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
+    const C: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+    const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+    const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+    /// Uma planilha com o desenho e o gráfico como o openpyxl grava: namespace
+    /// padrão, sem `xdr:` e `c:`.
+    fn write_book(path: &std::path::Path) {
+        let rels = |list: &[(&str, &str)]| {
+            let body: String = list
+                .iter()
+                .enumerate()
+                .map(|(i, (kind, target))| {
+                    format!(r#"<Relationship Type="{REL}/{kind}" Target="{target}" Id="rId{}" />"#, i + 1)
+                })
+                .collect();
+            format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{body}</Relationships>"#
+            )
+        };
+        let parts = [
+            ("_rels/.rels", rels(&[("officeDocument", "xl/workbook.xml")])),
+            (
+                "xl/workbook.xml",
+                format!(
+                    r#"<workbook xmlns="{MAIN}" xmlns:r="{REL}"><sheets><sheet name="Dados" sheetId="1" r:id="rId1" /></sheets></workbook>"#
+                ),
+            ),
+            ("xl/_rels/workbook.xml.rels", rels(&[("worksheet", "/xl/worksheets/sheet1.xml")])),
+            (
+                "xl/worksheets/sheet1.xml",
+                format!(
+                    r#"<worksheet xmlns="{MAIN}"><sheetData><row r="1"><c r="B1" t="inlineStr"><is><t>Vendas</t></is></c></row><row r="2"><c r="B2"><v>10</v></c></row><row r="3"><c r="B3"><v>14</v></c></row></sheetData><drawing xmlns:r="{REL}" r:id="rId1" /></worksheet>"#
+                ),
+            ),
+            ("xl/worksheets/_rels/sheet1.xml.rels", rels(&[("drawing", "/xl/drawings/drawing1.xml")])),
+            (
+                "xl/drawings/drawing1.xml",
+                format!(
+                    r#"<wsDr xmlns:a="{A}" xmlns:c="{C}" xmlns:r="{REL}" xmlns="{XDR}"><oneCellAnchor><from><col>4</col><colOff>0</colOff><row>7</row><rowOff>0</rowOff></from><ext cx="5400000" cy="2700000" /><graphicFrame><nvGraphicFramePr><cNvPr id="1" name="Chart 1" /><cNvGraphicFramePr /></nvGraphicFramePr><xfrm /><a:graphic><a:graphicData uri="{C}"><c:chart r:id="rId1" /></a:graphicData></a:graphic></graphicFrame><clientData /></oneCellAnchor><twoCellAnchor><from><col>0</col><colOff>0</colOff><row>9</row><rowOff>0</rowOff></from><to><col>2</col><colOff>0</colOff><row>12</row><rowOff>0</rowOff></to><sp><nvSpPr><cNvPr id="2" name="Forma" /><cNvSpPr /></nvSpPr><spPr><a:xfrm><a:off x="0" y="0" /><a:ext cx="10" cy="10" /></a:xfrm><prstGeom xmlns="{A}" prst="ellipse" /><solidFill xmlns="{A}"><srgbClr val="112233" /></solidFill></spPr><txBody><a:bodyPr /><a:p><a:r><a:t>Olá</a:t></a:r></a:p></txBody></sp><clientData /></twoCellAnchor></wsDr>"#
+                ),
+            ),
+            ("xl/drawings/_rels/drawing1.xml.rels", rels(&[("chart", "/xl/charts/chart1.xml")])),
+            (
+                "xl/charts/chart1.xml",
+                format!(
+                    r#"<chartSpace xmlns:a="{A}" xmlns="{C}"><chart><title><tx><rich><a:bodyPr /><a:p><a:r><a:t>Vendas</a:t></a:r></a:p></rich></tx></title><plotArea><barChart><barDir val="col" /><grouping val="clustered" /><ser><idx val="0" /><order val="0" /><tx><strRef><f>'Dados'!$B$1</f></strRef></tx><spPr><a:solidFill><a:srgbClr val="C00000" /></a:solidFill></spPr><val><numRef><f>'Dados'!$B$2:$B$3</f><numCache><ptCount val="2" /><pt idx="0"><v>10</v></pt><pt idx="1"><v>14</v></pt></numCache></numRef></val></ser><gapWidth val="80" /><axId val="10" /><axId val="100" /></barChart><catAx><axId val="10" /></catAx><valAx><axId val="100" /><majorGridlines /></valAx></plotArea><legend><legendPos val="b" /></legend></chart></chartSpace>"#
+                ),
+            ),
+        ];
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        let stored =
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, xml) in &parts {
+            zip.start_file(*name, stored).unwrap();
+            std::io::Write::write_all(&mut zip, xml.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// Desenho e gráfico no namespace padrão: lê, e o gravador move as
+    /// âncoras e as referências sem trocar os prefixos.
+    #[test]
+    fn default_namespace_drawing() {
+        let dir = std::env::temp_dir().join(format!("duck-ns-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (p, q) = (dir.join("padrao.xlsx"), dir.join("salvo.xlsx"));
+        write_book(&p);
+        let (mut wb, _) = crate::open(&p, &crate::Options::default()).unwrap();
+        let l = &mut wb.sheets[0].layout;
+        assert_eq!((l.objects.len(), l.drawing_anchors.len()), (2, 2));
+        let at = |col, row| Marker { col, col_off: 0, row, row_off: 0 };
+        let o = &l.objects[0];
+        assert_eq!((o.id, o.name.as_str()), (1, "Chart 1"));
+        assert_eq!(o.anchor, Anchor::One { from: at(4, 7), cx: 5_400_000, cy: 2_700_000 });
+        let ObjectKind::Chart(c) = &o.kind else { panic!("{:?}", o.kind) };
+        assert_eq!((c.title.as_deref(), c.legend), (Some("Vendas"), Some(LegendPos::Bottom)));
+        assert!(c.val_axis.gridlines && !c.cat_axis.gridlines);
+        assert_eq!((c.plots.len(), c.plots[0].kind, c.plots[0].gap), (1, PlotKind::Bar, 80));
+        let s = &c.plots[0].series[0];
+        assert_eq!(s.name_ref.as_deref(), Some("'Dados'!$B$1"));
+        assert_eq!(s.val_ref.as_deref(), Some("'Dados'!$B$2:$B$3"));
+        assert_eq!((&s.vals[..], s.fill), (&[Some(10.0), Some(14.0)][..], Some(ChartColor::Rgb(0xC00000))));
+        let ObjectKind::Shape(s) = &l.objects[1].kind else { panic!("{:?}", l.objects[1].kind) };
+        assert_eq!((&s.geom, s.text.plain().as_str()), (&Geom::Preset("ellipse".into(), vec![]), "Olá"));
+        assert!(matches!(s.fill, Fill::Solid(f) if f.color == ChartColor::Rgb(0x112233)), "{:?}", s.fill);
+
+        // Três linhas inseridas acima de tudo.
+        struct Moved;
+        impl duck_core::FormulaOps for Moved {
+            fn adjust(&self, f: &str) -> Option<(String, bool)> {
+                (f == "'Dados'!$B$2:$B$3").then(|| ("'Dados'!$B$5:$B$6".to_string(), false))
+            }
+            // A planilha não tem fórmulas: só as referências do gráfico.
+            fn make_template(&self, _: &str, _: u32, _: u32) -> Option<String> {
+                unreachable!()
+            }
+            fn expand_template(&self, _: &str, _: u32, _: u32) -> String {
+                unreachable!()
+            }
+            fn shift_a1(&self, _: &str, _: i64, _: i64) -> String {
+                unreachable!()
+            }
+            fn with_shift(&self, _: duck_core::Shift) -> std::sync::Arc<dyn duck_core::FormulaOps> {
+                unreachable!()
+            }
+            fn axis_refs(&self, _: &str, _: bool) -> Vec<(bool, i64)> {
+                unreachable!()
+            }
+        }
+        let shift = duck_core::Shift { axis: duck_core::Axis::Rows, at: 1, n: 3, insert: true };
+        wb.sheets[0].apply_shift(shift, &Moved);
+        let sheets: Vec<Option<&duck_core::Sheet>> = wb.sheets.iter().map(Some).collect();
+        crate::save_file(&p, &q, &sheets, &wb.shared_strings, &wb.styles, &crate::SaveOptions::default())
+            .unwrap();
+        let (back, _) = crate::open(&q, &crate::Options::default()).unwrap();
+        let l = &back.sheets[0].layout;
+        assert_eq!(l.objects[0].anchor, Anchor::One { from: at(4, 10), cx: 5_400_000, cy: 2_700_000 });
+        assert_eq!(l.objects[1].anchor, Anchor::Two { from: at(0, 12), to: at(2, 15) });
+        let ObjectKind::Chart(c) = &l.objects[0].kind else { panic!() };
+        assert_eq!(c.plots[0].series[0].val_ref.as_deref(), Some("'Dados'!$B$5:$B$6"));
+        // O resto das partes fica igual, com os prefixos do arquivo.
+        let read = |f: &std::path::Path, part: &str| {
+            String::from_utf8(Package::open(f).unwrap().read(part).unwrap()).unwrap()
+        };
+        let chart = read(&p, "xl/charts/chart1.xml").replace("$B$2:$B$3", "$B$5:$B$6");
+        assert_eq!(read(&q, "xl/charts/chart1.xml"), chart);
+        let drawing = read(&p, "xl/drawings/drawing1.xml")
+            .replace("<row>12<", "<row>15<")
+            .replace("<row>9<", "<row>12<")
+            .replace("<row>7<", "<row>10<");
+        assert_eq!(read(&q, "xl/drawings/drawing1.xml"), drawing);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
