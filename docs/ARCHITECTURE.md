@@ -937,7 +937,7 @@ Conferido na vitrine, nos dois temas: células, formatação condicional, gráfi
 - **Gravação**: uma fórmula recém-digitada com resultado único que depende do modo matricial (`Engine::needs_array`) vira matriz dinâmica de uma célula, para o Excel não pôr `@` ao abrir.
 - **Referências dos testes**: exemplos da documentação da Microsoft e, nas distribuições e na regressão, o scipy. Não há Excel nesta máquina: o arquivo gravado não foi aberto nele.
 
-Conferência: 10.111.650 de 10.111.650 fórmulas iguais no arquivo de referência e 140.249 de 140.250 na outra planilha (a mesma que já divergia). Tempo com 4 threads (menos ruído), mediana de 16 rodadas alternadas com a versão anterior: recálculo completo de 1368 para 1367 ms, cálculo de 1287 para 1299 ms. Por isso as pilhas de LET e LAMBDA ficam fora do `Eval` (só são criadas quando usadas) e o que se lê a cada chamada fica numa tabela própria (`funcs::Hot`).
+Conferência: 10.111.650 de 10.111.650 fórmulas iguais no arquivo de referência e 140.249 de 140.249 calculadas na outra planilha (uma usa uma função não suportada e fica com o valor gravado). Tempo com 4 threads (o menor de 12 repetições por rodada, 10 rodadas alternadas com o main anterior): recálculo completo 1353 ms antes e 1342 ms agora; avaliar todas as fórmulas, 1253 e 1248 ms. Por isso as pilhas de LET e LAMBDA ficam fora do `Eval` (só são criadas quando usadas), o teste do argumento temporário é o mesmo teste de limites do nó, os ramos de matriz das funções comuns ficam fora do caminho quente e o que se lê a cada chamada fica numa tabela própria (`funcs::Hot`).
 
 ---
 

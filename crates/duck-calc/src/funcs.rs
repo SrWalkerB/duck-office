@@ -867,25 +867,7 @@ fn chars_skip(s: &str, n: usize) -> &str {
 fn if_<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     let c = e.eval(a[0]);
     if e.is_arrayish(&c) {
-        // SE elemento a elemento (dentro de SOMARPRODUTO / fórmula matricial).
-        let arr = e.to_arr(c);
-        let yes = a.get(1).map(|&n| e.eval(n)).unwrap_or(V::Bool(true));
-        let no = a.get(2).map(|&n| e.eval(n)).unwrap_or(V::Bool(false));
-        let (y, n) = (e.to_arr(yes), e.to_arr(no));
-        // A condição de uma linha (ou coluna) se repete sobre os valores.
-        let rows = if arr.rows == 1 { y.rows.max(n.rows) } else { arr.rows };
-        let cols = if arr.cols == 1 { y.cols.max(n.cols) } else { arr.cols };
-        let mut v = Vec::with_capacity((rows * cols) as usize);
-        for r in 0..rows {
-            for col in 0..cols {
-                v.push(match to_bool(arr.get(r, col)) {
-                    Ok(true) => y.get(r, col).clone(),
-                    Ok(false) => n.get(r, col).clone(),
-                    Err(err) => V::Err(err),
-                });
-            }
-        }
-        return Ok(V::Arr(Rc::new(Arr { rows, cols, v })));
+        return Ok(if_items(e, c, a));
     }
     let c = e.to_scalar(c);
     let t = to_bool(&c)?;
@@ -897,21 +879,42 @@ fn if_<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     }
 }
 
-fn ifs<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
-    let first = e.eval(a[0]);
-    if many(e, &first) {
-        return Ok(e.lifted(ifs, u32::MAX, a));
+/// SE elemento a elemento (dentro de SOMARPRODUTO / fórmula matricial).
+#[cold]
+#[inline(never)]
+fn if_items<'e>(e: &mut Eval<'e>, c: V<'e>, a: &[u32]) -> V<'e> {
+    let arr = e.to_arr(c);
+    let yes = a.get(1).map(|&n| e.eval(n)).unwrap_or(V::Bool(true));
+    let no = a.get(2).map(|&n| e.eval(n)).unwrap_or(V::Bool(false));
+    let (y, n) = (e.to_arr(yes), e.to_arr(no));
+    // A condição de uma linha (ou coluna) se repete sobre os valores.
+    let rows = if arr.rows == 1 { y.rows.max(n.rows) } else { arr.rows };
+    let cols = if arr.cols == 1 { y.cols.max(n.cols) } else { arr.cols };
+    let mut v = Vec::with_capacity((rows * cols) as usize);
+    for r in 0..rows {
+        for col in 0..cols {
+            v.push(match to_bool(arr.get(r, col)) {
+                Ok(true) => y.get(r, col).clone(),
+                Ok(false) => n.get(r, col).clone(),
+                Err(err) => V::Err(err),
+            });
+        }
     }
-    let mut first = Some(e.to_scalar(first));
+    V::Arr(Rc::new(Arr { rows, cols, v }))
+}
+
+fn ifs<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
+    if e.array {
+        let first = e.eval(a[0]);
+        if many(e, &first) {
+            return Ok(e.lifted(ifs, u32::MAX, a));
+        }
+    }
     for p in a.chunks(2) {
         if p.len() < 2 {
             return Err(CellError::Value);
         }
-        let test = match first.take() {
-            Some(v) => to_bool(&v)?,
-            None => e.boolean(p[0])?,
-        };
-        if test {
+        if e.boolean(p[0])? {
             return Ok(e.eval(p[1]));
         }
     }
@@ -942,6 +945,8 @@ fn iferror<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
 
 /// Matriz com os itens que `bad` acusa trocados pelos de `other` (calculado
 /// só se algum precisa: pode ser uma LAMBDA recursiva).
+#[cold]
+#[inline(never)]
 fn replace_errors<'e>(e: &mut Eval<'e>, v: V<'e>, other: u32, bad: fn(&V) -> bool) -> V<'e> {
     let arr = e.to_arr(v);
     if !arr.v.iter().any(bad) {
@@ -1074,29 +1079,7 @@ fn switch<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
 fn choose<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     let sel = e.eval(a[0]);
     if e.array && matches!(&sel, V::Arr(x) if x.rows * x.cols > 1) {
-        // ESCOLHER({1;2};A:A;C:C): cada item da seleção vem da sua matriz.
-        let sel = e.to_arr(sel);
-        let parts: Vec<Rc<Arr>> = a[1..]
-            .iter()
-            .map(|&n| {
-                let v = e.eval(n);
-                e.to_arr(v)
-            })
-            .collect();
-        let rows = parts.iter().map(|p| p.rows).fold(sel.rows, u32::max);
-        let cols = parts.iter().map(|p| p.cols).fold(sel.cols, u32::max);
-        let mut v = Vec::with_capacity((rows * cols) as usize);
-        for r in 0..rows {
-            for c in 0..cols {
-                let k = e.to_num(sel.get(r, c)).map(|k| k.trunc() as usize);
-                v.push(match k {
-                    Ok(k) if k >= 1 && k <= parts.len() => parts[k - 1].get(r, c).clone(),
-                    Ok(_) => V::Err(CellError::Value),
-                    Err(x) => V::Err(x),
-                });
-            }
-        }
-        return Ok(V::Arr(Rc::new(Arr { rows, cols, v })));
+        return Ok(choose_items(e, sel, a));
     }
     let sel = e.to_scalar(sel);
     let k = e.to_num(&sel)?.trunc() as i64;
@@ -1104,6 +1087,34 @@ fn choose<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
         return Err(CellError::Value);
     }
     Ok(e.eval(a[k as usize]))
+}
+
+/// ESCOLHER({1;2};A:A;C:C): cada item da seleção vem da sua matriz.
+#[cold]
+#[inline(never)]
+fn choose_items<'e>(e: &mut Eval<'e>, sel: V<'e>, a: &[u32]) -> V<'e> {
+    let sel = e.to_arr(sel);
+    let parts: Vec<Rc<Arr>> = a[1..]
+        .iter()
+        .map(|&n| {
+            let v = e.eval(n);
+            e.to_arr(v)
+        })
+        .collect();
+    let rows = parts.iter().map(|p| p.rows).fold(sel.rows, u32::max);
+    let cols = parts.iter().map(|p| p.cols).fold(sel.cols, u32::max);
+    let mut v = Vec::with_capacity((rows * cols) as usize);
+    for r in 0..rows {
+        for c in 0..cols {
+            let k = e.to_num(sel.get(r, c)).map(|k| k.trunc() as usize);
+            v.push(match k {
+                Ok(k) if k >= 1 && k <= parts.len() => parts[k - 1].get(r, c).clone(),
+                Ok(_) => V::Err(CellError::Value),
+                Err(x) => V::Err(x),
+            });
+        }
+    }
+    V::Arr(Rc::new(Arr { rows, cols, v }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1219,18 +1230,23 @@ fn row<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     match a.first() {
         None => Ok(V::Num(e.row as f64 + 1.0)),
         Some(&n) => match e.eval(n) {
-            V::Ref(r) if e.array && r.rows() > 1 => {
-                let r1 = r.r1.min(r.r0.max(e.book.max_rows.saturating_sub(1)));
-                // Um bloco limitado (`LIN(1:100)`) vale inteiro.
-                let r1 = if r.rows() <= 1_000_000 { r.r1 } else { r1 };
-                let v: Vec<V> = (r.r0..=r1).map(|i| V::Num(i as f64 + 1.0)).collect();
-                Ok(V::Arr(Rc::new(Arr { rows: v.len() as u32, cols: 1, v })))
-            }
+            V::Ref(r) if e.array && r.rows() > 1 => Ok(row_items(e, r)),
             V::Ref(r) => Ok(V::Num(r.r0 as f64 + 1.0)),
             V::Err(x) => Err(x),
             _ => Err(CellError::Value),
         },
     }
+}
+
+/// LIN de um intervalo, linha por linha.
+#[cold]
+#[inline(never)]
+fn row_items<'e>(e: &Eval<'e>, r: Rng) -> V<'e> {
+    let r1 = r.r1.min(r.r0.max(e.book.max_rows.saturating_sub(1)));
+    // Um bloco limitado (`LIN(1:100)`) vale inteiro.
+    let r1 = if r.rows() <= 1_000_000 { r.r1 } else { r1 };
+    let v: Vec<V> = (r.r0..=r1).map(|i| V::Num(i as f64 + 1.0)).collect();
+    V::Arr(Rc::new(Arr { rows: v.len() as u32, cols: 1, v }))
 }
 
 fn column<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {

@@ -578,11 +578,11 @@ impl<'e> Eval<'e> {
     }
 
     pub fn eval(&mut self, n: u32) -> V<'e> {
-        if n & TEMP != 0 {
-            return self.temp(n);
-        }
         let f = self.f;
-        match f.node(n) {
+        // Fora da fórmula (bit TEMP): um argumento já calculado. É o mesmo
+        // teste de limites de qualquer acesso.
+        let Some(node) = f.nodes.get(n as usize) else { return self.temp(n) };
+        match node {
             Node::Num(x) => V::Num(*x),
             Node::Str(s) => V::Str(Cow::Borrowed(s)),
             Node::Bool(b) => V::Bool(*b),
@@ -645,11 +645,9 @@ impl<'e> Eval<'e> {
                 let v = ids.iter().map(|&i| self.eval(i)).collect();
                 V::Arr(Rc::new(Arr { rows: *rows, cols: *cols, v }))
             }
-            Node::Local(k) => match self.local(*k) {
-                V::Fn(x) if matches!(*x, Fun::Omitted) => V::Empty,
-                v => v,
-            },
-            Node::Lambda { .. } | Node::Func(_) | Node::Apply { .. } => self.function_node(n),
+            Node::Local(_) | Node::Lambda { .. } | Node::Func(_) | Node::Apply { .. } => {
+                self.function_node(node)
+            }
             Node::Range(a, b) => {
                 let (a, b) = (*a, *b);
                 match (self.eval(a), self.eval(b)) {
@@ -687,9 +685,13 @@ impl<'e> Eval<'e> {
     /// caminho das fórmulas comuns.
     #[cold]
     #[inline(never)]
-    fn function_node(&mut self, n: u32) -> V<'e> {
+    fn function_node(&mut self, node: &'e Node) -> V<'e> {
         let f = self.f;
-        match f.node(n) {
+        match node {
+            Node::Local(k) => match self.local(*k) {
+                V::Fn(x) if matches!(*x, Fun::Omitted) => V::Empty,
+                v => v,
+            },
             Node::Lambda { params, optional, body } => V::Fn(Rc::new(Fun::Lambda {
                 f,
                 params: *params,
@@ -924,8 +926,7 @@ impl<'e> Eval<'e> {
     pub fn final_value(&mut self, v: V<'e>) -> V<'e> {
         match v {
             V::Ref(r) => self.deref(r),
-            V::Arr(a) if a.v.len() > 1 => self.first(&a),
-            V::Arr(a) => a.v.first().cloned().unwrap_or(V::Err(CellError::Value)),
+            V::Arr(a) => self.first(&a),
             V::Empty => V::Num(0.0),
             V::Fn(_) => V::Err(CellError::Calc),
             v => v,
@@ -952,8 +953,12 @@ impl<'e> Eval<'e> {
     }
 
     /// Primeiro item de uma matriz num lugar que pede um valor só.
+    #[cold]
+    #[inline(never)]
     fn first(&self, a: &Arr<'e>) -> V<'e> {
-        self.reduced.set(true);
+        if a.v.len() > 1 {
+            self.reduced.set(true);
+        }
         a.v.first().cloned().unwrap_or(V::Err(CellError::Value))
     }
 
@@ -966,17 +971,16 @@ impl<'e> Eval<'e> {
     pub fn to_scalar(&self, v: V<'e>) -> V<'e> {
         match v {
             V::Ref(r) => self.deref(r),
-            V::Arr(a) if a.v.len() > 1 => self.first(&a),
-            V::Arr(a) => a.v.first().cloned().unwrap_or(V::Err(CellError::Value)),
+            V::Arr(a) => self.first(&a),
             v => v,
         }
     }
 
     pub fn is_missing(&self, n: u32) -> bool {
-        if n & TEMP != 0 {
-            return matches!(self.temp(n), V::Fn(f) if matches!(*f, Fun::Omitted));
+        match self.f.nodes.get(n as usize) {
+            Some(node) => matches!(node, Node::Missing),
+            None => matches!(self.temp(n), V::Fn(f) if matches!(*f, Fun::Omitted)),
         }
-        matches!(self.f.node(n), Node::Missing)
     }
 
     /// Nó da fórmula atual (`None` para argumentos já calculados).
