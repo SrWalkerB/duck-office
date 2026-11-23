@@ -12,7 +12,8 @@
 
 mod blank;
 mod cells;
-mod cellxml;
+pub(crate) mod cellxml;
+mod convert;
 mod cube;
 mod deflate;
 mod objects;
@@ -89,6 +90,10 @@ pub struct SaveReport {
     pub verify: Duration,
 }
 
+/// O `.xlsb` só é salvo noutro formato.
+const XLSB_SAVE: &str =
+    "O duck-sheets não grava pastas binárias (.xlsb): salve como .xlsx (ou .xlsm, se tiver macros).";
+
 /// Abas grandes usam o inflate paralelo para reler o original.
 const PARALLEL_INFLATE_MIN: usize = 8 * 1024 * 1024;
 
@@ -103,6 +108,9 @@ impl Book {
         out: &Path,
         opts: &SaveOptions,
     ) -> Result<SaveReport, Error> {
+        if self.is_binary() {
+            return Err(Error::Unsupported(XLSB_SAVE));
+        }
         let t0 = Instant::now();
         let mut rep = SaveReport::default();
         let tabs = match &opts.tabs {
@@ -315,7 +323,7 @@ impl Book {
                 }
             }
         }
-        cellxml::DYN_CM.store(cm, std::sync::atomic::Ordering::Relaxed);
+        let _cm = cellxml::dynamic_cm(cm);
 
         if let Some(cc) = calc_chain {
             let ct = work.read(&self.pkg, &small, "[Content_Types].xml")?;
@@ -958,6 +966,9 @@ fn temp_path(dest: &Path) -> PathBuf {
 /// gravando em `dest` (pode ser o próprio `src`). Grava num temporário, relê
 /// as abas regravadas e confere com o modelo antes de substituir `dest`:
 /// um defeito do gravador nunca destrói o arquivo original.
+///
+/// Se `src` é um `.xlsb`, ele é convertido antes ([`convert`]) e `dest` tem de
+/// ser `.xlsx` ou `.xlsm` (com as macros).
 pub fn save_file(
     src: &Path,
     dest: &Path,
@@ -967,11 +978,25 @@ pub fn save_file(
     opts: &SaveOptions,
 ) -> Result<SaveReport, Error> {
     let tmp = temp_path(dest);
+    let base = tmp.with_extension("duck-convertendo");
     let result = (|| {
-        let book = Book::open(src)?;
+        let mut book = Book::open(src)?;
+        let converted = book.is_binary();
+        if converted {
+            let ext = dest.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+            if ext == "xlsb" {
+                return Err(Error::Unsupported(XLSB_SAVE));
+            }
+            convert::to_xlsx(&book, &base, matches!(ext.as_str(), "xlsm" | "xltm"), opts.level)?;
+            book = Book::open(&base)?;
+        }
         let mut rep = book.save(sheets, shared, styles, &tmp, opts)?;
         // O original precisa estar fechado (sem mapeamento) para ser substituído.
         drop(book);
+        if converted {
+            // Todas as abas foram escritas agora: todas são conferidas.
+            rep.sheets_rewritten = (0..sheets.len()).collect();
+        }
         if opts.verify {
             let t = Instant::now();
             verify(&tmp, sheets, shared, styles, &rep.sheets_rewritten)?;
@@ -983,6 +1008,7 @@ pub fn save_file(
         std::fs::rename(&tmp, dest)?;
         Ok(rep)
     })();
+    let _ = std::fs::remove_file(&base);
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

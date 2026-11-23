@@ -332,6 +332,7 @@ pub fn register_file_types(exe: &Path, name: &str, exts: &[&str]) -> Result<(), 
             .map(|e| match *e {
                 "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 "xlsm" => "application/vnd.ms-excel.sheet.macroEnabled.12",
+                "xlsb" => "application/vnd.ms-excel.sheet.binary.macroEnabled.12",
                 "csv" => "text/csv",
                 _ => "application/octet-stream",
             })
@@ -353,7 +354,7 @@ pub fn register_file_types(exe: &Path, name: &str, exts: &[&str]) -> Result<(), 
     #[cfg(target_os = "macos")]
     {
         let _ = (exe, name, exts);
-        Err("no macOS o duck-sheets.app do pacote já se registra para .xlsx, .xlsm e .csv".into())
+        Err("no macOS o duck-sheets.app do pacote já se registra para .xlsx, .xlsm, .xlsb e .csv".into())
     }
 }
 

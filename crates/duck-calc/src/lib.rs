@@ -605,6 +605,46 @@ fn push_part(out: &mut String, abs: bool, value: i64, origin: i64) {
     }
 }
 
+/// Uma parte (linha ou coluna) de referência, para montar um modelo relativo
+/// direto, sem passar pelo texto A1 (leitura do `.xlsb`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefPart {
+    /// Posição, base 0.
+    Abs(u32),
+    /// Deslocamento a partir da célula.
+    Rel(i32),
+}
+
+impl RefPart {
+    fn push(self, out: &mut String) {
+        match self {
+            RefPart::Abs(v) => push_part(out, true, v as i64 + 1, 0),
+            RefPart::Rel(d) => push_part(out, false, d as i64, 0),
+        }
+    }
+}
+
+/// Acrescenta ao modelo a referência a uma célula (`A1`).
+pub fn template_cell(out: &mut String, col: RefPart, row: RefPart) {
+    out.push(M_CELL);
+    col.push(out);
+    out.push(M_SEP);
+    row.push(out);
+    out.push(M_END);
+}
+
+/// Acrescenta ao modelo um intervalo de colunas (`A:C`) ou linhas (`2:5`) inteiras.
+pub fn template_span(out: &mut String, rows: bool, first: RefPart, last: RefPart) {
+    for (k, p) in [first, last].into_iter().enumerate() {
+        if k > 0 {
+            out.push(':');
+        }
+        out.push(if rows { M_ROW } else { M_COL });
+        p.push(out);
+        out.push(M_END);
+    }
+}
+
 fn read_part(s: &str, origin: i64) -> (bool, i64) {
     match s.strip_prefix('$') {
         Some(v) => (true, v.parse().unwrap_or(0)),
@@ -727,6 +767,24 @@ pub fn from_template(template: &str, row: u32, col: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// O modelo montado por partes é o mesmo que o do texto.
+    #[test]
+    fn template_by_parts() {
+        use RefPart::{Abs, Rel};
+        let mut s = String::from("SUM(");
+        template_cell(&mut s, Rel(-1), Abs(0));
+        s.push(':');
+        template_cell(&mut s, Abs(3), Rel(2));
+        s.push(',');
+        template_span(&mut s, false, Rel(0), Abs(4));
+        s.push(',');
+        template_span(&mut s, true, Abs(1), Rel(1));
+        s.push(')');
+        // Célula C5 (linha 4, coluna 2).
+        assert_eq!(from_template(&s, 4, 2), "SUM(B$1:$D7,C:$E,$2:6)");
+        assert_eq!(to_template("SUM(B$1:$D7,C:$E,$2:6)", 4, 2).as_deref(), Some(s.as_str()));
+    }
 
     #[test]
     fn shifts_relative_refs_only() {

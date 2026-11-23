@@ -117,7 +117,17 @@ pub fn escape_attr(s: &str, out: &mut Vec<u8>) {
 
 /// Índice de metadados (`cm`) das matrizes dinâmicas no arquivo que está
 /// sendo gravado (0 = sem: a fórmula sai como matriz comum).
-pub static DYN_CM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static DYN_CM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Uma gravação por vez usa o índice acima.
+static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Define o índice de metadados enquanto a guarda viver.
+pub fn dynamic_cm(cm: u32) -> std::sync::MutexGuard<'static, ()> {
+    let guard = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    DYN_CM.store(cm, std::sync::atomic::Ordering::Relaxed);
+    guard
+}
 
 /// Escreve a célula (linha, coluna) a partir do modelo. `extra` são
 /// atributos do `<c>` original a manter (ex.: ` cm="1"`), já formatados.
@@ -224,29 +234,11 @@ pub fn write_cell_with(
             escape_text(s, out);
             out.extend_from_slice(b"</v>");
         }
-        Value::Text(s) => match sheet.rich_at(row, col, shared) {
-            // Um `<r>` por trecho; sem fonte própria, vale a da célula.
-            Some(runs) => {
-                out.extend_from_slice(b"<is>");
-                for (k, r) in runs.iter().enumerate() {
-                    let end = runs.get(k + 1).map_or(s.len(), |n| n.start as usize);
-                    let Some(text) = s.get(r.start as usize..end).filter(|t| !t.is_empty()) else { continue };
-                    out.extend_from_slice(b"<r>");
-                    if let Some(f) = &r.font {
-                        super::styles::run_xml(f, out);
-                    }
-                    out.extend_from_slice(b"<t xml:space=\"preserve\">");
-                    escape_text(text, out);
-                    out.extend_from_slice(b"</t></r>");
-                }
-                out.extend_from_slice(b"</is>");
-            }
-            None => {
-                out.extend_from_slice(b"<is><t xml:space=\"preserve\">");
-                escape_text(s, out);
-                out.extend_from_slice(b"</t></is>");
-            }
-        },
+        Value::Text(s) => {
+            out.extend_from_slice(b"<is>");
+            rich_xml(s, sheet.rich_at(row, col, shared), out);
+            out.extend_from_slice(b"</is>");
+        }
         Value::Bool(b) => out.extend_from_slice(if b { b"<v>1</v>" } else { b"<v>0</v>" }),
         Value::Error(e) => {
             out.extend_from_slice(b"<v>");
@@ -260,6 +252,28 @@ pub fn write_cell_with(
         out.extend_from_slice(b"/>");
     } else {
         out.extend_from_slice(b"</c>");
+    }
+}
+
+/// Conteúdo de `<is>` ou `<si>`: um `<t>`, ou um `<r>` por trecho.
+pub fn rich_xml(s: &str, runs: Option<&[duck_core::RichRun]>, out: &mut Vec<u8>) {
+    let Some(runs) = runs else {
+        out.extend_from_slice(b"<t xml:space=\"preserve\">");
+        escape_text(s, out);
+        out.extend_from_slice(b"</t>");
+        return;
+    };
+    // Sem fonte própria, vale a da célula.
+    for (k, r) in runs.iter().enumerate() {
+        let end = runs.get(k + 1).map_or(s.len(), |n| n.start as usize);
+        let Some(text) = s.get(r.start as usize..end).filter(|t| !t.is_empty()) else { continue };
+        out.extend_from_slice(b"<r>");
+        if let Some(f) = &r.font {
+            super::styles::run_xml(f, out);
+        }
+        out.extend_from_slice(b"<t xml:space=\"preserve\">");
+        escape_text(text, out);
+        out.extend_from_slice(b"</t></r>");
     }
 }
 

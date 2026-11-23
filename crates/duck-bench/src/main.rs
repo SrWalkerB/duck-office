@@ -4,7 +4,7 @@
 //! duck-bench open   [ARQUIVO] [--threads N] [--chunk-mb M]   lê e mostra tempo, memória e contagens
 //! duck-bench sweep  [ARQUIVO] [--threads 1,2,4,...]          curva de ganho por threads (1 processo por rodada)
 //! duck-bench verify [ARQUIVO]                                compara cada célula com o calamine
-//! duck-bench gen    SAIDA.xlsx [--rows N] [--cols M]         gera planilha sintética
+//! duck-bench gen    SAIDA.xlsx [--rows N] [--cols M]         gera planilha sintética (ou SAIDA.xlsb)
 //! duck-bench preview [ARQUIVO] [--mb N]                      mede o caminho da primeira tela (F2)
 //! duck-bench roundtrip [ARQUIVO] [--rewrite-all] [--edit N] [--estrutura] [--abas] [--celulas] [--level L] [--keep]  salva numa cópia e confere (F3)
 //! duck-bench conferir-pacote ARQUIVO                         procura erros de pacote (relações, tipos, ids, nomes)
@@ -18,6 +18,7 @@
 mod calc;
 mod emf;
 mod generate;
+mod genxlsb;
 mod lint;
 mod mem;
 mod olap;
@@ -426,8 +427,15 @@ fn cmd_verify(args: &[String]) -> Res {
         out.mismatches,
         t.elapsed().as_secs_f64()
     );
-    println!("{} fórmulas comparadas, {} divergências", out.formulas_compared, out.formula_mismatches);
-    println!("{} mesclagens comparadas, {} divergências", out.merges_compared, out.merge_mismatches);
+    if out.binary {
+        println!(
+            "pasta binária: {} erros de fórmula que o calamine não lê; fórmulas conferidas por `duck-bench calc`",
+            out.formula_errors
+        );
+    } else {
+        println!("{} fórmulas comparadas, {} divergências", out.formulas_compared, out.formula_mismatches);
+        println!("{} mesclagens comparadas, {} divergências", out.merges_compared, out.merge_mismatches);
+    }
     for s in &out.samples {
         println!("  {s}");
     }
@@ -445,7 +453,12 @@ fn cmd_gen(args: &[String]) -> Res {
         small_sheets: flag(args, "--small-sheets").and_then(|v| v.parse().ok()).unwrap_or(10),
     };
     let t = Instant::now();
-    generate::write(Path::new(&out), &spec).map_err(|e| e.to_string())?;
+    let path = Path::new(&out);
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xlsb")) {
+        genxlsb::write(path, &spec).map_err(|e| e.to_string())?;
+    } else {
+        generate::write(path, &spec).map_err(|e| e.to_string())?;
+    }
     let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
     println!(
         "{out}: {} linhas × {} colunas + {} abas pequenas, {:.1} MB, {:.1} s",

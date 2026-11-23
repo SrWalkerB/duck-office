@@ -241,7 +241,7 @@ Futuras: `duck-docs`, `duck-slides`, todas reutilizando `duck-core` (quando fize
 
 **Otimizações futuras.**
 
-- **`.xlsb`** (formato binário do Excel): ordens de grandeza mais rápido de ler; bom alvo para "salvar como formato rápido".
+- **Gravar `.xlsb`** (a leitura existe; veja [Pastas binárias](#pastas-binárias-xlsb-23112026)): bom alvo para "salvar como formato rápido".
 - **`.ods`** (o `.csv` já abre desde a F2).
 - **Formato nativo** (ADR-013) para reabrir instantaneamente, sem XML.
 
@@ -949,6 +949,36 @@ Conferência: `duck-bench roundtrip --abas --celulas` (cria, copia, renomeia, mo
 - **Cliques**: formas sem preenchimento e linhas só pegam perto do traço, e o que está atrás continua clicável.
 
 Conferência: `duck-bench regress` move todos os objetos de todas as abas, grava e relê ("mover objetos").
+
+### Pastas binárias: `.xlsb` (23/11/2026)
+
+O `.xlsb` é o mesmo zip do `.xlsx`, com a pasta, as abas, os estilos, as tabelas e os arquivos externos em registros binários (BIFF12, MS-XLSB). Desenhos, gráficos e tema são XML. O módulo é o `crates/duck-xlsx/src/xlsb/`.
+
+**Duas leituras.** Só as **células** vão do binário direto para os blocos colunares (`sheet.rs`). **Todo o resto** passa pela camada (`Layer`): ela apresenta `xl/workbook.bin` como `xl/workbook.xml`, `sheet1.bin` como `sheet1.xml`, e traduz cada parte para XML na hora em que alguém a lê. Os leitores de estilos, tabelas, filtros, formatação condicional, links, desenhos e nomes são os do `.xlsx`, sem um segundo modelo para manter, e "salvar como `.xlsx`" já tem as partes prontas. A tradução custa pouco: são partes pequenas (39 mil formatos diferenciais: ~15 ms).
+
+**Células em paralelo.** Registros não têm marca de sincronismo, então uma thread percorre só os cabeçalhos (`Feeder`), corta em começos de linha e guarda as fórmulas compartilhadas **antes** de entregar o pedaço que as cita. As tarefas leem os pedaços e o `Merger` das abas em XML junta tudo em ordem: o resultado é idêntico com qualquer número de threads. O inflate paralelo não é usado: medido, ele piora o binário (20 milhões de células: 1,1–1,3 s contra ~0,5 s, com o dobro de memória), porque quase todo marcador precisa ser resolvido em série.
+
+**Fórmulas** (`ptg.rs`, `ftab.rs`). Os tokens `Ptg` viram texto em duas etapas: `normalize` troca, numa passada, as referências relativas por deslocamentos (e tira o que não aparece no texto); `decode` monta o **modelo relativo** do `duck-calc`, só para chaves novas. Cópias para baixo e membros de uma fórmula compartilhada têm a mesma chave, e nem passam pelo texto A1. Uma fórmula com token desconhecido deixa a célula com o valor gravado, e a conta aparece na barra de status.
+
+**Robustez.** Todo campo é lido com limite (`Cur`), os intervalos são conferidos com o tamanho da aba e nenhum contador do arquivo reserva memória. Um teste corrompe e trunca as partes (`DUCK_RODADAS=3000` para mais rodadas): erro ou o que der para ler, nunca um pânico.
+
+**Salvar: noutro formato.** O binário não é regravado. Entre "só leitura" e "salvar como `.xlsx`/`.xlsm`", ficou o segundo: quem edita não perde o trabalho, e o `.xlsb` original nunca é tocado. O custo é que o arquivo novo não tem o que não é lido (tabelas dinâmicas, segmentações, linhas do tempo, comentários, controles, conexões, Modelo de Dados, proteção de aba), e a pergunta antes de salvar lista o que houver. `write/convert.rs` grava um pacote XML temporário (partes traduzidas + células do modelo, uma aba por vez) e as edições entram nele pelo gravador de sempre; todas as abas são relidas e conferidas. As macros só vão para `.xlsm`. Gráficos dinâmicos viram gráficos comuns, com os intervalos sem a linha de total.
+
+**Conferência.** `duck-bench verify` compara os valores com o calamine (as fórmulas, não: no `.xlsb` o calamine não expande as compartilhadas, perde o `$`, tem a tabela de funções deslocada a partir da 469 e não lê `BrtFmlaError`). As fórmulas são conferidas por `duck-bench calc`, que recalcula cada uma. Larguras, alturas, linhas ocultas, mesclagens, painéis e tabelas bateram com a conversão do OnlyOffice. `duck-bench gen SAIDA.xlsb` gera a versão binária da planilha sintética (no CI). O resultado convertido foi lido pelo calamine, pelo openpyxl e pelo OnlyOffice; **não** foi aberto no Excel.
+
+Medido em duas planilhas reais (Ryzen 9 5950X, 16 threads, 5 rodadas, computador em uso):
+
+| | 34 MB (14 abas) | 23 MB (10 abas) | Sintética, 88 MB |
+|---|---|---|---|
+| Células com valor | 3.463.986 | 2.172.898 | 20,3 milhões na maior aba |
+| Valores diferentes do calamine | 0 | 0 | 0 (na de 100 mil linhas) |
+| Fórmulas recalculadas iguais | **604.535 de 604.535** | **1.184.961 de 1.184.961** | — |
+| Só a leitura (com 1 thread) | **81–88 ms** (383 ms) | **83–93 ms** (297 ms) | **~0,5 s** (1,1 s) |
+| Pico de memória na leitura | 110–120 MB | 84–97 MB | 188 MB |
+| Primeira tela com dados no app | 258–309 ms | 268–314 ms | — |
+| Todas as abas no app | 344–408 ms | 349–419 ms | — |
+| Memória do app com tudo aberto | 306–322 MB | 237–254 MB | — |
+| Salvar como `.xlsm`, com a conferência | 4,5 s | 1,0 s | — |
 
 ### Funções e LAMBDA (23/11/2026)
 

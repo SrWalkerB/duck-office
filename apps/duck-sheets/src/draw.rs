@@ -498,7 +498,7 @@ impl SheetsApp {
                 let msg = if self.loader.is_some() || self.doc.is_some() {
                     if self.message.is_empty() { "Carregando…".to_string() } else { self.message.clone() }
                 } else {
-                    "Arraste um arquivo .xlsx, .xlsm ou .csv para cá, ou pressione Ctrl+O para abrir"
+                    "Arraste um arquivo .xlsx, .xlsm, .xlsb ou .csv para cá, ou pressione Ctrl+O para abrir"
                         .to_string()
                 };
                 let area = Rect::new(0.0, geom.fbar.y1, geom.w, geom.tabs.y0);

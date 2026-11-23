@@ -176,11 +176,6 @@ pub fn read_workbook(pkg: &Package) -> Result<WorkbookMeta, Error> {
         .find(|r| r.kind.ends_with("/officeDocument"))
         .map(|r| r.target.clone())
         .unwrap_or_else(|| "xl/workbook.xml".into());
-    if wb_path.to_ascii_lowercase().ends_with(".bin") {
-        return Err(Error::Unsupported(
-            "Pasta de trabalho binária (.xlsb), que o duck-sheets ainda não lê. No Excel, salve como .xlsx (ou .xlsm, se tiver macros).",
-        ));
-    }
     let buf = pkg.read(&wb_path)?;
     let rels = read_rels(pkg, &wb_path)?;
     let by_id = |id: &str| rels.iter().find(|r| r.id == id);
@@ -240,6 +235,9 @@ pub fn read_workbook(pkg: &Package) -> Result<WorkbookMeta, Error> {
 /// Lê `sharedStrings.xml`. O XML é cortado em fronteiras de `</si>` e cada
 /// pedaço vira uma tabela numa thread; as tabelas são juntadas em ordem.
 pub fn read_shared_strings(pkg: &Package, path: &str) -> Result<StringTable, Error> {
+    if let Some(real) = pkg.xlsb().and_then(|x| x.real(path)) {
+        return crate::xlsb::read_strings(pkg, real);
+    }
     let buf = pkg.read(path)?;
     const PIECE: usize = 4 * 1024 * 1024;
     let mut cuts = vec![0usize];
@@ -298,7 +296,7 @@ pub(crate) fn rich_runs(content: &[u8], len: usize) -> Option<Vec<RichRun>> {
 }
 
 /// Fonte de um trecho (`<rPr>`): marcas presentes valem, o resto herda da célula.
-fn run_font(c: &[u8]) -> RunFont {
+pub(crate) fn run_font(c: &[u8]) -> RunFont {
     RunFont {
         name: find_tag(c, 0, b"rFont").and_then(|t| attr_str(t.attrs, b"val")).filter(|n| !n.is_empty()),
         size: find_tag(c, 0, b"sz")
@@ -694,11 +692,12 @@ mod tests {
         };
         let error =
             |p: &std::path::Path| crate::Book::open(p).err().map(|e| e.to_string()).unwrap_or_default();
+        // Pasta binária sem abas (a leitura delas está em `xlsb`).
         let xlsb = write(
             "a.xlsb",
             &[("_rels/.rels", &rels("xl/workbook.bin", "officeDocument")), ("xl/workbook.bin", "x")],
         );
-        assert!(error(&xlsb).contains(".xlsb"), "{}", error(&xlsb));
+        assert!(error(&xlsb).contains("nenhuma aba"), "{}", error(&xlsb));
         let empty = write(
             "b.xlsx",
             &[

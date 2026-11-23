@@ -62,6 +62,8 @@ impl Entry {
 pub struct Package {
     mmap: Mmap,
     entries: HashMap<String, Entry>,
+    /// `.xlsb`: as partes binárias, apresentadas como XML.
+    xlsb: Option<Box<crate::xlsb::Layer>>,
 }
 
 impl Package {
@@ -108,11 +110,30 @@ impl Package {
                 Entry { name, data_offset, compressed, size: f.size(), crc32: f.crc32(), method },
             );
         }
-        Ok(Self { mmap, entries })
+        let mut pkg = Self { mmap, entries, xlsb: None };
+        pkg.xlsb = crate::xlsb::Layer::new(&pkg).map(Box::new);
+        Ok(pkg)
+    }
+
+    /// A camada do `.xlsb`, se o pacote for um.
+    pub(crate) fn xlsb(&self) -> Option<&crate::xlsb::Layer> {
+        self.xlsb.as_deref()
     }
 
     pub fn entry(&self, name: &str) -> Option<&Entry> {
-        self.entries.get(name)
+        match &self.xlsb {
+            Some(x) => self.entries.get(x.real(name).unwrap_or(name)),
+            None => self.entries.get(name),
+        }
+    }
+
+    /// A parte existe no zip (sem a camada do `.xlsb`).
+    pub(crate) fn has_raw(&self, name: &str) -> bool {
+        self.entries.contains_key(name)
+    }
+
+    pub(crate) fn raw_names(&self) -> impl Iterator<Item = &str> {
+        self.entries.keys().map(String::as_str)
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &Entry> {
@@ -128,6 +149,14 @@ impl Package {
 
     /// Lê uma parte inteira (para partes pequenas: workbook, rels, estilos...).
     pub fn read(&self, name: &str) -> Result<Vec<u8>, Error> {
+        match self.xlsb.as_ref().and_then(|x| x.read(self, name)) {
+            Some(r) => r,
+            None => self.read_raw(name),
+        }
+    }
+
+    /// Como [`Package::read`], sem a camada do `.xlsb`.
+    pub(crate) fn read_raw(&self, name: &str) -> Result<Vec<u8>, Error> {
         let e = self.entries.get(name).ok_or_else(|| Error::Missing(name.to_string()))?;
         if !e.readable() {
             return Err(Error::Zip(format!("parte {name} usa compressão ou criptografia não suportada")));

@@ -27,7 +27,11 @@ pub fn cmd(args: &[String]) -> Res {
     let out = match flag(args, "--out") {
         Some(o) => PathBuf::from(o),
         None => {
-            let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("xlsx");
+            // O `.xlsb` é salvo como `.xlsm` (com as macros, se houver).
+            let ext = match src.extension().and_then(|e| e.to_str()).unwrap_or("xlsx") {
+                e if e.eq_ignore_ascii_case("xlsb") => "xlsm",
+                e => e,
+            };
             std::env::temp_dir().join(format!("duck-roundtrip-{}.{ext}", std::process::id()))
         }
     };
@@ -95,6 +99,11 @@ pub fn cmd(args: &[String]) -> Res {
     result
 }
 
+/// O arquivo é um `.xlsb`?
+fn binary(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xlsb"))
+}
+
 fn check(src: &Path, out: &Path, saved: &duck_xlsx::SaveReport, args: &[String]) -> Res {
     // Partes copiadas: idênticas byte a byte.
     let a = Package::open(src).map_err(|e| e.to_string())?;
@@ -113,18 +122,23 @@ fn check(src: &Path, out: &Path, saved: &duck_xlsx::SaveReport, args: &[String])
             changed.push(e.name.clone());
         }
     }
-    println!("partes idênticas: {same}; mudadas: {changed:?}; fora: {missing:?}");
-    // Uma parte regravada pode sair idêntica (mesmo XML, mesmo deflate).
-    if changed.len() > saved.parts_rewritten + saved.parts_added.len() {
-        return Err(format!(
-            "{} partes mudaram, mas {} foram regravadas",
-            changed.len(),
-            saved.parts_rewritten
-        ));
-    }
-    missing.retain(|m| !saved.parts_removed.contains(m));
-    if missing.len() != usize::from(saved.calc_chain_removed) {
-        return Err("partes sumiram na cópia".into());
+    if binary(src) {
+        // Convertido: o pacote é outro, e só desenhos e imagens são os mesmos.
+        println!("convertido de .xlsb: {same} partes idênticas, {} mudadas", changed.len());
+    } else {
+        println!("partes idênticas: {same}; mudadas: {changed:?}; fora: {missing:?}");
+        // Uma parte regravada pode sair idêntica (mesmo XML, mesmo deflate).
+        if changed.len() > saved.parts_rewritten + saved.parts_added.len() {
+            return Err(format!(
+                "{} partes mudaram, mas {} foram regravadas",
+                changed.len(),
+                saved.parts_rewritten
+            ));
+        }
+        missing.retain(|m| !saved.parts_removed.contains(m));
+        if missing.len() != usize::from(saved.calc_chain_removed) {
+            return Err("partes sumiram na cópia".into());
+        }
     }
     let added = b.entries().filter(|e| a.entry(&e.name).is_none()).count();
     if added > 0 || !saved.parts_removed.is_empty() {
@@ -132,7 +146,8 @@ fn check(src: &Path, out: &Path, saved: &duck_xlsx::SaveReport, args: &[String])
     }
     drop((a, b));
     let problems = crate::lint::check(out);
-    let before = crate::lint::check(src);
+    // O pacote binário tem outras regras: o convertido não pode ter problema nenhum.
+    let before = if binary(src) { Vec::new() } else { crate::lint::check(src) };
     let new: Vec<&String> = problems.iter().filter(|p| !before.contains(p)).collect();
     if !new.is_empty() {
         new.iter().for_each(|p| println!("  pacote: {p}"));

@@ -67,6 +67,7 @@ pub fn app(sheets: &[(&str, &[(&str, &str)])]) -> SheetsApp {
         pivots: Default::default(),
         macros: None,
         macros_ok: false,
+        binary: None,
     });
     for (i, (_, cells)) in sheets.iter().enumerate() {
         a.switch_sheet(i);

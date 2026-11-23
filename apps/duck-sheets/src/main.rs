@@ -1,4 +1,5 @@
 //! `duck-sheets`: editor de planilhas `.xlsx` / `.xlsm` / `.csv` (F2, F3).
+//! Abre também `.xlsb` (salvo como `.xlsx`/`.xlsm`).
 //!
 //! ```text
 //! duck-sheets [ARQUIVO] [--sheet N] [--cell B12] [--zoom 80] [--find TEXTO]

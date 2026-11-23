@@ -1,10 +1,17 @@
 //! Confere célula a célula o que o `duck-xlsx` leu contra o `calamine`,
 //! um leitor de xlsx independente e maduro.
+//!
+//! No `.xlsb` só os valores são comparados: o calamine não expande as fórmulas
+//! compartilhadas e de matriz, perde o `$` das referências e troca funções (a
+//! tabela dele está deslocada a partir da 469). As fórmulas do `.xlsb` são
+//! conferidas pelo recálculo (`duck-bench calc`).
 
-use calamine::{Data, Reader, Xlsx, open_workbook, open_workbook_auto};
+use calamine::{Data, Reader, Sheets, Xlsx, open_workbook, open_workbook_auto};
 use duck_core::{Value, Workbook};
 
 pub struct Outcome {
+    /// O arquivo é um `.xlsb`.
+    pub binary: bool,
     pub sheets: usize,
     pub compared: u64,
     pub mismatches: u64,
@@ -12,6 +19,8 @@ pub struct Outcome {
     pub formula_mismatches: u64,
     pub merges_compared: u64,
     pub merge_mismatches: u64,
+    /// Erros de fórmula do `.xlsb`: o calamine pula esse registro (`BrtFmlaError`).
+    pub formula_errors: u64,
     pub samples: Vec<String>,
 }
 
@@ -101,7 +110,9 @@ fn describe(ours: Value, theirs: &Data) -> String {
 
 pub fn run(path: &std::path::Path, wb: &Workbook) -> Result<Outcome, String> {
     let mut cal = open_workbook_auto(path).map_err(|e| e.to_string())?;
+    let binary = matches!(cal, Sheets::Xlsb(_));
     let mut out = Outcome {
+        binary,
         sheets: 0,
         compared: 0,
         mismatches: 0,
@@ -109,6 +120,7 @@ pub fn run(path: &std::path::Path, wb: &Workbook) -> Result<Outcome, String> {
         formula_mismatches: 0,
         merges_compared: 0,
         merge_mismatches: 0,
+        formula_errors: 0,
         samples: Vec::new(),
     };
     for (si, sheet) in wb.sheets.iter().enumerate() {
@@ -149,6 +161,10 @@ pub fn run(path: &std::path::Path, wb: &Workbook) -> Result<Outcome, String> {
                     let theirs =
                         if in_range { range.get(((row - r0) as usize, (col - c0) as usize)) } else { None };
                     if theirs.is_none_or(|d| matches!(d, Data::Empty)) {
+                        if binary && matches!(v, Value::Error(_)) && sheet.formula(row, col).is_some() {
+                            out.formula_errors += 1;
+                            continue;
+                        }
                         extra += 1;
                         if out.samples.len() < 10 {
                             out.samples.push(format!(
@@ -162,6 +178,9 @@ pub fn run(path: &std::path::Path, wb: &Workbook) -> Result<Outcome, String> {
                 }
             }
             out.mismatches += extra;
+        }
+        if binary {
+            continue;
         }
         // Fórmulas: o calamine expande as compartilhadas por conta própria.
         let fr =

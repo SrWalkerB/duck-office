@@ -67,7 +67,7 @@ impl SheetsApp {
                 duck_platform::info_box(
                     "Sobre o duck-sheets",
                     &format!(
-                        "duck-sheets {}\nPlanilhas .xlsx, .xlsm e .csv, nativo e rápido.\n\nGráficos: {gpu}\nLicença MIT · duck-office",
+                        "duck-sheets {}\nPlanilhas .xlsx, .xlsm, .xlsb e .csv, nativo e rápido.\n\nGráficos: {gpu}\nLicença MIT · duck-office",
                         env!("CARGO_PKG_VERSION")
                     ),
                 );
@@ -623,14 +623,14 @@ impl SheetsApp {
         let Some(w) = &self.window else { return };
         let ok = w.confirm(
             "duck-sheets",
-            "Adicionar o duck-sheets ao \"Abrir com\" do sistema para arquivos .xlsx, .xlsm e .csv? \
+            "Adicionar o duck-sheets ao \"Abrir com\" do sistema para arquivos .xlsx, .xlsm, .xlsb e .csv? \
              Isso registra este programa só para o seu usuário; o programa padrão continua o mesmo.",
         );
         if !ok {
             return;
         }
         let exe = std::env::current_exe().unwrap_or_default();
-        match duck_platform::register_file_types(&exe, "duck-sheets", &["xlsx", "xlsm", "csv"]) {
+        match duck_platform::register_file_types(&exe, "duck-sheets", &["xlsx", "xlsm", "xlsb", "csv"]) {
             Ok(()) => self.message = "duck-sheets adicionado ao \"Abrir com\"".into(),
             Err(e) => duck_platform::message_box("Não foi possível registrar", &e),
         }

@@ -212,6 +212,9 @@ pub struct Doc {
     pub history: crate::edit::History,
     /// Há alterações não salvas.
     pub dirty: bool,
+    /// Aberto de um `.xlsb`: o que o arquivo tem e não é lido (salvar gera um
+    /// `.xlsx`/`.xlsm` sem isso).
+    pub binary: Option<String>,
     /// Recálculo em segundo plano (F4).
     pub calc: crate::calc::Calc,
     /// Tabelas dinâmicas (registros lidos sob demanda).
@@ -219,6 +222,15 @@ pub struct Doc {
     /// Módulos VBA (lidos na primeira macro) e se o usuário deixou executar.
     pub macros: Option<Vec<duck_vba::Module>>,
     pub macros_ok: bool,
+}
+
+/// Aviso de um `.xlsb` aberto, para a barra de status.
+fn binary_note(left_out: &str) -> String {
+    let mut s = String::from(" · .xlsb: salvar gera .xlsx ou .xlsm");
+    if !left_out.is_empty() {
+        s.push_str(&format!(" · não lidos: {left_out}"));
+    }
+    s
 }
 
 impl Doc {
@@ -793,7 +805,7 @@ impl SheetsApp {
         let path = loader.path.clone();
         for m in msgs {
             match m {
-                Msg::Opened { sheets, active, styles, strings, date1904, extras, at } => {
+                Msg::Opened { sheets, active, styles, strings, date1904, extras, binary, at } => {
                     self.images = Default::default();
                     self.note("arquivo aberto", at);
                     self.remember_recent(&path);
@@ -821,6 +833,7 @@ impl SheetsApp {
                         finished: None,
                         history: Default::default(),
                         dirty: false,
+                        binary,
                         calc: crate::calc::Calc::new(extras),
                         pivots: Default::default(),
                         macros: None,
@@ -838,12 +851,19 @@ impl SheetsApp {
                     }
                     self.install_sheet(index, sheet, false);
                 }
-                Msg::Finished { at } => {
+                Msg::Finished { at, unread } => {
                     self.note("todas as abas", at);
                     if let Some(d) = &mut self.doc {
                         d.finished = Some(at);
                     }
                     self.message = format!("Pronto em {} ms", at.as_millis());
+                    if let Some(out) = self.doc.as_mut().and_then(|d| d.binary.as_mut()) {
+                        if unread > 0 {
+                            let sep = if out.is_empty() { "" } else { ", " };
+                            out.push_str(&format!("{sep}fórmulas (ficam os valores): {unread}"));
+                        }
+                        self.message.push_str(&binary_note(out));
+                    }
                     self.refresh_table_slicers();
                     self.refresh_charts();
                     self.load_images();
@@ -2093,8 +2113,8 @@ impl SheetsApp {
     pub(crate) fn pick_and_open(&mut self, cx: &mut Context) {
         let Some(w) = &self.window else { return };
         let filters: &[(&str, &[&str])] = &[
-            ("Planilhas", &["xlsx", "xlsm", "csv", "tsv", "txt"]),
-            ("Planilhas do Excel", &["xlsx", "xlsm"]),
+            ("Planilhas", &["xlsx", "xlsm", "xlsb", "csv", "tsv", "txt"]),
+            ("Planilhas do Excel", &["xlsx", "xlsm", "xlsb"]),
             ("Texto separado (CSV)", &["csv", "tsv", "txt"]),
         ];
         if let Some(p) = w.pick_file("Abrir planilha", filters) {

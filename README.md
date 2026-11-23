@@ -1,6 +1,6 @@
 # duck-office
 
-Suíte office nativa e focada em performance, para Windows, Linux e macOS. O primeiro app é o **duck-sheets** (planilhas compatíveis com `.xlsx`/`.xlsm`), feito para abrir arquivos gigantes sem travar.
+Suíte office nativa e focada em performance, para Windows, Linux e macOS. O primeiro app é o **duck-sheets** (planilhas compatíveis com `.xlsx`/`.xlsm`; abre também `.xlsb` e `.csv`), feito para abrir arquivos gigantes sem travar.
 
 Roadmap e status das fases: [ROADMAP.md](ROADMAP.md) · Decisões de arquitetura: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · Medições: [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
 
@@ -21,7 +21,8 @@ crates/              a suíte office
                      edição e comandos com desfazer
   duck-par/          pool de threads, limitador de memória, cortes SIMD
   duck-deflate/      descompactação deflate em paralelo (especulativa)
-  duck-xlsx/         leitura e gravação de .xlsx/.xlsm (em paralelo, gravação por remendo) e de .csv
+  duck-xlsx/         leitura e gravação de .xlsx/.xlsm (em paralelo, gravação por remendo) e de .csv;
+                     leitura de .xlsb
   duck-calc/         fórmulas: referências, modelos relativos e ajuste ao inserir/apagar linhas
   duck-emf/          imagens EMF (registros GDI) para pixels
   duck-vba/          macros: projeto VBA do arquivo, analisador, interpretador e objetos do Excel
@@ -76,6 +77,8 @@ O que se digita é lido como no Excel em português: `1.234,56`, `10%`, `R$ 10`,
 
 Objetos: clicar num gráfico, imagem, forma ou no cabeçalho de uma segmentação seleciona; arrastar move e as alças mudam o tamanho (Shift: um eixo só, ou a mesma proporção; setas movem; Esc desiste). Formas, imagens e controles com link ou macro respondem ao clique (Ctrl+clique só seleciona); os botões +/− dos grupos abrem e fecham linhas e colunas. As macros VBA do arquivo rodam num interpretador próprio, que pergunta uma vez por arquivo e só enxerga a planilha (sem arquivos, internet ou outros programas); Ctrl+Z desfaz a macro inteira.
 
+Pastas binárias (`.xlsb`): abrem com valores, fórmulas, formatos, nomes, tabelas, formatação condicional, imagens e gráficos. A barra de status diz o que o arquivo tem e não é lido (das tabelas dinâmicas ficam só os valores; segmentações, comentários e Modelo de Dados não aparecem). O binário não é regravado: Ctrl+S pergunta e salva como `.xlsx` (ou `.xlsm`, com as macros), e o `.xlsb` fica como está.
+
 Opções: `--sheet N` (aba inicial, 1 = primeira), `--cell B12`, `--zoom 80`, `--find texto`, `--novo` (planilha em branco), `--tema claro|escuro|sistema` (só nesta execução; em `--screenshot` e `--bench`, sem isto, vale o claro). Para testar a edição sem a janela: `--edit A1=valor` (também `copiar:A1:B2`, `colar:D5`, `inserir:A5:A6`, `formatar:negrito:A1:B2`, `mesclar-centralizar:A1:C1`, `ocultar-linhas:A3:A4`, `congelar:B2`, `largura=20:C1`..., e as da tabela abaixo), `--undo N`, `--save-to cópia.xlsx`; e, para screenshots, `--aba exibir`, `--menu bordas` (abre um menu) e `--digitar "=so"` (digita na célula ativa e deixa a edição aberta; `{baixo}`, `{shift-direita}`, `{tab}`, `{enter}`, `{esc}`, `{f2}`, `{f4}`... são teclas, `{clique:B2}`, `{shift-clique:B5}`, `{arrastar:B2:B10}`, `{coluna:B}`, `{linha:3}` e `{aba:Nome}` são cliques, e `{barra}` no começo edita na barra de fórmulas).
 
 | `--edit` | O que faz |
@@ -106,6 +109,13 @@ Uma planilha de vitrine, sem dados reais, para conferir formatos, bordas e pain�
 ```
 cargo run --release -p duck-bench -- gen-showcase vitrine.xlsx
 cargo run --release -p duck-sheets -- vitrine.xlsx
+```
+
+Planilhas sintéticas para medir e conferir, em XML ou binárias:
+
+```
+cargo run --release -p duck-bench -- gen sintetica.xlsb --rows 100000
+cargo run --release -p duck-bench -- verify sintetica.xlsb
 ```
 
 ### million_rows

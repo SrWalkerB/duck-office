@@ -673,7 +673,7 @@ impl Chunk {
 ///
 /// Quem termina um parse só deixa a parte na fila (lock curto). Uma thread
 /// por vez faz o merge (`try_lock`): as outras não ficam bloqueadas esperando.
-struct Merger {
+pub(crate) struct Merger {
     queue: Mutex<Queue>,
     state: Mutex<MergeState>,
 }
@@ -691,14 +691,14 @@ struct MergeState {
 }
 
 impl Merger {
-    fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         Self {
             queue: Mutex::new(Queue::default()),
             state: Mutex::new(MergeState { sheet: Sheet::new(name), next: 0, merge: Duration::ZERO }),
         }
     }
 
-    fn add(&self, idx: usize, part: SheetPart, cpu: Duration) {
+    pub(crate) fn add(&self, idx: usize, part: SheetPart, cpu: Duration) {
         {
             let mut q = self.queue.lock().unwrap();
             q.parse_cpu += cpu;
@@ -731,7 +731,7 @@ impl Merger {
     }
 
     /// Termina: junta o que sobrou (no fim, tudo já está na fila).
-    fn finish(self) -> (Sheet, Duration, Duration, bool) {
+    pub(crate) fn finish(self) -> (Sheet, Duration, Duration, bool) {
         let mut st = self.state.into_inner().unwrap();
         let mut q = self.queue.into_inner().unwrap();
         let t = Instant::now();

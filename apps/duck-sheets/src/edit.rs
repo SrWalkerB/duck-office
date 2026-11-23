@@ -1194,23 +1194,42 @@ impl SheetsApp {
         let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("xlsx").to_ascii_lowercase();
         // Planilha nova: a primeira vez pede o lugar.
         let untitled = self.untitled_path.as_deref() == Some(src.as_path());
-        let dest = if save_as || untitled {
+        // Pasta binária: só se salva noutro formato, sem o que não foi lido.
+        let binary = doc.binary.clone();
+        if let Some(out) = &binary {
+            if !save_as && !doc.dirty {
+                self.message = "Nada a salvar".into();
+                return;
+            }
+            if !self.ask(&binary_question(out)) {
+                return;
+            }
+        }
+        let dest = if save_as || untitled || binary.is_some() {
             let Some(w) = &self.window else { return };
-            let name = if untitled {
-                "Planilha.xlsx".to_string()
-            } else {
-                src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            let exts = match binary {
+                Some(_) => binary_exts(duck_xlsx::Package::open(&src).is_ok_and(|p| has_macros(&p))),
+                None => vec![ext.as_str()],
+            };
+            let name = match (untitled, binary.is_some()) {
+                (true, _) => "Planilha.xlsx".to_string(),
+                (_, true) => format!(
+                    "{}.{}",
+                    src.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    exts[0]
+                ),
+                _ => src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             };
             let dir = if untitled { None } else { src.parent() };
-            let filter: &[(&str, &[&str])] = &[("Mesmo formato", &[ext.as_str()])];
+            let label = if binary.is_some() { "Planilhas do Excel" } else { "Mesmo formato" };
+            let filter: &[(&str, &[&str])] = &[(label, &exts)];
             let Some(mut d) = w.save_file("Salvar como", dir, &name, filter) else { return };
             if d.extension().is_none() {
-                d.set_extension(&ext);
+                d.set_extension(exts[0]);
             }
-            if d.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref()
-                != Some(ext.as_str())
-            {
-                self.message = format!("Salve com a mesma extensão (.{ext})");
+            let chosen = d.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+            if !exts.contains(&chosen.as_str()) {
+                self.message = format!("Salve com a extensão .{}", exts.join(" ou ."));
                 return;
             }
             d
@@ -1315,6 +1334,8 @@ impl SheetsApp {
                     st.new_num_fmts.clear();
                     doc.path = job.dest.clone();
                     doc.dirty = false;
+                    // De um `.xlsb`: daqui em diante é o arquivo novo.
+                    doc.binary = None;
                     crate::tabs::saved(doc, &rep);
                 }
                 self.remember_recent(&job.dest);
@@ -1497,9 +1518,44 @@ impl SheetsApp {
     }
 }
 
+/// O pacote tem projeto VBA?
+fn has_macros(pkg: &duck_xlsx::Package) -> bool {
+    pkg.entry("xl/vbaProject.bin").is_some()
+}
+
+/// Extensões em que um `.xlsb` pode ser salvo (a primeira é a sugerida).
+fn binary_exts(macros: bool) -> Vec<&'static str> {
+    if macros { vec!["xlsm", "xlsx"] } else { vec!["xlsx"] }
+}
+
+/// Pergunta antes de salvar um `.xlsb` noutro formato.
+fn binary_question(left_out: &str) -> String {
+    let mut s = String::from(
+        "O duck-sheets não grava pastas binárias (.xlsb). As alterações vão para um arquivo novo, \
+         .xlsx ou .xlsm, e o .xlsb fica como está.",
+    );
+    if !left_out.is_empty() {
+        s.push_str(&format!(
+            "\n\nO arquivo novo não terá: {left_out}. Validação, formatos, fórmulas, nomes, tabelas, \
+             imagens e gráficos vão."
+        ));
+    }
+    s.push_str("\n\nSalvar como?");
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_workbooks_are_saved_as_xml() {
+        assert_eq!(binary_exts(false), ["xlsx"]);
+        assert_eq!(binary_exts(true), ["xlsm", "xlsx"]);
+        let q = binary_question("segmentações: 2");
+        assert!(q.contains(".xlsb fica como está") && q.contains("não terá: segmentações: 2"), "{q}");
+        assert!(!binary_question("").contains("não terá"));
+    }
 
     #[test]
     fn widths_round_trip_in_pixels() {

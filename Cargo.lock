@@ -686,6 +686,7 @@ dependencies = [
 name = "duck-xlsx"
 version = "1.0.0"
 dependencies = [
+ "calamine",
  "crc32fast",
  "duck-calc",
  "duck-core",

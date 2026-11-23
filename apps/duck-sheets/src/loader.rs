@@ -41,6 +41,8 @@ pub enum Msg {
         date1904: bool,
         /// Nomes definidos e arquivos externos (motor de cálculo).
         extras: Arc<duck_core::BookExtras>,
+        /// Pasta binária (`.xlsb`): o que o arquivo tem e não é lido.
+        binary: Option<String>,
         at: Duration,
     },
     Preview {
@@ -55,6 +57,8 @@ pub enum Msg {
     },
     Finished {
         at: Duration,
+        /// Fórmulas e regras do `.xlsb` que não deu para ler.
+        unread: u64,
     },
     Failed(String),
 }
@@ -149,6 +153,7 @@ fn load(
         strings: Arc::new(strings),
         date1904: book.date1904(),
         extras: Arc::new(extras),
+        binary: book.is_binary().then(|| left_out(&book.left_out())),
         at: t0.elapsed(),
     });
     if let Ok(sheet) = preview {
@@ -180,8 +185,13 @@ fn load(
     }
     let others: Vec<usize> = (0..book.sheets().len()).filter(|&i| i != active).collect();
     book.load_sheets(&others, &opts, &deliver);
-    send(Msg::Finished { at: t0.elapsed() });
+    send(Msg::Finished { at: t0.elapsed(), unread: book.unread_formulas() });
     Ok(())
+}
+
+/// `tabelas dinâmicas: 48, segmentações: 4`.
+fn left_out(items: &[(&str, usize)]) -> String {
+    items.iter().map(|(name, n)| format!("{name}: {n}")).collect::<Vec<_>>().join(", ")
 }
 
 /// Texto separado (`.csv`, `.tsv`, `.txt`): lido como uma aba só.
@@ -201,10 +211,11 @@ fn load_csv(path: &PathBuf, send: &(dyn Fn(Msg) + Sync), t0: Instant) -> Result<
         strings: Arc::new(StringTable::new()),
         date1904: false,
         extras: Arc::default(),
+        binary: None,
         at: t0.elapsed(),
     });
     send(Msg::Sheet { index: 0, sheet, at: t0.elapsed() });
-    send(Msg::Finished { at: t0.elapsed() });
+    send(Msg::Finished { at: t0.elapsed(), unread: 0 });
     Ok(())
 }
 

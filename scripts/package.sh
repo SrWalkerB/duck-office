@@ -27,11 +27,11 @@ case "$OS" in
 [Desktop Entry]
 Type=Application
 Name=duck-sheets
-Comment=Planilhas .xlsx, .xlsm e .csv
+Comment=Planilhas .xlsx, .xlsm, .xlsb e .csv
 Exec=duck-sheets %f
 Terminal=false
 Categories=Office;Spreadsheet;
-MimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.ms-excel.sheet.macroEnabled.12;text/csv;
+MimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.ms-excel.sheet.macroEnabled.12;application/vnd.ms-excel.sheet.binary.macroEnabled.12;text/csv;
 EOF
     tar -C dist/stage -czf "dist/$NAME.tar.gz" "$NAME"
     ;;
@@ -61,7 +61,7 @@ EOF
       <key>CFBundleTypeRole</key><string>Editor</string>
       <key>LSHandlerRank</key><string>Alternate</string>
       <key>CFBundleTypeExtensions</key>
-      <array><string>xlsx</string><string>xlsm</string><string>csv</string></array>
+      <array><string>xlsx</string><string>xlsm</string><string>xlsb</string><string>csv</string></array>
     </dict>
   </array>
 </dict>

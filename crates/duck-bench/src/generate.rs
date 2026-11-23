@@ -18,7 +18,7 @@ pub struct Spec {
     pub small_sheets: u32,
 }
 
-const WORDS: [&str; 16] = [
+pub const WORDS: [&str; 16] = [
     "Estoque",
     "Pedido",
     "Entrega",
@@ -37,7 +37,7 @@ const WORDS: [&str; 16] = [
     "Etiqueta",
 ];
 
-fn mix(mut x: u64) -> u64 {
+pub fn mix(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
     x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -57,7 +57,7 @@ fn col_name(mut c: u32) -> String {
     String::from_utf8(s).unwrap()
 }
 
-const SHARED: u32 = 5000;
+pub const SHARED: u32 = 5000;
 
 pub fn write(path: &Path, spec: &Spec) -> std::io::Result<()> {
     let file = BufWriter::with_capacity(1 << 20, File::create(path)?);

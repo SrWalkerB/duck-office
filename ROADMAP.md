@@ -218,9 +218,10 @@ Tudo o que as duas planilhas reais de teste usam, com os mesmos resultados do Ex
 - [x] **Largura e altura pela borda** em abas sem painéis congelados (não funcionava), para todas as colunas ou linhas selecionadas.
 - [x] **Marca do que está copiado** (borda tracejada).
 - [x] **Filtro** só na coluna selecionada, ou pela linha do cabeçalho; botão na Página Inicial e Ctrl+Shift+L.
-- [x] Arquivos `.xlsb`, `.xls` e com senha: um aviso claro (antes o programa fechava).
+- [x] Arquivos `.xls` e com senha: um aviso claro (antes o programa fechava).
 - [ ] Excluir objetos; mover controles de formulário.
-- [ ] Ler `.xlsb`.
+- [x] **Ler `.xlsb`**: valores, fórmulas (inclusive compartilhadas, de matriz e estruturadas), estilos, layout, nomes, tabelas, filtros, formatação condicional, validação, links, arquivos externos, desenhos e gráficos. Salva como `.xlsx`/`.xlsm`, com aviso do que não vai.
+- [ ] `.xlsb`: tabelas dinâmicas, segmentações, linhas do tempo, comentários, controles, conexões e Modelo de Dados (hoje ficam de fora, com aviso); a extensão da formatação condicional (barras e ícones do Excel 2010); regravar o próprio `.xlsb`.
 - [x] Clicar dentro do texto do editor para mover o cursor.
 - [ ] Arrastar dentro do texto do editor para selecionar.
 - [ ] Tema do sistema no Linux onde o compositor não informa (X11): hoje "seguir o sistema" fica no claro.

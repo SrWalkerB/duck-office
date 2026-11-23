@@ -50,6 +50,9 @@ jobs:
           ./target/release/duck-bench open target/synth.xlsx
           ./target/release/duck-bench gen-showcase target/vitrine.xlsx
           ./target/release/duck-bench verify target/vitrine.xlsx
+          ./target/release/duck-bench gen target/synth.xlsb --rows 100000 --small-sheets 3
+          ./target/release/duck-bench verify target/synth.xlsb --chunk-mb 1
+          ./target/release/duck-bench verify target/synth.xlsb --chunk-mb 1 --threads 1
 
       # Salvar (F3): cópia intacta, reescrita de todas as células e edições,
       # cada uma relida e conferida contra o modelo e o calamine.
@@ -64,6 +67,9 @@ jobs:
             ./target/release/duck-bench roundtrip "$f" --abas --celulas
             ./target/release/duck-bench roundtrip "$f" --estrutura --abas --celulas
           done
+          # Pasta binária: convertida para .xlsm, com edições e mudanças de estrutura.
+          ./target/release/duck-bench roundtrip target/synth.xlsb --edit 500
+          ./target/release/duck-bench roundtrip target/synth.xlsb --estrutura --abas --celulas
 
       # Contagens e acertos da vitrine (formas, gráficos, fórmulas, links,
       # salvar) contra a linha de base do repositório.

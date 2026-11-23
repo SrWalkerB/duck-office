@@ -1,4 +1,5 @@
-//! `duck-xlsx`: leitura de `.xlsx` / `.xlsm` em streaming e em paralelo (ADR-005).
+//! `duck-xlsx`: leitura de `.xlsx` / `.xlsm` / `.xlsb` em streaming e em
+//! paralelo (ADR-005).
 //!
 //! - Arquivo mapeado em memória; partes descompactadas direto do mapeamento.
 //! - Strings compartilhadas, estilos e **todas as abas ao mesmo tempo**.
@@ -25,6 +26,7 @@ pub mod pivot;
 mod shape;
 pub mod sheet;
 pub mod write;
+mod xlsb;
 pub mod xml;
 
 use std::path::Path;
@@ -187,6 +189,23 @@ impl Book {
         self.meta.date1904
     }
 
+    /// É uma pasta binária (`.xlsb`): só leitura, salva como `.xlsx`/`.xlsm`.
+    pub fn is_binary(&self) -> bool {
+        self.pkg.xlsb().is_some()
+    }
+
+    /// O que o arquivo tem e não é lido, para avisar: (nome, quantidade). Só
+    /// nos `.xlsb`; nos outros, o que não é lido fica no arquivo ao salvar.
+    pub fn left_out(&self) -> Vec<(&'static str, usize)> {
+        self.pkg.xlsb().map(|x| x.left_out(&self.pkg)).unwrap_or_default()
+    }
+
+    /// Fórmulas e regras que não deu para ler até agora (as células ficam com
+    /// o valor gravado).
+    pub fn unread_formulas(&self) -> u64 {
+        self.pkg.xlsb().map_or(0, xlsb::Layer::unread)
+    }
+
     /// Nomes definidos, arquivos externos (com os valores guardados) e a
     /// data em que o arquivo foi salvo: o que o motor de cálculo precisa.
     pub fn read_extras(&self) -> duck_core::BookExtras {
@@ -244,6 +263,15 @@ impl Book {
     pub fn preview_sheet(&self, index: usize, max_xml_bytes: usize) -> Result<Sheet, Error> {
         let m = self.meta.sheets.get(index).ok_or_else(|| Error::Missing(format!("aba {index}")))?;
         let entry = self.pkg.entry(&m.path).ok_or_else(|| Error::Missing(m.path.clone()))?;
+        let mut s = Sheet::new(m.name.clone());
+        s.hidden = m.hidden;
+        s.tab_id = m.id;
+        if self.pkg.xlsb().is_some() {
+            // No binário, o mesmo número de células ocupa um quarto do espaço.
+            xlsb::sheet::preview(&self.pkg, entry, max_xml_bytes / 4, &mut s)?;
+            s.finish();
+            return Ok(s);
+        }
         let mut buf = Vec::with_capacity(max_xml_bytes.min(entry.size as usize) + 64 * 1024);
         let eof = self.pkg.inflater(entry).read_into(&mut buf, max_xml_bytes)?;
         let cut = if eof { buf.len() } else { duck_par::cut_after_last(&buf, b"</row>").unwrap_or(0) };
@@ -251,9 +279,6 @@ impl Book {
         let mut state = sheet::RowState::default();
         let mut scratch = sheet::Scratch::default();
         let _ = sheet::parse_rows(&buf[..cut], &mut part, &mut state, &mut scratch);
-        let mut s = Sheet::new(m.name.clone());
-        s.hidden = m.hidden;
-        s.tab_id = m.id;
         s.merge_part(part);
         s.finish();
         Ok(s)
@@ -286,7 +311,12 @@ impl Book {
                 let m = &self.meta.sheets[i];
                 let r = match self.pkg.entry(&m.path) {
                     Some(e) => {
-                        sheet::load_sheet(&self.pkg, e, &m.name, chunk, limiter, opts).map(|(mut sh, rep)| {
+                        let r = if self.pkg.xlsb().is_some() {
+                            xlsb::sheet::load(&self.pkg, e, &m.name, limiter, opts)
+                        } else {
+                            sheet::load_sheet(&self.pkg, e, &m.name, chunk, limiter, opts)
+                        };
+                        r.map(|(mut sh, rep)| {
                             sh.hidden = m.hidden;
                             sh.tab_id = m.id;
                             parts::resolve_links(&self.pkg, &m.path, &mut sh.layout.links);
