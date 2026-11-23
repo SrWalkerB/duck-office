@@ -132,3 +132,138 @@ pub fn names(a: &SheetsApp) -> Vec<String> {
 pub fn num(x: f64) -> CellValue {
     CellValue::Number(x)
 }
+
+/// O mouse, sem janela: mesmas rotinas que os eventos chamam.
+mod mouse {
+    use super::*;
+    use duck_platform::Modifiers;
+
+    const NONE: Modifiers = Modifiers { ctrl: false, shift: false, alt: false, logo: false };
+    const CTRL: Modifiers = Modifiers { ctrl: true, shift: false, alt: false, logo: false };
+
+    /// Um ponto dentro da célula (no meio dela).
+    fn at(a: &mut SheetsApp, cell: &str) -> (f32, f32) {
+        let want = parse_cell(cell).unwrap();
+        let g = a.geom();
+        let v = a.doc.as_ref().unwrap().current().unwrap().1;
+        let inside = |x: f32, y: f32| g.grid.contains(x, y) && g.hit(v, x, y) == Some(want);
+        let (mut xs, mut ys) = (Vec::new(), Vec::new());
+        for y in (g.grid.y0 as i32..g.grid.y1 as i32).step_by(3) {
+            for x in (g.grid.x0 as i32..g.grid.x1 as i32).step_by(3) {
+                if inside(x as f32, y as f32) {
+                    xs.push(x);
+                    ys.push(y);
+                }
+            }
+        }
+        assert!(!xs.is_empty(), "{cell} fora da tela");
+        ((xs[0] + xs[xs.len() - 1]) as f32 / 2.0, (ys[0] + ys[ys.len() - 1]) as f32 / 2.0)
+    }
+
+    fn press(a: &mut SheetsApp, p: (f32, f32), mods: Modifiers, clicks: u8) {
+        let g = a.geom();
+        if !a.press_handle(&g, p.0, p.1, mods, clicks) {
+            a.press_cell(&g, p.0, p.1, mods, clicks);
+        }
+    }
+
+    fn drag(a: &mut SheetsApp, from: (f32, f32), to: &str, mods: Modifiers) {
+        press(a, from, mods, 1);
+        let p = at(a, to);
+        a.mouse_move(p.0, p.1);
+        a.mouse_up(mods);
+    }
+
+    fn handle(a: &mut SheetsApp) -> (f32, f32) {
+        let g = a.geom();
+        let r = crate::fill::handle(&g, a.doc.as_ref().unwrap().current().unwrap().1).unwrap();
+        ((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0)
+    }
+
+    #[test]
+    fn fill_handle() {
+        let mut a = app(&[("P", &[("A1", "jan"), ("B1", "1"), ("B2", "2"), ("A2", "x"), ("A3", "y")])]);
+        a.go_to(0, 0);
+        let h = handle(&mut a);
+        drag(&mut a, h, "A5", NONE);
+        assert_eq!((get(&a, 0, "A2"), get(&a, 0, "A5")), ("fev".into(), "mai".into()));
+        a.undo();
+        assert_eq!((get(&a, 0, "A2"), get(&a, 0, "A5")), ("x".into(), "".into()));
+        // Com Ctrl: o contrário (copia).
+        a.go_to(0, 0);
+        let h = handle(&mut a);
+        drag(&mut a, h, "A2", CTRL);
+        assert_eq!(get(&a, 0, "A2"), "jan");
+        a.undo();
+        // Para a direita, várias células.
+        select(&mut a, "B1:B2");
+        let h = handle(&mut a);
+        drag(&mut a, h, "B6", NONE);
+        assert_eq!(get(&a, 0, "B6"), "6");
+        a.undo();
+        // Duplo clique: até onde vai a coluna ao lado.
+        select(&mut a, "B1:B2");
+        let h = handle(&mut a);
+        press(&mut a, h, NONE, 2);
+        a.mouse_up(NONE);
+        assert_eq!((get(&a, 0, "B3"), get(&a, 0, "B4")), ("3".into(), "".into()));
+        a.undo();
+        assert_eq!(get(&a, 0, "B3"), "");
+        // Soltar na própria seleção não muda nada.
+        select(&mut a, "B1:B2");
+        let h = handle(&mut a);
+        drag(&mut a, h, "B2", NONE);
+        assert!(a.doc.as_ref().unwrap().history.undo.is_empty());
+    }
+
+    #[test]
+    fn drag_the_border() {
+        let mut a = app(&[("P", &[("A1", "7"), ("C1", "=A1*2")])]);
+        for mods in [NONE, CTRL] {
+            a.go_to(0, 0);
+            let (x, y) = at(&mut a, "A1");
+            let g = a.geom();
+            // A borda de baixo, longe da alça.
+            let edge = (0..40).map(|d| y + d as f32).find(|&y| {
+                let v = a.doc.as_ref().unwrap().current().unwrap().1;
+                crate::fill::on_border(&g, v, x, y)
+            });
+            drag(&mut a, (x, edge.unwrap()), "B4", mods);
+            assert_eq!(get(&a, 0, "B4"), "7");
+            if mods.ctrl {
+                assert_eq!((get(&a, 0, "A1"), get(&a, 0, "C1")), ("7".into(), "=A1*2".into()));
+            } else {
+                assert_eq!((get(&a, 0, "A1"), get(&a, 0, "C1")), ("".into(), "=B4*2".into()));
+            }
+            a.undo();
+            assert_eq!((get(&a, 0, "A1"), get(&a, 0, "B4")), ("7".into(), "".into()));
+        }
+    }
+
+    #[test]
+    fn several_areas_and_the_painter() {
+        let mut a = app(&[("P", &[("A1", "1"), ("A2", "2"), ("C2", "5"), ("C3", "6")])]);
+        let p = at(&mut a, "A1");
+        drag(&mut a, p, "A2", NONE);
+        let p = at(&mut a, "C2");
+        drag(&mut a, p, "C3", CTRL);
+        let s = a.sel_stats().unwrap();
+        assert_eq!((s.count, s.sum), (4, 14.0));
+        // Um clique comum volta a uma área só.
+        let p = at(&mut a, "A1");
+        drag(&mut a, p, "A1", NONE);
+        assert!(!a.doc.as_ref().unwrap().current().unwrap().1.multi());
+        // Pincel: copia o formato para o que for arrastado e desliga.
+        a.apply_fmt(crate::format::Fmt::Bold);
+        a.toggle_painter(false);
+        let p = at(&mut a, "C2");
+        drag(&mut a, p, "C3", NONE);
+        assert_eq!(style(&a, 0, "C3").font, style(&a, 0, "A1").font);
+        assert_ne!(style(&a, 0, "C3").font, style(&a, 0, "A2").font);
+        assert!(a.painter.is_none());
+        // Duplo clique edita.
+        let p = at(&mut a, "C2");
+        press(&mut a, p, NONE, 2);
+        assert!(a.editor.is_some());
+    }
+}

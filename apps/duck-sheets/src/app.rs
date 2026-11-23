@@ -728,6 +728,12 @@ impl SheetsApp {
             return;
         }
         self.editor = None;
+        self.form = None;
+        self.painter = None;
+        self.tab_edit = None;
+        self.clip = None;
+        self.drag = None;
+        self.drag_area = None;
         if let Some(l) = self.loader.take() {
             l.cancel();
         }
@@ -936,7 +942,8 @@ impl SheetsApp {
     // --- geometria ----------------------------------------------------------
 
     pub fn geom(&mut self) -> Geom {
-        let (w, h) = self.gfx.as_ref().map(|g| g.size()).unwrap_or((1, 1));
+        let (w, h) =
+            self.gfx.as_ref().map(|g| g.size()).unwrap_or(if cfg!(test) { (1200, 800) } else { (1, 1) });
         let (w, h) = (w as f32, h as f32);
         let s = self.scale;
         let zoom = self.doc.as_ref().and_then(|d| d.current()).map_or(100, |(_, v)| v.zoom);
@@ -1630,29 +1637,46 @@ impl SheetsApp {
             self.drag = Some(Drag::Rows);
             return;
         }
-        // Alça de preenchimento e borda da seleção.
-        if g.grid.contains(x, y) && !mods.shift {
-            let sel = crate::fill::range_of(v.sel());
-            if crate::fill::on_handle(&g, v, x, y) {
-                if clicks >= 2 {
-                    self.fill_double();
-                } else {
-                    self.drag = Some(Drag::Fill { src: sel });
-                }
-                return;
-            }
-            if clicks < 2
-                && crate::fill::on_border(&g, v, x, y)
-                && let Some((r, c)) = g.hit(v, x, y)
-            {
-                let grab = (
-                    r.clamp(sel.first_row, sel.last_row) - sel.first_row,
-                    c.clamp(sel.first_col, sel.last_col) - sel.first_col,
-                );
-                self.drag = Some(Drag::MoveCells { src: sel, grab });
-                return;
-            }
+        if self.press_handle(&g, x, y, mods, clicks) {
+            return;
         }
+        self.press_cell(&g, x, y, mods, clicks);
+    }
+
+    /// Botão na alça de preenchimento ou na borda da seleção. `true` = era nelas.
+    pub(crate) fn press_handle(&mut self, g: &Geom, x: f32, y: f32, mods: Modifiers, clicks: u8) -> bool {
+        if !g.grid.contains(x, y) || mods.shift {
+            return false;
+        }
+        let Some((_, v)) = self.doc.as_ref().and_then(|d| d.current()) else { return false };
+        let sel = crate::fill::range_of(v.sel());
+        if crate::fill::on_handle(g, v, x, y) {
+            if clicks >= 2 {
+                self.fill_double();
+            } else {
+                self.drag = Some(Drag::Fill { src: sel });
+            }
+            return true;
+        }
+        if clicks < 2
+            && crate::fill::on_border(g, v, x, y)
+            && let Some((r, c)) = g.hit(v, x, y)
+        {
+            let grab = (
+                r.clamp(sel.first_row, sel.last_row) - sel.first_row,
+                c.clamp(sel.first_col, sel.last_col) - sel.first_col,
+            );
+            self.drag = Some(Drag::MoveCells { src: sel, grab });
+            return true;
+        }
+        false
+    }
+
+    /// Botão numa célula: seleciona (Ctrl soma uma área, Shift estende), segue
+    /// o link ou, no duplo clique, edita.
+    pub(crate) fn press_cell(&mut self, g: &Geom, x: f32, y: f32, mods: Modifiers, clicks: u8) {
+        let add = (mods.ctrl || mods.logo) && !mods.shift;
+        let Some(v) = self.doc.as_ref().and_then(|d| d.current()).map(|x| x.1) else { return };
         if let Some((mut r, mut c)) = g.hit(v, x, y) {
             // Ctrl+clique num hiperlink: segue o link.
             if mods.ctrl || mods.logo {
@@ -1750,7 +1774,7 @@ impl SheetsApp {
                 _ => (false, false),
             };
             let cursor = match (edge, &link) {
-                _ if fill => Cursor::Cross,
+                _ if fill || self.painter.is_some() && g.grid.contains(x, y) => Cursor::Cross,
                 _ if border => Cursor::Move,
                 (Some(Edge::Col(_)), _) => Cursor::ResizeColumn,
                 (Some(Edge::Row(_)), _) => Cursor::ResizeRow,
@@ -1833,6 +1857,46 @@ impl SheetsApp {
             }
         }
         true
+    }
+
+    /// Botão solto: termina o arraste. `true` = redesenhar.
+    pub(crate) fn mouse_up(&mut self, modifiers: Modifiers) -> bool {
+        match self.drag.take() {
+            Some(Drag::Select | Drag::Cols | Drag::Rows) if self.painter.is_some() => {
+                self.apply_painter();
+                true
+            }
+            Some(Drag::Fill { src }) => {
+                if let Some(t) = self.drag_area.take() {
+                    let toggle = modifiers.ctrl || modifiers.logo;
+                    self.fill_to(src, t, duck_core::fill::Mode::Auto, toggle);
+                }
+                true
+            }
+            Some(Drag::MoveCells { src, .. }) => {
+                if let Some(t) = self.drag_area.take() {
+                    self.drop_cells(src, t, modifiers.ctrl || modifiers.logo);
+                }
+                true
+            }
+            Some(Drag::Tab { sheet, x }) => {
+                let g = self.geom();
+                if (self.mouse.0 - x).abs() > 6.0 * g.s {
+                    let slot = self.tab_drop_slot(&g, self.mouse.0);
+                    self.tab_drop(sheet, slot, modifiers.ctrl || modifiers.logo);
+                }
+                true
+            }
+            Some(Drag::ResizeCol { col, .. }) => {
+                self.commit_col_size(col);
+                true
+            }
+            Some(Drag::ResizeRow { row, .. }) => {
+                self.commit_row_size(row, false);
+                true
+            }
+            d => d.is_some(),
+        }
     }
 
     pub fn vthumb(&self, g: &Geom) -> (f32, f32) {
@@ -2506,49 +2570,15 @@ impl App for SheetsApp {
             }
             Event::MouseDown { button: MouseButton::Right, x, y, .. } => {
                 self.popup = None;
-                if self.prompt.is_none() && self.geom().tabs.contains(x as f32, y as f32) {
+                let busy = self.prompt.is_some() || self.form.is_some();
+                if !busy && self.geom().tabs.contains(x as f32, y as f32) {
                     self.tab_context_menu(x as f32, y as f32);
-                } else if self.prompt.is_none() {
+                } else if !busy {
                     self.context_menu(x as f32, y as f32);
                 }
                 true
             }
-            Event::MouseUp { button: MouseButton::Left, modifiers, .. } => match self.drag.take() {
-                Some(Drag::Select | Drag::Cols | Drag::Rows) if self.painter.is_some() => {
-                    self.apply_painter();
-                    true
-                }
-                Some(Drag::Fill { src }) => {
-                    if let Some(t) = self.drag_area.take() {
-                        let toggle = modifiers.ctrl || modifiers.logo;
-                        self.fill_to(src, t, duck_core::fill::Mode::Auto, toggle);
-                    }
-                    true
-                }
-                Some(Drag::MoveCells { src, .. }) => {
-                    if let Some(t) = self.drag_area.take() {
-                        self.drop_cells(src, t, modifiers.ctrl || modifiers.logo);
-                    }
-                    true
-                }
-                Some(Drag::Tab { sheet, x }) => {
-                    let g = self.geom();
-                    if (self.mouse.0 - x).abs() > 6.0 * g.s {
-                        let slot = self.tab_drop_slot(&g, self.mouse.0);
-                        self.tab_drop(sheet, slot, modifiers.ctrl || modifiers.logo);
-                    }
-                    true
-                }
-                Some(Drag::ResizeCol { col, .. }) => {
-                    self.commit_col_size(col);
-                    true
-                }
-                Some(Drag::ResizeRow { row, .. }) => {
-                    self.commit_row_size(row, false);
-                    true
-                }
-                d => d.is_some(),
-            },
+            Event::MouseUp { button: MouseButton::Left, modifiers, .. } => self.mouse_up(modifiers),
             Event::MouseMove { x, y } => self.mouse_move(x as f32, y as f32),
             Event::Key { key, pressed: true, modifiers, text, .. } => {
                 if key == Key::F(12) && self.loader.is_none() && self.doc.is_none() {

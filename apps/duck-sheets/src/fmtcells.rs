@@ -453,7 +453,7 @@ impl SheetsApp {
         f.pages = vec!["Número", "Alinhamento", "Fonte", "Borda", "Preenchimento"];
         f.page = page.min(4);
         f.width = 560.0;
-        f.body = 330.0;
+        f.body = 420.0;
         let dates = shown(&DATES, today + 0.5625);
         let times = shown(&TIMES, today + 0.5625);
         let fractions = shown(&FRACTIONS, 0.375);

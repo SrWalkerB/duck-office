@@ -723,8 +723,8 @@ impl SheetsApp {
     /// `--digitar`: abre a edição da célula ativa e digita um texto.
     /// `{barra}` no começo edita na barra de fórmulas. Entre chaves também:
     ///
-    /// - teclas: `{cima}`, `{baixo}`, `{esquerda}`, `{direita}` (com `shift-`
-    ///   ou `ctrl-` antes), `{tab}`, `{enter}`, `{esc}`, `{f2}`, `{f4}`;
+    /// - teclas: `{cima}`, `{baixo}`, `{esquerda}`, `{direita}` (com `shift-`,
+    ///   `ctrl-` ou `alt-` antes), `{tab}`, `{enter}`, `{esc}`, `{f2}`, `{f4}`;
     /// - mouse: `{clique:B2}`, `{shift-clique:B5}`, `{arrastar:B2:B10}`,
     ///   `{coluna:B}`, `{linha:3}` e `{aba:Nome}`.
     fn scripted_typing(&mut self, t: &str) {
@@ -746,6 +746,10 @@ impl SheetsApp {
                     }
                     Some(("ctrl", k)) => {
                         mods.ctrl = true;
+                        k
+                    }
+                    Some(("alt", k)) => {
+                        mods.alt = true;
                         k
                     }
                     _ => cmd,
