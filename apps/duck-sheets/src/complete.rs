@@ -692,7 +692,31 @@ pub fn editor_rect(
     ui: TextStyle,
 ) -> (Rect, TextStyle, f32) {
     let cell = if ed.in_bar { None } else { cell_editor(ed, g, view, text, ui) };
-    cell.unwrap_or((g.formula.inset(2.0 * g.s), ui, 2.0 * g.s))
+    cell.unwrap_or_else(|| (bar_editor(ed, g, text, ui), ui, 2.0 * g.s))
+}
+
+/// O editor na barra de fórmulas: cresce para baixo com as linhas do texto.
+pub fn bar_editor(ed: &Editor, g: &Geom, text: &mut TextSystem, ui: TextStyle) -> Rect {
+    let r = g.formula.inset(2.0 * g.s);
+    let n = ed.input.text.matches('\n').count() + 1;
+    let h = n.min(8) as f32 * text.line_height_of(ui) + 4.0 * g.s;
+    Rect::new(r.x0, r.y0, r.x1, if n > 1 { r.y1.max(r.y0 + h) } else { r.y1 })
+}
+
+/// As linhas do editor da célula, se ele tem mais de uma (quebras escritas ou
+/// célula com texto quebrado). `None` = uma linha, que rola com o cursor.
+pub fn editor_lines(
+    ed: &Editor,
+    r: Rect,
+    pad: f32,
+    text: &mut TextSystem,
+    style: TextStyle,
+) -> Option<Vec<(usize, usize)>> {
+    if !ed.wrap && !ed.input.text.contains('\n') {
+        return None;
+    }
+    let width = ed.wrap.then_some((r.w() - 2.0 * pad).max(1.0));
+    Some(ed.input.lines(width, text, style))
 }
 
 /// O editor sobre a célula, se ela está à vista.
@@ -709,9 +733,19 @@ pub fn cell_editor(
     let cell = crate::draw::cell_screen_rect(g, view, ed.row, ed.col)?;
     let style = ui.with_px((11.0 * 96.0 / 72.0 * g.g).round().max(6.0));
     let pad = (3.0 * g.g).round().max(1.0);
-    let need = text.measure_styled(&ed.input.text, style) + 2.0 * pad + 8.0 * g.g;
-    let x1 = (cell.x0 + need).max(cell.x1).min(g.grid.x1);
-    Some((Rect::new(cell.x0, cell.y0, x1, cell.y1), style, pad))
+    // Com quebra de texto, a largura é a da célula e o editor cresce para baixo.
+    let x1 = if ed.wrap {
+        cell.x1
+    } else {
+        let w = ed.input.text.split('\n').map(|l| text.measure_styled(l, style)).fold(0.0, f32::max);
+        (cell.x0 + w + 2.0 * pad + 8.0 * g.g).max(cell.x1).min(g.grid.x1)
+    };
+    let r = Rect::new(cell.x0, cell.y0, x1, cell.y1);
+    let y1 = match editor_lines(ed, r, pad, text, style) {
+        Some(l) => (r.y0 + l.len() as f32 * text.line_height_of(style) + 2.0).max(r.y1).min(g.grid.y1),
+        None => r.y1,
+    };
+    Some((Rect { y1, ..r }, style, pad))
 }
 
 const HINT: &str = "Digite o nome de uma função (como SOMA), uma célula (como A1) ou um valor";
@@ -754,9 +788,14 @@ pub fn boxes(ed: &Editor, g: &Geom, view: &View, text: &mut TextSystem, ui: Text
     let (rect, style, pad) = editor_rect(ed, g, view, text, ui);
     // x do começo do trecho (o campo rola para o cursor ficar à vista).
     let at = st.list.as_ref().map_or(0, |l| l.token.range.start);
-    let caret = text.measure_styled(&ed.input.text[..ed.input.cursor()], style);
-    let shift = (caret - (rect.w() - 2.0 * pad)).max(0.0);
-    let x = rect.x0 + pad - shift + text.measure_styled(&ed.input.text[..at], style);
+    let x = if ed.wrap || ed.input.text.contains('\n') {
+        let start = ed.input.text[..at].rfind('\n').map_or(0, |i| i + 1);
+        (rect.x0 + pad + text.measure_styled(&ed.input.text[start..at], style)).min(rect.x1)
+    } else {
+        let caret = text.measure_styled(&ed.input.text[..ed.input.cursor()], style);
+        let shift = (caret - (rect.w() - 2.0 * pad)).max(0.0);
+        rect.x0 + pad - shift + text.measure_styled(&ed.input.text[..at], style)
+    };
     let win = Rect::new(0.0, 0.0, g.w, g.status.y1);
 
     let mut b = Boxes::default();
@@ -1102,6 +1141,7 @@ mod tests {
             input,
             enter_mode: true,
             in_bar: false,
+            wrap: false,
             sheet: 0,
             away: false,
             point: None,

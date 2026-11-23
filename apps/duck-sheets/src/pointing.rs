@@ -644,6 +644,7 @@ mod tests {
             input,
             enter_mode: true,
             in_bar: false,
+            wrap: false,
             sheet: 0,
             away: false,
             point: None,

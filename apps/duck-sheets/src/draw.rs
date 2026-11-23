@@ -424,6 +424,11 @@ impl SheetsApp {
                     }
                 }
                 crate::pointing::draw_outlines(&mut p, &geom, view, &outlines, px);
+                if let Some(a) = self.drag_area {
+                    crate::pointing::draw_outlines(&mut p, &geom, view, &[(a, th.selection, true)], px);
+                } else if self.editor.is_none() {
+                    crate::fill::draw_handle(&mut p, &geom, view, th);
+                }
                 // Linhas dos painéis congelados.
                 if view.frozen_rows > 0 {
                     let y = geom.grid.y0 + geom.fh;
@@ -449,7 +454,12 @@ impl SheetsApp {
                     && let Some((r, style, pad)) = crate::complete::cell_editor(ed, &geom, view, p.text, ui)
                 {
                     let colors = InputColors { focus: th.selection, border: th.selection, ..th.input };
-                    ed.input.draw_spans(&mut p, r, style, pad, !ed.in_bar, &colors, "", &spans);
+                    match crate::complete::editor_lines(ed, r, pad, p.text, style) {
+                        Some(lines) => {
+                            ed.input.draw_lines(&mut p, r, style, pad, !ed.in_bar, &colors, &spans, &lines)
+                        }
+                        None => ed.input.draw_spans(&mut p, r, style, pad, !ed.in_bar, &colors, "", &spans),
+                    }
                     p.stroke(r.inset(-px), &Rect::everything(), 2.0 * px, th.selection);
                 }
                 draw_scrollbars(&mut p, vthumb, &geom, self.drag, th);
@@ -506,8 +516,16 @@ impl SheetsApp {
             Some(ed) => {
                 let colors = InputColors { border: th.body, focus: th.body, background: th.body, ..th.input };
                 let focused = ed.in_bar || ed.away;
-                let r = geom.formula.inset(2.0 * s);
-                ed.input.draw_spans(&mut p, r, ui, 2.0 * s, focused, &colors, "", &spans);
+                let r = crate::complete::bar_editor(ed, &geom, p.text, ui);
+                if ed.input.text.contains('\n') {
+                    let lines = ed.input.lines(None, p.text, ui);
+                    let colors = InputColors { border: th.line, focus: th.line, ..colors };
+                    let all = Rect::everything();
+                    p.fill(Rect::new(r.x0, r.y0, r.x1 + 2.0 * s, r.y1 + 2.0 * s), &all, th.shadow);
+                    ed.input.draw_lines(&mut p, r, ui, 2.0 * s, focused, &colors, &spans, &lines);
+                } else {
+                    ed.input.draw_spans(&mut p, r, ui, 2.0 * s, focused, &colors, "", &spans);
+                }
             }
             None => {
                 // Uma linha só: quebras viram espaço.
@@ -611,18 +629,8 @@ impl SheetsApp {
         let st_text = Rect::new(st.x0, st.y0, zoombar.area().x0, st.y1);
         p.label(&left, small, st_text, Align::Left, 10.0 * s, th.muted);
         buf.clear();
-        if let Some(stats) = stats
-            && stats.count > 1
-        {
-            if stats.numbers > 0 {
-                buf2.clear();
-                duck_core::numfmt::format_general(stats.sum, 15, &mut buf2);
-                let _ = write!(buf, "Soma: {buf2}   ");
-                buf2.clear();
-                duck_core::numfmt::format_general(stats.sum / stats.numbers as f64, 11, &mut buf2);
-                let _ = write!(buf, "Média: {buf2}   ");
-            }
-            let _ = write!(buf, "Contagem: {}   ", fmt_int(stats.count));
+        if let Some(stats) = stats {
+            buf.push_str(&stats.text());
         }
         // Tempo por frame: só na medição.
         if self.opts.bench && !self.recent_cpu.is_empty() {
@@ -677,6 +685,9 @@ impl SheetsApp {
         }
         if let Some(pr) = &self.prompt {
             pr.draw(&mut p, &geom, ui, th);
+        }
+        if let Some(f) = &self.form {
+            f.draw(&mut p, &geom, ui, self.mouse, th);
         }
 
         self.instances = out;
@@ -1007,7 +1018,17 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
         }
     }
 
-    // 6. Seleção.
+    // 6. Seleção. As outras áreas da seleção múltipla, antes da ativa.
+    if cx.selection && v.multi() {
+        for &(r0, c0, r1, c1) in &v.extra {
+            if r1 < r_first || r0 > r_last || c1 < c_first || c0 > c_last {
+                continue;
+            }
+            let r = Rect::new(x_of(c0), y_of(r0), x_of(c1 + 1), y_of(r1 + 1));
+            p.fill(r, &clip, th.sel_fill);
+            p.stroke(r.inset(-px), &clip, px, th.selection);
+        }
+    }
     let (r0, c0, r1, c1) = v.sel();
     if cx.selection && r1 >= r_first && r0 <= r_last && c1 >= c_first && c0 <= c_last {
         let sel = Rect::new(x_of(c0), y_of(r0), x_of(c1 + 1), y_of(r1 + 1));
@@ -1236,7 +1257,7 @@ fn draw_cell_text(
     // Trechos do texto: vários (texto rico) ou um só, com a fonte da célula.
     let base = Seg { range: 0..buf.len(), style, color, underline, strike, rise: 0.0 };
     let rich = match value {
-        Value::Text(s) if shown.kind == Kind::Text && s == buf.as_str() => cx.strings.rich_of(s),
+        Value::Text(s) if shown.kind == Kind::Text && s == buf.as_str() => cx.sheet.rich_of(s, cx.strings),
         _ => None,
     };
     let segs = match rich {
@@ -1595,9 +1616,13 @@ fn draw_headers(p: &mut Painter, cx: &Ctx, geom: &Geom, style: TextStyle, buf: &
     let v = cx.view;
     let th = cx.th;
     let px = cx.px;
-    let (r0, c0, r1, c1) = v.sel();
-    let all_rows = r0 == 0 && r1 == v.rows.len() - 1;
-    let all_cols = c0 == 0 && c1 == v.cols.len() - 1;
+    let areas = v.areas();
+    let (nr, nc) = (v.rows.len(), v.cols.len());
+    // Coluna (ou linha) na seleção, e se ela está inteira.
+    let col_in = |c: u32| areas.iter().any(|a| (a.1..=a.3).contains(&c));
+    let col_full = |c: u32| areas.iter().any(|a| a.0 == 0 && a.2 == nr - 1 && (a.1..=a.3).contains(&c));
+    let row_in = |r: u32| areas.iter().any(|a| (a.0..=a.2).contains(&r));
+    let row_full = |r: u32| areas.iter().any(|a| a.1 == 0 && a.3 == nc - 1 && (a.0..=a.2).contains(&r));
     let lh = p.text.line_height_of(style);
 
     // Colunas: painel congelado e painel que rola.
@@ -1610,7 +1635,7 @@ fn draw_headers(p: &mut Painter, cx: &Ctx, geom: &Geom, style: TextStyle, buf: &
         }
         for s in spans(&v.cols, q.ox, q.col_start, q.col_end, strip.x0, strip.x1, cx.g) {
             let r = Rect::new(s.a, ch.y0, s.b, ch.y1);
-            let selected = s.i >= c0 && s.i <= c1;
+            let (selected, all_rows) = (col_in(s.i), col_full(s.i));
             if selected {
                 p.fill(r, &strip, if all_rows { th.header_full } else { th.header_sel });
             }
@@ -1634,7 +1659,7 @@ fn draw_headers(p: &mut Painter, cx: &Ctx, geom: &Geom, style: TextStyle, buf: &
         }
         for s in spans(&v.rows, q.oy, q.row_start, q.row_end, strip.y0, strip.y1, cx.g) {
             let r = Rect::new(rh.x0, s.a, rh.x1, s.b);
-            let selected = s.i >= r0 && s.i <= r1;
+            let (selected, all_cols) = (row_in(s.i), row_full(s.i));
             if selected {
                 p.fill(r, &strip, if all_cols { th.header_full } else { th.header_sel });
             }

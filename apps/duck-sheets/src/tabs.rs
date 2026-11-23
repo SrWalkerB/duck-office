@@ -82,6 +82,17 @@ pub fn has_book(step: &Step) -> bool {
     step.iter().any(|(_, c)| matches!(c, Command::Book(_)))
 }
 
+/// O passo não mexe na lista de abas (só nas listas do arquivo)?
+pub fn lists_only(step: &Step) -> bool {
+    step.iter().all(|(_, c)| match c {
+        Command::Book(op) => {
+            op.0.downcast_ref::<Mutex<Option<TabOp>>>()
+                .is_some_and(|m| m.lock().is_ok_and(|o| matches!(&*o, Some(TabOp::Refs(_)))))
+        }
+        _ => true,
+    })
+}
+
 /// Aplica no documento e devolve o inverso.
 pub fn apply(doc: &mut Doc, op: &BookOp) -> Option<Command> {
     let inverse = match unwrap(op)? {

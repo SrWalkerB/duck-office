@@ -438,10 +438,13 @@ impl SheetsApp {
             Fmt::Wrap => !active.wrap,
             _ => true,
         };
-        let Some(range) = self.sel_cells(2_000_000) else { return };
-        if let Some(list) = self.restyled(range, f, on) {
-            self.run_command(Command::SetStyles(list));
+        let Some(areas) = self.sel_areas(2_000_000) else { return };
+        let mut all = Vec::new();
+        for range in areas {
+            let Some(list) = self.restyled(range, f, on) else { return };
+            all.extend(list);
         }
+        self.run_command(Command::SetStyles(all));
     }
 
     /// Os estilos novos das células de `range` com o formato `f` (sem aplicar).

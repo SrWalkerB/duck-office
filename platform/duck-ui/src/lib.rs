@@ -348,10 +348,13 @@ pub struct InputResult {
     pub cancelled: bool,
 }
 
-/// Campo de texto de uma linha: cursor, seleção, colar e copiar.
+/// Campo de texto: cursor, seleção, colar e copiar. De uma linha, a menos que
+/// [`TextInput::multiline`] (aí as quebras ficam).
 #[derive(Clone, Debug, Default)]
 pub struct TextInput {
     pub text: String,
+    /// Aceita quebras de linha (quem insere é o app: Enter confirma).
+    pub multiline: bool,
     /// Posição do cursor (byte, sempre numa fronteira de caractere).
     cursor: usize,
     /// Outra ponta da seleção, se houver.
@@ -441,8 +444,12 @@ impl TextInput {
     /// Insere texto no cursor (substitui a seleção).
     pub fn insert(&mut self, s: &str) {
         self.delete_selection();
-        // Uma linha só: quebras viram espaço.
-        let s: String = s.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect();
+        let s: String = if self.multiline {
+            s.replace("\r\n", "\n").replace('\r', "\n")
+        } else {
+            // Uma linha só: quebras viram espaço.
+            s.chars().map(|c| if c == '\n' || c == '\r' { ' ' } else { c }).collect()
+        };
         self.text.insert_str(self.cursor, &s);
         self.cursor += s.len();
     }
@@ -479,6 +486,14 @@ impl TextInput {
                     (Some((_, b)), false) => b,
                     _ => self.next(self.cursor),
                 };
+                self.move_to(to, shift);
+            }
+            Key::Home if self.multiline && !mods.ctrl => {
+                let to = self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
+                self.move_to(to, shift);
+            }
+            Key::End if self.multiline && !mods.ctrl => {
+                let to = self.text[self.cursor..].find('\n').map_or(self.text.len(), |i| self.cursor + i);
                 self.move_to(to, shift);
             }
             Key::Home => self.move_to(0, shift),
@@ -528,6 +543,143 @@ impl TextInput {
         }
         r.changed &= self.text.len() != before || r.changed;
         r
+    }
+
+    /// Sobe ou desce uma linha de `lines` (ver [`TextInput::lines`]), mantendo
+    /// a posição horizontal. `false` = já está na primeira ou na última.
+    pub fn move_line(
+        &mut self,
+        lines: &[(usize, usize)],
+        down: bool,
+        extend: bool,
+        text: &mut TextSystem,
+        style: TextStyle,
+    ) -> bool {
+        let cur = line_of(lines, self.cursor);
+        let to = if down { cur + 1 } else { cur.wrapping_sub(1) };
+        let Some(&(a, b)) = lines.get(to) else { return false };
+        let x = text.measure_styled(&self.text[lines[cur].0..self.cursor], style);
+        let at = a + at_x(&self.text[a..b], x, text, style);
+        self.move_to(at, extend);
+        true
+    }
+
+    /// Linhas do texto: nas quebras escritas e, com `width`, onde não cabe
+    /// (trechos em bytes, sem a quebra).
+    pub fn lines(&self, width: Option<f32>, text: &mut TextSystem, style: TextStyle) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut base = 0;
+        for para in self.text.split('\n') {
+            let mut start = 0;
+            if let Some(max) = width {
+                let mut end = 0;
+                let mut k = 0;
+                while k < para.len() {
+                    let stop = para[k..].find(' ').map_or(para.len(), |i| k + i + 1);
+                    if text.measure_styled(para[start..stop].trim_end(), style) > max && end > start {
+                        out.push((base + start, base + end));
+                        start = end;
+                    }
+                    // Palavra maior que a linha: corta nos caracteres.
+                    while text.measure_styled(para[start..stop].trim_end(), style) > max {
+                        let cut = start + at_x(&para[start..stop], max, text, style).max(1);
+                        let cut = (cut..=stop).find(|&i| para.is_char_boundary(i)).unwrap_or(stop);
+                        if cut >= stop {
+                            break;
+                        }
+                        out.push((base + start, base + cut));
+                        start = cut;
+                    }
+                    end = stop;
+                    k = stop;
+                }
+            }
+            out.push((base + start, base + para.len()));
+            base += para.len() + 1;
+        }
+        out
+    }
+
+    /// Posição (byte) do texto sob o ponto, com o texto desenhado em `r` por
+    /// [`TextInput::draw_lines`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn hit(
+        &self,
+        lines: &[(usize, usize)],
+        r: Rect,
+        pad: f32,
+        x: f32,
+        y: f32,
+        text: &mut TextSystem,
+        style: TextStyle,
+    ) -> usize {
+        let lh = text.line_height_of(style);
+        let first = self.first_line(lines, r, lh);
+        let k = first + ((y - r.y0 - 1.0) / lh).floor().max(0.0) as usize;
+        let &(a, b) = lines.get(k).unwrap_or(lines.last().unwrap_or(&(0, 0)));
+        a + at_x(&self.text[a..b], x - r.x0 - pad, text, style)
+    }
+
+    /// Primeira linha à vista: a do cursor precisa caber.
+    fn first_line(&self, lines: &[(usize, usize)], r: Rect, lh: f32) -> usize {
+        let fit = ((r.h() / lh).floor() as usize).max(1);
+        (line_of(lines, self.cursor) + 1).saturating_sub(fit)
+    }
+
+    /// Como [`TextInput::draw_spans`], em várias linhas (de cima para baixo).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_lines(
+        &self,
+        p: &mut Painter,
+        r: Rect,
+        style: TextStyle,
+        pad: f32,
+        focused: bool,
+        colors: &InputColors,
+        spans: &[(std::ops::Range<usize>, Rgba)],
+        lines: &[(usize, usize)],
+    ) {
+        p.fill(r, &r, colors.background);
+        p.stroke(r, &r, 1.0, if focused { colors.focus } else { colors.border });
+        let lh = p.text.line_height_of(style);
+        let inner = r.inset(1.0);
+        let first = self.first_line(lines, r, lh);
+        let x = r.x0 + pad;
+        for (k, &(a, b)) in lines.iter().enumerate().skip(first) {
+            let y = (r.y0 + 1.0 + (k - first) as f32 * lh).floor();
+            if y >= r.y1 {
+                break;
+            }
+            if let Some((sa, sb)) = self.selection().filter(|_| focused) {
+                let (sa, sb) = (sa.clamp(a, b), sb.clamp(a, b));
+                // Linha vazia ou quebra selecionada: um pedacinho.
+                let nl = self.selection().is_some_and(|s| s.0 <= b && s.1 > b);
+                if sa < sb || nl {
+                    let xa = x + p.text.measure_styled(&self.text[a..sa], style);
+                    let xb = x + p.text.measure_styled(&self.text[a..sb], style);
+                    let xb = if nl { xb + lh * 0.3 } else { xb };
+                    p.fill(Rect::new(xa, y, xb, y + lh), &inner, colors.selection);
+                }
+            }
+            let piece = |p: &mut Painter, from: usize, to: usize, color: Rgba| {
+                let (from, to) = (from.clamp(a, b), to.clamp(a, b));
+                if from < to {
+                    let dx = p.text.measure_styled(&self.text[a..from], style);
+                    p.text(&self.text[from..to], style, x + dx, y, &inner, color);
+                }
+            };
+            let mut at = a;
+            for (s, color) in spans {
+                piece(p, at, s.start, colors.text);
+                piece(p, s.start, s.end, *color);
+                at = at.max(s.end);
+            }
+            piece(p, at, b, colors.text);
+            if focused && k == line_of(lines, self.cursor) {
+                let cx = (x + p.text.measure_styled(&self.text[a..self.cursor.clamp(a, b)], style)).round();
+                p.fill(Rect::new(cx, y + 1.0, cx + 1.0, y + lh - 1.0), &inner, colors.text);
+            }
+        }
     }
 
     /// Desenha o campo: fundo, texto, seleção e cursor (se `focused`).
@@ -598,6 +750,28 @@ impl TextInput {
             p.fill(Rect::new(cx, y + 1.0, cx + 1.0, y + lh - 1.0), &inner, colors.text);
         }
     }
+}
+
+/// Linha em que está a posição `at`: a última que começa antes dela (ou nela).
+fn line_of(lines: &[(usize, usize)], at: usize) -> usize {
+    lines.iter().rposition(|&(a, _)| a <= at).unwrap_or(0)
+}
+
+/// Posição (byte) de `s` mais perto de `x` pixels do começo.
+fn at_x(s: &str, x: f32, text: &mut TextSystem, style: TextStyle) -> usize {
+    let mut best = (0, x.abs());
+    for (i, c) in s.char_indices() {
+        let e = i + c.len_utf8();
+        let w = text.measure_styled(&s[..e], style);
+        let d = (w - x).abs();
+        if d < best.1 {
+            best = (e, d);
+        }
+        if w > x {
+            break;
+        }
+    }
+    best.0
 }
 
 /// Cores de um [`TextInput`] (vêm do tema do app).
@@ -812,6 +986,44 @@ mod tests {
         assert_eq!(t.cursor(), 2);
         t.select(1, 4);
         assert_eq!(t.selection(), Some((1, 4)));
+    }
+
+    #[test]
+    fn lines_of_text() {
+        let mut ts = TextSystem::new_fast(13.0, 256);
+        let st = ts.default_style();
+        let none = Modifiers::default();
+        let mut t = TextInput::new();
+        t.insert("a\nb");
+        assert_eq!(t.text, "a b");
+        t.multiline = true;
+        t.set_text("");
+        t.insert("um\r\ndois\n");
+        assert_eq!(t.text, "um\ndois\n");
+        let lines = t.lines(None, &mut ts, st);
+        assert_eq!(lines, [(0, 2), (3, 7), (8, 8)]);
+        // Início e fim da linha; Ctrl vai ao texto todo.
+        t.set_cursor(5);
+        press(&mut t, Key::Home, None, none);
+        assert_eq!(t.cursor(), 3);
+        press(&mut t, Key::End, None, none);
+        assert_eq!(t.cursor(), 7);
+        press(&mut t, Key::Home, None, Modifiers { ctrl: true, ..none });
+        assert_eq!(t.cursor(), 0);
+        // Subir e descer.
+        assert!(t.move_line(&lines, true, false, &mut ts, st));
+        assert_eq!(t.cursor(), 3);
+        assert!(!t.move_line(&lines, false, false, &mut ts, st) || t.cursor() == 0);
+        t.set_cursor(8);
+        assert!(!t.move_line(&lines, true, false, &mut ts, st));
+        // Quebra pela largura.
+        t.set_text("palavra outra mais uma");
+        let w = ts.measure_styled("palavra outra", st) + 1.0;
+        let lines = t.lines(Some(w), &mut ts, st);
+        assert_eq!(&t.text[lines[0].0..lines[0].1], "palavra outra ");
+        assert_eq!(lines.last().unwrap().1, t.text.len());
+        let r = Rect::new(0.0, 0.0, 200.0, 100.0);
+        assert_eq!(t.hit(&lines, r, 0.0, -5.0, 2.0, &mut ts, st), 0);
     }
 
     #[test]

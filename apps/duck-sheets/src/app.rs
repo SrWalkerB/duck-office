@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use duck_core::{CellRange, Sheet, StringTable, Styles, Value};
+use duck_core::{CellRange, Sheet, StringTable, Styles};
 use duck_gfx::{FrameStatus, Gfx, Instance};
 use duck_platform::{
     App, ColorScheme, Context, Cursor, Event, Key, Modifiers, MouseButton, WheelDelta, Window,
@@ -14,7 +14,6 @@ use duck_platform::{
 use duck_text::{FontSet, TextStyle, TextSystem};
 use duck_ui::{Rect, TabBar, TextInput};
 use duck_xlsx::SheetInfo;
-use rayon::prelude::*;
 
 use crate::Opts;
 use crate::axis::Axis;
@@ -84,6 +83,10 @@ pub struct View {
     pub scroll_y: f64,
     pub cur: (u32, u32),
     pub anchor: (u32, u32),
+    /// Outras áreas da seleção múltipla e a âncora com que elas valem (uma
+    /// seleção nova muda a âncora e as deixa para trás).
+    pub extra: Vec<(u32, u32, u32, u32)>,
+    pub extra_anchor: (u32, u32),
     pub zoom: u16,
     /// Agrupamento de linhas e colunas.
     pub row_groups: Vec<duck_core::outline::Group>,
@@ -130,6 +133,37 @@ impl View {
     pub fn sel(&self) -> (u32, u32, u32, u32) {
         let (a, b) = (self.anchor, self.cur);
         (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1))
+    }
+
+    /// Há mais de uma área selecionada?
+    pub fn multi(&self) -> bool {
+        !self.extra.is_empty() && self.extra_anchor == self.anchor
+    }
+
+    /// Todas as áreas selecionadas; a última é a da célula ativa.
+    pub fn areas(&self) -> Vec<(u32, u32, u32, u32)> {
+        let mut v = if self.multi() { self.extra.clone() } else { Vec::new() };
+        v.push(self.sel());
+        v
+    }
+
+    /// Começa uma área: com `add`, a seleção de agora vai para as outras;
+    /// com `extend`, nada muda; senão, as outras saem.
+    pub fn begin_area(&mut self, add: bool, extend: bool) {
+        if add {
+            if !self.multi() {
+                self.extra.clear();
+            }
+            let s = self.sel();
+            self.extra.push(s);
+        } else if !extend {
+            self.extra.clear();
+        }
+    }
+
+    /// Seleção nova: as outras áreas saem.
+    pub fn single(&mut self) {
+        self.extra.clear();
     }
 
     pub fn col_style(&self, c: u32) -> u16 {
@@ -264,6 +298,8 @@ pub(crate) fn build_view(sheet: &Sheet, mdw: f32, prev: Option<View>, opts_zoom:
         scroll_y: rows.offset(frozen_rows) as f64,
         cur: (0, 0),
         anchor: (0, 0),
+        extra: Vec::new(),
+        extra_anchor: (0, 0),
         zoom: opts_zoom.unwrap_or(sv.zoom).clamp(10, 400),
         merges,
         row_groups: l.outline.rows.groups(),
@@ -294,6 +330,8 @@ pub(crate) fn build_view(sheet: &Sheet, mdw: f32, prev: Option<View>, opts_zoom:
         v.scroll_y = p.scroll_y;
         v.cur = p.cur;
         v.anchor = p.anchor;
+        v.extra = p.extra;
+        v.extra_anchor = p.extra_anchor;
         v.zoom = p.zoom;
         for (c, s) in p.resized_cols {
             v.resize_col(c, s);
@@ -391,6 +429,15 @@ pub enum Drag {
     },
     /// Apontando um intervalo para a fórmula em edição.
     Point,
+    /// Arrastando a alça de preenchimento a partir de `src`.
+    Fill {
+        src: CellRange,
+    },
+    /// Arrastando a borda da seleção (`grab`: célula pega, dentro do bloco).
+    MoveCells {
+        src: CellRange,
+        grab: (u32, u32),
+    },
     /// Arrastando a guia da aba `sheet` (x do clique).
     Tab {
         sheet: usize,
@@ -422,17 +469,6 @@ pub struct Find {
     pub done_query: String,
     pub current: usize,
     pub focused: bool,
-}
-
-/// Aba e seleção (recortada aos dados) das estatísticas guardadas.
-pub type StatsKey = (usize, u32, u32, u32, u32);
-
-/// Estatísticas da seleção (barra de status).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SelStats {
-    pub count: u64,
-    pub numbers: u64,
-    pub sum: f64,
 }
 
 pub struct Bench {
@@ -481,16 +517,18 @@ pub struct SheetsApp {
     pub tab_menu: Option<usize>,
     pub last_tab_id: u32,
     pub drag: Option<Drag>,
+    /// Onde o arraste da alça ou da borda vai parar.
+    pub drag_area: Option<CellRange>,
     pub mouse: (f32, f32),
     pub message: String,
     /// Estilo de texto de cada fonte do arquivo no zoom atual (chave: tamanho base).
     pub font_styles: Vec<TextStyle>,
     pub font_key: (u32, usize),
-    pub stats: Option<(StatsKey, SelStats)>,
+    pub stats: Option<(crate::cells::StatsKey, crate::cells::SelStats)>,
     /// Pool próprio para trabalho pedido pela janela (estatísticas da
     /// seleção): o pool global pode estar ocupado com a leitura, e a janela
     /// não pode esperar na fila dele.
-    ui_pool: Option<rayon::ThreadPool>,
+    pub(crate) ui_pool: Option<rayon::ThreadPool>,
     pub timeline: Vec<(&'static str, Duration)>,
     pub first_content: Option<Duration>,
     pub recent_cpu: Vec<f64>,
@@ -510,10 +548,22 @@ pub struct SheetsApp {
     pub hover_link: Option<String>,
     /// Célula sendo editada (F3).
     pub editor: Option<crate::edit::Editor>,
+    /// Caixa de diálogo aberta.
+    pub form: Option<crate::forms::Form>,
+    /// Texto do clipboard quando "Colar especial" abriu.
+    pub paste_source: String,
+    /// Última busca de "Substituir" e as áreas escolhidas ao abrir.
+    pub replace_last: crate::replace::Query,
+    pub replace_areas: Vec<CellRange>,
+    /// "Formatar células": o que foi mexido e as listas de exemplos.
+    pub format_state: crate::fmtcells::State,
+    pub format_lists: [Vec<String>; 3],
+    /// Pincel de formatação ligado.
+    pub painter: Option<crate::paste::Painter>,
     /// Salvamento em andamento.
     pub saving: Option<crate::edit::SaveJob>,
     /// Última cópia feita no app (fórmulas e estilos para colar).
-    pub clip: Option<crate::edit::Clip>,
+    pub clip: Option<crate::paste::Clip>,
     /// Menu aberto (lista, paleta ou clique direito).
     pub popup: Option<crate::menu::Popup>,
     /// Caixa de diálogo aberta (largura, altura).
@@ -590,6 +640,7 @@ impl SheetsApp {
             tab_menu: None,
             last_tab_id: 0,
             drag: None,
+            drag_area: None,
             mouse: (0.0, 0.0),
             message: String::new(),
             font_styles: Vec::new(),
@@ -610,6 +661,13 @@ impl SheetsApp {
             today: duck_core::cond::today_serial(),
             hover_link: None,
             editor: None,
+            form: None,
+            paste_source: String::new(),
+            replace_last: Default::default(),
+            replace_areas: Vec::new(),
+            format_state: Default::default(),
+            format_lists: Default::default(),
+            painter: None,
             saving: None,
             clip: None,
             popup: None,
@@ -1101,6 +1159,7 @@ impl SheetsApp {
         let (r, c) = (r.min(v.rows.len() - 1), c.min(v.cols.len() - 1));
         v.cur = (r, c);
         if !extend {
+            v.single();
             v.anchor = (r, c);
         }
     }
@@ -1190,86 +1249,12 @@ impl SheetsApp {
 
     // --- copiar, estatísticas, barra de fórmulas -------------------------------
 
-    /// Seleção recortada à área com dados (seleções de coluna/linha inteira).
-    fn data_sel(sheet: &Sheet, v: &View) -> (u32, u32, u32, u32) {
-        let (r0, c0, r1, c1) = v.sel();
-        let r1 = r1.min(sheet.rows().max(r0 + 1) - 1).max(r0);
-        let c1 = c1.min(sheet.cols().max(c0 + 1) - 1).max(c0);
-        (r0, c0, r1, c1)
-    }
-
     /// Copia a seleção (texto como aparece, separado por tab) e guarda as
     /// células para colar aqui com fórmulas e estilos. `cut` = recortar.
     fn copy(&mut self, cx: &mut Context, cut: bool) {
         if let Some(out) = self.copy_text(cut) {
             cx.clipboard().set_text(&out);
         }
-    }
-
-    /// O texto da seleção para o clipboard (e guarda as células; ver `copy`).
-    pub(crate) fn copy_text(&mut self, cut: bool) -> Option<String> {
-        let doc = self.doc.as_ref()?;
-        let (sheet, v) = doc.current()?;
-        let (r0, c0, r1, c1) = Self::data_sel(sheet, v);
-        let cells = (r1 - r0 + 1) as u64 * (c1 - c0 + 1) as u64;
-        const MAX_COPY: u64 = 5_000_000;
-        if cells > MAX_COPY {
-            self.message = format!("Seleção grande demais para copiar ({} células)", fmt_int(cells));
-            return None;
-        }
-        let out = selection_tsv(sheet, &doc.strings, &doc.looks, doc.date1904, (r0, c0, r1, c1));
-        self.message = format!("{} células copiadas", fmt_int(cells));
-        self.remember_clip(out.clone(), cut);
-        Some(out)
-    }
-
-    /// Estatísticas da seleção (contagem, soma, média), calculadas em paralelo
-    /// por coluna quando a seleção muda.
-    pub fn sel_stats(&mut self) -> Option<SelStats> {
-        let doc = self.doc.as_ref()?;
-        let (sheet, v) = doc.current()?;
-        let (r0, c0, r1, c1) = Self::data_sel(sheet, v);
-        let (s0, s1, s2, s3) = v.sel();
-        if (s0, s1) == (s2, s3) {
-            return None; // uma célula só: nada a somar
-        }
-        let key = (doc.active, r0, c0, r1, c1);
-        if let Some((k, s)) = &self.stats
-            && *k == key
-        {
-            return Some(*s);
-        }
-        let strings = &doc.strings;
-        let pool = self.ui_pool.get_or_insert_with(|| {
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(duck_par::physical_cores().clamp(1, 8))
-                .thread_name(|i| format!("duck-ui-{i}"))
-                .build()
-                .expect("pool da interface")
-        });
-        let st = pool.install(|| {
-            (c0..=c1)
-                .into_par_iter()
-                .map(|c| {
-                    let mut s = SelStats::default();
-                    sheet.for_each_value(c, r0..r1 + 1, strings, |_, cell| {
-                        s.count += 1;
-                        if let Value::Number(n) = cell.value {
-                            s.numbers += 1;
-                            s.sum += n;
-                        }
-                        true
-                    });
-                    s
-                })
-                .reduce(SelStats::default, |a, b| SelStats {
-                    count: a.count + b.count,
-                    numbers: a.numbers + b.numbers,
-                    sum: a.sum + b.sum,
-                })
-        });
-        self.stats = Some((key, st));
-        Some(st)
     }
 
     /// Texto da barra de fórmulas para a célula ativa.
@@ -1367,6 +1352,22 @@ impl SheetsApp {
 
     fn mouse_down(&mut self, cx: &mut Context, x: f32, y: f32, mods: Modifiers, clicks: u8) {
         let g = self.geom();
+        if let Some(mut f) = self.form.take() {
+            let o = match self.text.as_mut() {
+                Some(text) => {
+                    let l = f.layout(&g, text, text.default_style());
+                    // Numa caixa leve, o clique fora vai para a planilha.
+                    let outside = f.light && !l.bx.contains(x, y);
+                    if outside { None } else { Some(f.click(&l, g.s, x, y)) }
+                }
+                None => None,
+            };
+            self.form = Some(f);
+            if let Some(o) = o {
+                self.form_event(o);
+                return;
+            }
+        }
         // Caixa de diálogo aberta: só ela responde.
         if self.prompt.is_some() {
             let (_, input, ok, cancel) = crate::menu::prompt_rects(&g);
@@ -1431,6 +1432,10 @@ impl SheetsApp {
                 Some(crate::ribbon::Hit::Button(crate::ribbon::Act::Drop(d), r, _)) => {
                     self.open_drop(d, r, &g)
                 }
+                // Duplo clique no pincel: continua ligado.
+                Some(crate::ribbon::Hit::Button(crate::ribbon::Act::Painter, ..)) if clicks >= 2 => {
+                    self.toggle_painter(true);
+                }
                 Some(crate::ribbon::Hit::Button(act, ..)) => self.run_act(cx, act),
                 None => {}
             }
@@ -1466,6 +1471,11 @@ impl SheetsApp {
             if let Some(ed) = &mut self.editor {
                 ed.enter_mode = false;
             }
+            self.editor_place(&g, x, y, mods.shift);
+            return;
+        }
+        // Dentro do editor: põe o cursor.
+        if self.editor.is_some() && self.editor_place(&g, x, y, mods.shift) {
             return;
         }
         // Com uma fórmula aberta, o clique aponta (onde cabe uma referência).
@@ -1558,6 +1568,12 @@ impl SheetsApp {
             self.outline_click(&g, x, y);
             return;
         }
+        // Ctrl soma uma área à seleção; um clique comum começa outra.
+        let add = (mods.ctrl || mods.logo) && !mods.shift;
+        let in_headers = g.corner.contains(x, y) || g.colhdr.contains(x, y) || g.rowhdr.contains(x, y);
+        if in_headers && resize_target(&g, v, x, y).is_none() {
+            v.begin_area(add, mods.shift);
+        }
         if g.corner.contains(x, y) {
             v.anchor = (0, 0);
             v.cur = (nr - 1, nc - 1);
@@ -1596,6 +1612,7 @@ impl SheetsApp {
                 v.anchor = (0, c);
                 v.cur = (nr - 1, c);
             }
+            v.extra_anchor = v.anchor;
             self.drag = Some(Drag::Cols);
             return;
         }
@@ -1609,8 +1626,32 @@ impl SheetsApp {
                 v.anchor = (r, 0);
                 v.cur = (r, nc - 1);
             }
+            v.extra_anchor = v.anchor;
             self.drag = Some(Drag::Rows);
             return;
+        }
+        // Alça de preenchimento e borda da seleção.
+        if g.grid.contains(x, y) && !mods.shift {
+            let sel = crate::fill::range_of(v.sel());
+            if crate::fill::on_handle(&g, v, x, y) {
+                if clicks >= 2 {
+                    self.fill_double();
+                } else {
+                    self.drag = Some(Drag::Fill { src: sel });
+                }
+                return;
+            }
+            if clicks < 2
+                && crate::fill::on_border(&g, v, x, y)
+                && let Some((r, c)) = g.hit(v, x, y)
+            {
+                let grab = (
+                    r.clamp(sel.first_row, sel.last_row) - sel.first_row,
+                    c.clamp(sel.first_col, sel.last_col) - sel.first_col,
+                );
+                self.drag = Some(Drag::MoveCells { src: sel, grab });
+                return;
+            }
         }
         if let Some((mut r, mut c)) = g.hit(v, x, y) {
             // Ctrl+clique num hiperlink: segue o link.
@@ -1631,11 +1672,13 @@ impl SheetsApp {
             {
                 (r, c) = (m.first_row, m.first_col);
             }
+            v.begin_area(add, mods.shift);
             v.cur = (r, c);
             if !mods.shift {
                 v.anchor = (r, c);
             }
-            if clicks >= 2 && !mods.shift {
+            v.extra_anchor = v.anchor;
+            if clicks >= 2 && !mods.shift && !add {
                 self.start_edit(None, false);
                 return;
             }
@@ -1647,7 +1690,11 @@ impl SheetsApp {
         self.mouse = (x, y);
         let Some(drag) = self.drag else {
             let g = self.geom();
-            if self.popup.is_some() || self.prompt.is_some() || self.filter_panel.is_some() {
+            if self.popup.is_some()
+                || self.prompt.is_some()
+                || self.filter_panel.is_some()
+                || self.form.is_some()
+            {
                 return true;
             }
             // Lista de sugestões: o item sob o mouse fica marcado.
@@ -1696,7 +1743,15 @@ impl SheetsApp {
             // Link, macro ou controle de um objeto sob o mouse.
             let action = g.grid.contains(x, y).then(|| self.object_action(&g, x, y)).flatten();
             let link = link.or_else(|| action.map(|a| a.1));
+            let (fill, border) = match current {
+                Some((_, v)) if self.editor.is_none() && g.grid.contains(x, y) => {
+                    (crate::fill::on_handle(&g, v, x, y), crate::fill::on_border(&g, v, x, y))
+                }
+                _ => (false, false),
+            };
             let cursor = match (edge, &link) {
+                _ if fill => Cursor::Cross,
+                _ if border => Cursor::Move,
                 (Some(Edge::Col(_)), _) => Cursor::ResizeColumn,
                 (Some(Edge::Row(_)), _) => Cursor::ResizeRow,
                 (None, Some(_)) => Cursor::Pointer,
@@ -1741,7 +1796,12 @@ impl SheetsApp {
                 v.scroll_x = min + t * (max - min);
             }
             Drag::Zoom | Drag::Tab { .. } => {}
-            Drag::Select | Drag::Cols | Drag::Rows | Drag::Point => {
+            Drag::Select
+            | Drag::Cols
+            | Drag::Rows
+            | Drag::Point
+            | Drag::Fill { .. }
+            | Drag::MoveCells { .. } => {
                 // Fora da grade: rola na direção do mouse.
                 let main = g.quads[3].rect;
                 let step = 2.0 * v.rows.default_size() as f64;
@@ -1760,6 +1820,11 @@ impl SheetsApp {
                 if let Some((r, c)) = g.hit(v, cx, cy) {
                     match drag {
                         Drag::Point => self.point_drag((r, c)),
+                        Drag::Fill { src } => self.drag_area = crate::fill::fill_target(&src, r, c),
+                        Drag::MoveCells { src, grab } => {
+                            let t = crate::fill::move_target(&src, grab, r, c);
+                            self.drag_area = (t != src).then_some(t);
+                        }
                         Drag::Select => v.cur = (r, c),
                         Drag::Cols => v.cur.1 = c,
                         _ => v.cur.0 = r,
@@ -1909,6 +1974,11 @@ impl SheetsApp {
 
     fn key(&mut self, cx: &mut Context, key: Key, mods: Modifiers, text: Option<String>) -> bool {
         let ctrl = mods.ctrl || mods.logo;
+        if let Some(f) = &mut self.form {
+            let o = f.key(&key, mods, text.as_deref(), cx.clipboard());
+            self.form_event(o);
+            return true;
+        }
         // Caixa de diálogo: Enter confirma, Esc fecha, o resto vai para o campo.
         if let Some(p) = &mut self.prompt {
             match key {
@@ -1966,6 +2036,10 @@ impl SheetsApp {
             }
             if r.submitted {
                 self.namebox_focus = false;
+                let typed = self.namebox.text.trim().replace(',', ";");
+                if typed.contains(';') && self.scripted_select(&typed) {
+                    return true;
+                }
                 match parse_range(self.namebox.text.trim()) {
                     Some((a, b)) => {
                         // Célula ativa no primeiro canto; seleção até o outro.
@@ -1985,15 +2059,32 @@ impl SheetsApp {
         }
         let shift = mods.shift;
         match key {
+            // Alt+=: AutoSoma.
+            Key::Char(ref k) if mods.alt && !ctrl && k == "=" => self.autosum(),
             // Ctrl+Alt+= / Ctrl+Alt+-: inserir / apagar linhas ou colunas.
             Key::Char(ref k) if ctrl && mods.alt && matches!(k.as_str(), "=" | "+") => {
                 self.shift_selection(true, None)
             }
             Key::Char(ref k) if ctrl && mods.alt && k == "-" => self.shift_selection(false, None),
             Key::Char(ref k) if ctrl => match k.to_lowercase().as_str() {
+                "d" if !shift => self.fill_copy(true),
+                "r" if !shift => self.fill_copy(false),
                 "c" => self.copy(cx, false),
                 "x" => self.copy(cx, true),
-                "v" => self.paste(cx),
+                // Ctrl+Alt+V: colar especial; Ctrl+Shift+V: só valores.
+                "v" if mods.alt => {
+                    if let Some(t) = cx.clipboard().get_text() {
+                        self.ask_paste_special(t);
+                    }
+                }
+                "v" if shift => {
+                    let what = crate::paste::What::Values;
+                    self.paste(cx, crate::paste::PasteOpts { what, ..Default::default() });
+                }
+                "v" => self.paste(cx, Default::default()),
+                "h" if !shift => self.open_replace(),
+                "1" if !shift => self.ask_format(0),
+                ";" | ":" => self.insert_now(shift),
                 "z" => self.undo(),
                 "y" => self.redo(),
                 "s" => self.save(shift),
@@ -2050,10 +2141,19 @@ impl SheetsApp {
                 self.namebox.select_all();
             }
             Key::Escape if self.popup.is_some() => self.popup = None,
+            Key::Escape if self.drag_area.is_some() => {
+                self.drag = None;
+                self.drag_area = None;
+            }
+            Key::Escape if self.painter.is_some() => {
+                self.painter = None;
+                self.message.clear();
+            }
             Key::Escape => {
                 if self.find.take().is_none()
                     && let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut())
                 {
+                    v.single();
                     v.anchor = v.cur;
                 }
             }
@@ -2378,6 +2478,12 @@ impl App for SheetsApp {
                         self.wheel_zoom -= if up { 60.0 } else { -60.0 };
                         self.zoom_step(up);
                     }
+                } else if let Some(mut f) = self.form.take() {
+                    if let Some(text) = self.text.as_mut() {
+                        let l = f.layout(&g, text, text.default_style());
+                        f.wheel(&l, mx, my, dy > 0.0);
+                    }
+                    self.form = Some(f);
                 } else if let Some(panel) = self.filter_panel.as_mut().filter(|p| p.rect.contains(mx, my)) {
                     panel.scroll_by(if dy > 0.0 { -3 } else { 3 });
                 } else if self.complete_wheel(&g, mx, my, dy > 0.0) {
@@ -2408,6 +2514,23 @@ impl App for SheetsApp {
                 true
             }
             Event::MouseUp { button: MouseButton::Left, modifiers, .. } => match self.drag.take() {
+                Some(Drag::Select | Drag::Cols | Drag::Rows) if self.painter.is_some() => {
+                    self.apply_painter();
+                    true
+                }
+                Some(Drag::Fill { src }) => {
+                    if let Some(t) = self.drag_area.take() {
+                        let toggle = modifiers.ctrl || modifiers.logo;
+                        self.fill_to(src, t, duck_core::fill::Mode::Auto, toggle);
+                    }
+                    true
+                }
+                Some(Drag::MoveCells { src, .. }) => {
+                    if let Some(t) = self.drag_area.take() {
+                        self.drop_cells(src, t, modifiers.ctrl || modifiers.logo);
+                    }
+                    true
+                }
                 Some(Drag::Tab { sheet, x }) => {
                     let g = self.geom();
                     if (self.mouse.0 - x).abs() > 6.0 * g.s {

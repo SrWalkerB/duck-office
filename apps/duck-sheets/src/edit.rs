@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use duck_core::input::{Input, parse_input};
 use duck_core::{CellChange, CellValue, CfCtx, CfState, Command, Sheet, Value};
-use duck_platform::{Clipboard, Context, Key, Modifiers, SaveChoice};
+use duck_platform::{Clipboard, Key, Modifiers, SaveChoice};
 use duck_ui::TextInput;
 
 use crate::app::{SheetsApp, Slot, col_px, row_px};
@@ -32,6 +32,8 @@ pub struct Editor {
     pub enter_mode: bool,
     /// O cursor está na barra de fórmulas (senão, na célula).
     pub in_bar: bool,
+    /// A célula quebra o texto: o editor também.
+    pub wrap: bool,
     /// Aba da célula editada, e se outra está à vista (apontando lá).
     pub sheet: usize,
     pub away: bool,
@@ -62,6 +64,8 @@ pub struct History {
 /// O que um comando muda na tela (além das células).
 #[derive(Default)]
 pub struct Affected {
+    /// Linhas com células mudadas (altura automática); poucas.
+    auto: Vec<u32>,
     /// Refazer a visão inteira do layout (estrutura, ou mudanças grandes).
     rebuild: bool,
     rows: Vec<u32>,
@@ -75,12 +79,35 @@ const REBUILD_OVER: usize = 2000;
 fn affected(cmd: &Command) -> Affected {
     let mut a = Affected::default();
     collect_affected(cmd, &mut a);
+    a.auto = auto_list(cmd);
     if a.rows.len() > REBUILD_OVER || a.cols.len() > REBUILD_OVER {
         a.rebuild = true;
         a.rows.clear();
         a.cols.clear();
     }
     a
+}
+
+/// Linhas das células de um comando, se são poucas.
+fn auto_list(cmd: &Command) -> Vec<u32> {
+    let size = |c: &Command| match c {
+        Command::SetCells(v) => v.len(),
+        Command::Restore(v) => v.len(),
+        Command::SetStyles(v) => v.len(),
+        _ => 0,
+    };
+    let total = match cmd {
+        Command::Group(v) => v.iter().map(size).sum(),
+        c => size(c),
+    };
+    if total == 0 || total > 2000 {
+        return Vec::new();
+    }
+    let mut rows: Vec<u32> = cmd.cells().into_iter().map(|c| c.0).collect();
+    rows.sort_unstable();
+    rows.dedup();
+    rows.truncate(200);
+    rows
 }
 
 fn collect_affected(cmd: &Command, a: &mut Affected) {
@@ -117,7 +144,7 @@ fn free(doc: &mut crate::app::Doc) -> bool {
 /// (`current`)? Como no Excel: sempre numa célula "Geral"; datas, horas e
 /// percentuais também trocam um formato de outro tipo (uma data digitada
 /// numa célula de moeda vira data); os outros só valem em "Geral".
-fn should_apply(styles: &duck_core::Styles, current: u16, new: u16) -> bool {
+pub(crate) fn should_apply(styles: &duck_core::Styles, current: u16, new: u16) -> bool {
     use duck_core::input::fmt;
     if current == 0 {
         return true;
@@ -157,7 +184,7 @@ impl SheetsApp {
     // --- comandos -------------------------------------------------------------
 
     /// A aba ativa pode ser editada agora? Se não, explica na barra de status.
-    fn editable(&mut self) -> bool {
+    pub(crate) fn editable(&mut self) -> bool {
         if self.saving.is_some() {
             self.message = "Aguarde: salvando…".into();
             return false;
@@ -238,6 +265,7 @@ impl SheetsApp {
             step.iter().flat_map(|(i, c)| c.cells().into_iter().map(move |(r, cc)| (*i, r, cc))).collect();
         let shifted = step.iter().any(|(_, c)| matches!(c, Command::Shift(..)));
         let book = crate::tabs::has_book(&step);
+        let lists_only = crate::tabs::lists_only(&step);
         if book && !free(doc) {
             self.message = "Uma aba está em uso; tente de novo".into();
             return false;
@@ -262,7 +290,7 @@ impl SheetsApp {
         doc.history.undo.push(inverse);
         doc.history.redo.clear();
         doc.dirty = true;
-        self.after_step(touched, book);
+        self.after_step(touched, book, lists_only);
         if shifted || book {
             self.init_spills();
         } else {
@@ -275,7 +303,7 @@ impl SheetsApp {
 
     /// Depois de aplicar um passo: atualiza as abas tocadas. Com a lista de
     /// abas mudada, os índices do passo não valem mais: atualiza todas.
-    fn after_step(&mut self, touched: Vec<(usize, Affected)>, book: bool) {
+    fn after_step(&mut self, touched: Vec<(usize, Affected)>, book: bool, lists_only: bool) {
         if !book {
             for (idx, st) in touched {
                 self.after_change(idx, st);
@@ -287,7 +315,9 @@ impl SheetsApp {
         for i in 0..n {
             self.after_change(i, Affected { rebuild, ..Default::default() });
         }
-        self.clip = None;
+        if !lists_only {
+            self.clip = None;
+        }
         self.tab_edit = None;
         self.tab_revealed = None;
         self.drag = None;
@@ -314,7 +344,8 @@ impl SheetsApp {
             self.message = if undo { "Nada para desfazer" } else { "Nada para refazer" }.into();
             return;
         };
-        if first != doc.active {
+        // Vai para a aba do passo, se ele não mexe na que está à vista.
+        if !next.is_some_and(|step| step.iter().any(|x| x.0 == doc.active)) {
             self.switch_sheet(first);
         }
         if !self.editable() {
@@ -330,6 +361,7 @@ impl SheetsApp {
         let Some(step) = from.pop() else { return };
         // Confere antes que todas as abas do passo estão livres.
         let book = crate::tabs::has_book(&step);
+        let lists_only = crate::tabs::lists_only(&step);
         let busy = if book {
             doc.sheets.iter_mut().any(|s| sheet_mut(s).is_none())
         } else {
@@ -340,7 +372,8 @@ impl SheetsApp {
             self.message = "A aba está em uso; tente de novo".into();
             return;
         }
-        let cells = step.first().map(|(_, c)| c.cells()).unwrap_or_default();
+        let shown = doc.active;
+        let cells = step.iter().find(|(i, _)| *i == shown).map(|(_, c)| c.cells()).unwrap_or_default();
         let user_cells: Vec<(usize, u32, u32)> =
             step.iter().flat_map(|(i, c)| c.cells().into_iter().map(move |(r, cc)| (*i, r, cc))).collect();
         let shifted = step.iter().any(|(_, c)| matches!(c, Command::Shift(..)));
@@ -361,7 +394,7 @@ impl SheetsApp {
         let (undo_list, redo_list) = (&mut doc.history.undo, &mut doc.history.redo);
         if undo { redo_list } else { undo_list }.push(inverse);
         doc.dirty = true;
-        self.after_step(touched, book);
+        self.after_step(touched, book, lists_only);
         if shifted || book {
             self.init_spills();
         } else {
@@ -427,6 +460,8 @@ impl SheetsApp {
                 }
             }
         }
+        let auto = aff.auto;
+        self.auto_rows(idx, &auto);
         self.update_title();
     }
 
@@ -466,11 +501,14 @@ impl SheetsApp {
     pub fn clear_selection(&mut self) {
         let Some(doc) = &self.doc else { return };
         let Some((sheet, v)) = doc.current() else { return };
-        let (r0, c0, r1, c1) = v.sel();
-        let (r1, c1) = (r1.min(sheet.rows().max(1) - 1), c1.min(sheet.cols().max(1) - 1));
         let mut changes = Vec::new();
         const MAX: usize = 2_000_000;
-        for c in c0..=c1 {
+        let (last_row, last_col) = (sheet.rows().max(1) - 1, sheet.cols().max(1) - 1);
+        let cols = v
+            .areas()
+            .into_iter()
+            .flat_map(|(r0, c0, r1, c1)| (c0..=c1.min(last_col)).map(move |c| (c, r0, r1.min(last_row))));
+        for (c, r0, r1) in cols {
             sheet.for_each_value(c, r0..r1.saturating_add(1), &doc.strings, |r, _| {
                 changes.push(CellChange {
                     row: r,
@@ -509,6 +547,12 @@ impl SheetsApp {
             (row, col) = (m.first_row, m.first_col);
         }
         let mut input = TextInput::new();
+        input.multiline = true;
+        let wrap = self.doc.as_ref().and_then(|d| Some((d, d.current()?))).is_some_and(|(d, (s, v))| {
+            let st = s.raw(row, col).style;
+            let st = if st == 0 { v.blank_style(row, col) } else { st };
+            d.styles.xfs.get(st as usize).is_some_and(|x| x.alignment.wrap)
+        });
         let enter_mode = initial.is_some() && !in_bar;
         match initial {
             Some(t) => input.set_text(t),
@@ -529,6 +573,7 @@ impl SheetsApp {
             input,
             enter_mode,
             in_bar,
+            wrap,
             sheet,
             away: false,
             point: None,
@@ -564,6 +609,7 @@ impl SheetsApp {
         if before == text {
             return true;
         }
+        let mut rich = None;
         let today = self.today;
         let Some(doc) = &mut self.doc else { return true };
         let Some((sheet, v)) = doc.current() else { return true };
@@ -580,20 +626,35 @@ impl SheetsApp {
             Input::Value(value, fmt) => {
                 let mut style = base;
                 let current = doc.styles.xfs.get(base as usize).map_or(0, |x| x.num_fmt);
+                // Texto rico: os trechos que não mudaram guardam a fonte.
+                if matches!(value, CellValue::Text(_))
+                    && let Some(runs) = sheet.rich_at(r, c, &doc.strings)
+                    && let Some(runs) = duck_core::rich::rebase(&before, runs, &text)
+                {
+                    rich = Some(Command::RichText(vec![(r, c, runs)]));
+                }
+                let breaks = matches!(&value, CellValue::Text(t) if t.contains('\n'));
+                let n = doc.styles.xfs.len();
                 if let Some(f) = fmt
                     && should_apply(&doc.styles, current, f)
                 {
-                    let n = doc.styles.xfs.len();
                     style = Arc::make_mut(&mut doc.styles).derive_xf(base, |x| x.num_fmt = f);
-                    if doc.styles.xfs.len() != n {
-                        doc.looks = Arc::new(Looks::new(&doc.styles));
-                        self.font_key = (0, 0);
-                    }
+                } else if breaks && !doc.styles.xfs.get(base as usize).is_some_and(|x| x.alignment.wrap) {
+                    // Uma quebra escrita liga a quebra de texto, como no Excel.
+                    style = Arc::make_mut(&mut doc.styles).derive_xf(base, |x| x.alignment.wrap = true);
+                }
+                if doc.styles.xfs.len() != n {
+                    doc.looks = Arc::new(Looks::new(&doc.styles));
+                    self.font_key = (0, 0);
                 }
                 CellChange { row: r, col: c, value, formula: None, style: Some(style) }
             }
         };
-        self.run_command(Command::SetCells(vec![change]));
+        let set = Command::SetCells(vec![change]);
+        self.run_command(match rich {
+            Some(x) => Command::Group(vec![set, x]),
+            None => set,
+        });
         true
     }
 
@@ -657,13 +718,27 @@ impl SheetsApp {
         };
         match key {
             Key::Escape => self.cancel_edit(),
+            // Alt+Enter quebra a linha; Ctrl+Enter preenche a seleção.
+            Key::Enter if mods.alt => {
+                ed.enter_mode = false;
+                ed.point = None;
+                ed.input.insert("\n");
+                self.refresh_complete(false);
+            }
+            Key::Enter if ctrl => self.commit_edit_all(),
             Key::Enter => mv(self, if shift { -1 } else { 1 }, 0),
+            Key::Char(c) if ctrl && matches!(c.as_str(), ";" | ":") => self.insert_now(shift),
             Key::Tab => mv(self, 0, if shift { -1 } else { 1 }),
             Key::ArrowUp if ed.enter_mode => mv(self, -1, 0),
             Key::ArrowDown if ed.enter_mode => mv(self, 1, 0),
             Key::ArrowLeft if ed.enter_mode => mv(self, 0, -1),
             Key::ArrowRight if ed.enter_mode => mv(self, 0, 1),
             Key::F(2) => self.toggle_pointing(),
+            // Várias linhas: as setas sobem e descem no texto.
+            Key::ArrowUp | Key::ArrowDown if ed.wrap || ed.input.text.contains('\n') => {
+                let down = *key == Key::ArrowDown;
+                self.editor_line(down, shift);
+            }
             _ => {
                 let r = ed.input.key(key, mods, text, clipboard);
                 if r.handled {
@@ -676,12 +751,121 @@ impl SheetsApp {
         Some(true)
     }
 
+    /// Sobe ou desce uma linha no editor.
+    fn editor_line(&mut self, down: bool, extend: bool) {
+        let g = self.geom();
+        let Some(mut ed) = self.editor.take() else { return };
+        if let (Some((_, v)), Some(text)) = (self.doc.as_ref().and_then(|d| d.current()), self.text.as_mut())
+        {
+            let ui = text.default_style();
+            let (r, style, pad) = crate::complete::editor_rect(&ed, &g, v, text, ui);
+            let lines = if ed.in_bar {
+                ed.input.lines(None, text, style)
+            } else {
+                crate::complete::editor_lines(&ed, r, pad, text, style).unwrap_or_default()
+            };
+            if !ed.input.move_line(&lines, down, extend, text, style) {
+                let to = if down { ed.input.text.len() } else { 0 };
+                if extend {
+                    let a = ed.input.selection().map_or(ed.input.cursor(), |s| if down { s.0 } else { s.1 });
+                    ed.input.select(a, to);
+                } else {
+                    ed.input.set_cursor(to);
+                }
+            }
+        }
+        ed.point = None;
+        self.editor = Some(ed);
+        self.refresh_complete(false);
+    }
+
+    /// Clique dentro do editor (na célula ou na barra aberta): põe o cursor.
+    /// `true` = era nele.
+    pub fn editor_place(&mut self, g: &crate::app::Geom, x: f32, y: f32, extend: bool) -> bool {
+        let Some(mut ed) = self.editor.take() else { return false };
+        let mut hit = false;
+        if let (Some((_, v)), Some(text)) = (self.doc.as_ref().and_then(|d| d.current()), self.text.as_mut())
+        {
+            let ui = text.default_style();
+            let (r, style, pad) = crate::complete::editor_rect(&ed, g, v, text, ui);
+            if r.contains(x, y) {
+                hit = true;
+                let lines = if ed.in_bar {
+                    Some(ed.input.lines(None, text, style)).filter(|l| l.len() > 1)
+                } else {
+                    crate::complete::editor_lines(&ed, r, pad, text, style)
+                };
+                let at = match lines {
+                    Some(l) => ed.input.hit(&l, r, pad, x, y, text, style),
+                    None => {
+                        // Uma linha, rolada até o cursor.
+                        let caret = text.measure_styled(&ed.input.text[..ed.input.cursor()], style);
+                        let shift = (caret - (r.w() - 2.0 * pad)).max(0.0);
+                        let one = [(0, ed.input.text.len())];
+                        ed.input.hit(&one, r, pad - shift, x, r.y0 + 2.0, text, style)
+                    }
+                };
+                if extend {
+                    let a = ed.input.selection().map_or(ed.input.cursor(), |s| s.0);
+                    ed.input.select(a, at);
+                } else {
+                    ed.input.set_cursor(at);
+                }
+                ed.enter_mode = false;
+                ed.point = None;
+            }
+        }
+        self.editor = Some(ed);
+        if hit {
+            self.refresh_complete(false);
+        }
+        hit
+    }
+
+    /// Altura das linhas sem altura própria com texto quebrado: cresce para
+    /// caber (só na tela, como a altura automática do Excel).
+    fn auto_rows(&mut self, idx: usize, rows: &[u32]) {
+        const MAX_COLS: u32 = 200;
+        let Some(doc) = &mut self.doc else { return };
+        let (looks, strings) = (doc.looks.clone(), doc.strings.clone());
+        let Some(slot) = doc.sheets.get_mut(idx) else { return };
+        let (Some(sheet), Some(v)) = (slot.data.as_ref(), slot.view.as_mut()) else { return };
+        let Some(text) = self.text.as_mut() else { return };
+        for &r in rows {
+            if r >= v.rows.len() || sheet.row_height(r).is_some() || sheet.row_hidden(r) {
+                continue;
+            }
+            let mut px = v.rows.default_size();
+            for c in 0..sheet.cols().min(MAX_COLS) {
+                let cell = sheet.cell(r, c, &strings);
+                let Value::Text(t) = cell.value else { continue };
+                let look = looks.get(if cell.style == 0 { v.blank_style(r, c) } else { cell.style });
+                if !look.wrap || v.merges.at(r, c).is_some() || v.cols.size(c) == 0 {
+                    continue;
+                }
+                let f = &looks.fonts[(look.font as usize).min(looks.fonts.len() - 1)];
+                let st = text.style(&f.name, f.pt * 96.0 / 72.0, f.bold, f.italic);
+                let w = text.wrap(t, st, (v.cols.size(c) as f32 - 6.0).max(1.0));
+                px = px.max((w.lines() as f32 * w.line_height()).ceil() as u32 + 2);
+            }
+            if v.rows.size(r) != px {
+                v.resize_row(r, px);
+            }
+        }
+    }
+
     /// `--edit`, `--undo` e `--save-to` (testes sem mexer na janela).
     pub fn scripted_edits(&mut self) {
         let edits = std::mem::take(&mut self.opts.edits);
         let mut clipboard = String::new();
         for e in &edits {
-            if self.scripted_tabs(e) {
+            if self.scripted_tabs(e)
+                || self.scripted_fill(e)
+                || self.scripted_cells(e)
+                || self.scripted_replace(e)
+                || self.scripted_format(e)
+                || self.scripted_paste(e, &mut clipboard)
+            {
                 continue;
             }
             // `formatar:negrito:A1:B2` (ver `format::by_name`).
@@ -814,25 +998,7 @@ impl SheetsApp {
                 eprintln!("--edit {e}: {}", self.message);
                 continue;
             }
-            // `copiar:A1:B2`, `recortar:A1:B2`, `colar:D5` (clipboard interno).
-            if let Some((op, arg)) = e.split_once(':')
-                && matches!(op, "copiar" | "recortar" | "colar")
-            {
-                let Some(((r0, c0), (r1, c1))) = crate::app::parse_range(arg) else {
-                    eprintln!("--edit: intervalo inválido: {arg}");
-                    continue;
-                };
-                self.go_to(r0, c0);
-                if let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) {
-                    v.anchor = (r0, c0);
-                    v.cur = (r1, c1);
-                }
-                match op {
-                    "colar" => self.paste_text(clipboard.clone()),
-                    _ => clipboard = self.copy_text(op == "recortar").unwrap_or_default(),
-                }
-                continue;
-            }
+
             // `objeto=N` clica no N-ésimo objeto clicável da aba (link, controle
             // ou macro); `macro=Nome` executa uma macro.
             if let Some(n) = e.strip_prefix("macro=") {
@@ -933,13 +1099,14 @@ impl SheetsApp {
                 }
                 continue;
             }
+            // `A1=texto` (`\n` no texto é quebra de linha).
             let Some((cell, text)) = e.split_once('=') else { continue };
             let Some((r, c)) = crate::app::parse_cell(cell.trim()) else {
                 eprintln!("--edit: referência inválida: {cell}");
                 continue;
             };
             self.go_to(r, c);
-            self.start_edit(Some(text), false);
+            self.start_edit(Some(&text.replace("\\n", "\n")), false);
             self.commit_edit();
         }
         for _ in 0..std::mem::take(&mut self.opts.undo) {
@@ -1274,302 +1441,9 @@ impl SheetsApp {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Copiar, recortar e colar (F3.3)
-// ---------------------------------------------------------------------------
-
-/// O que foi copiado dentro do app: além do texto (TSV) que foi para o
-/// clipboard do sistema, as células como estão (fórmulas e estilos).
-pub struct Clip {
-    /// O texto posto no clipboard: se ainda for o mesmo ao colar, a cópia
-    /// veio daqui e as fórmulas e estilos valem.
-    pub text: String,
-    pub sheet: usize,
-    pub r0: u32,
-    pub c0: u32,
-    pub rows: u32,
-    pub cols: u32,
-    /// Linha a linha.
-    pub cells: Vec<ClipCell>,
-    /// Recortar: a origem é apagada ao colar (uma vez).
-    pub cut: bool,
-}
-
-pub struct ClipCell {
-    pub value: CellValue,
-    pub formula: Option<String>,
-    pub style: u16,
-}
-
-/// Máximo de células copiadas com fórmulas e estilos (acima disso, só o texto).
-const MAX_CLIP: u64 = 1_000_000;
-/// Máximo de células coladas de uma vez.
-const MAX_PASTE: u64 = 2_000_000;
-
-/// Lê o TSV do clipboard (como o Excel e o Google Planilhas gravam: campos
-/// com tab, quebra ou aspas vêm entre aspas, com aspas dobradas).
-pub fn parse_tsv(s: &str) -> Vec<Vec<String>> {
-    let mut rows = vec![Vec::new()];
-    let mut field = String::new();
-    let mut chars = s.chars().peekable();
-    let mut at_start = true;
-    while let Some(ch) = chars.next() {
-        match ch {
-            '"' if at_start => {
-                // Campo entre aspas.
-                while let Some(q) = chars.next() {
-                    if q == '"' {
-                        if chars.peek() == Some(&'"') {
-                            chars.next();
-                            field.push('"');
-                        } else {
-                            break;
-                        }
-                    } else {
-                        field.push(q);
-                    }
-                }
-                at_start = false;
-            }
-            '\t' => {
-                rows.last_mut().unwrap().push(std::mem::take(&mut field));
-                at_start = true;
-            }
-            '\r' | '\n' => {
-                if ch == '\r' && chars.peek() == Some(&'\n') {
-                    chars.next();
-                }
-                rows.last_mut().unwrap().push(std::mem::take(&mut field));
-                rows.push(Vec::new());
-                at_start = true;
-            }
-            c => {
-                field.push(c);
-                at_start = false;
-            }
-        }
-    }
-    if !field.is_empty() || !rows.last().unwrap().is_empty() {
-        rows.last_mut().unwrap().push(field);
-    } else {
-        rows.pop();
-    }
-    rows
-}
-
-impl SheetsApp {
-    /// Ctrl+C / Ctrl+X: guarda as células copiadas (o texto já foi para o
-    /// clipboard por `copy`).
-    pub fn remember_clip(&mut self, text: String, cut: bool) {
-        self.clip = None;
-        let Some(doc) = &self.doc else { return };
-        let Some((sheet, v)) = doc.current() else { return };
-        let (r0, c0, r1, c1) = v.sel();
-        let (r1, c1) =
-            (r1.min(sheet.rows().max(r0 + 1) - 1).max(r0), c1.min(sheet.cols().max(c0 + 1) - 1).max(c0));
-        let (rows, cols) = (r1 - r0 + 1, c1 - c0 + 1);
-        if rows as u64 * cols as u64 > MAX_CLIP {
-            return;
-        }
-        let mut cells = Vec::with_capacity((rows * cols) as usize);
-        for r in r0..=r1 {
-            for c in c0..=c1 {
-                let cell = sheet.cell(r, c, &doc.strings);
-                let value = match cell.value {
-                    Value::Empty => CellValue::Empty,
-                    Value::Number(x) => CellValue::Number(x),
-                    Value::Text(t) => CellValue::Text(t.to_string()),
-                    Value::Bool(b) => CellValue::Bool(b),
-                    Value::Error(e) => CellValue::Error(e),
-                };
-                let formula = duck_calc::cell_formula(sheet, r, c).map(|f| f.into_owned());
-                let style = if cell.style == 0 { v.blank_style(r, c) } else { cell.style };
-                cells.push(ClipCell { value, formula, style });
-            }
-        }
-        self.clip = Some(Clip { text, sheet: doc.active, r0, c0, rows, cols, cells, cut });
-        if cut {
-            self.message = "Recortado: cole com Ctrl+V".into();
-        }
-    }
-
-    /// Ctrl+V: cola na seleção. Uma cópia feita aqui leva fórmulas (com as
-    /// referências deslocadas) e estilos; texto de outro programa é
-    /// interpretado como se digitado. Um bloco menor que a seleção é
-    /// repetido se couber um número inteiro de vezes (como no Excel).
-    pub fn paste(&mut self, cx: &mut Context) {
-        if let Some(text) = cx.clipboard().get_text() {
-            self.paste_text(text);
-        }
-    }
-
-    /// Cola `text` (o conteúdo do clipboard; ver [`Self::paste`]).
-    pub fn paste_text(&mut self, text: String) {
-        self.commit_edit();
-        if !self.editable() {
-            return;
-        }
-        let Some(doc) = &self.doc else { return };
-        let Some((sheet, v)) = doc.current() else { return };
-        let internal = self.clip.as_ref().filter(|c| c.text == text);
-        // Bloco a colar: (linhas, colunas) e uma função que dá cada célula.
-        let mut tsv = Vec::new();
-        let (rows, cols) = match internal {
-            Some(c) => (c.rows, c.cols),
-            None => {
-                tsv = parse_tsv(&text);
-                let cols = tsv.iter().map(Vec::len).max().unwrap_or(0) as u32;
-                (tsv.len() as u32, cols)
-            }
-        };
-        if rows == 0 || cols == 0 {
-            return;
-        }
-        let (s0, s1, s2, s3) = v.sel();
-        let (sel_rows, sel_cols) = (s2 - s0 + 1, s3 - s1 + 1);
-        // Repete o bloco se a seleção for um múltiplo exato dele.
-        let (reps_r, reps_c) =
-            if sel_rows % rows == 0 && sel_cols % cols == 0 && (sel_rows, sel_cols) != (rows, cols) {
-                (sel_rows / rows, sel_cols / cols)
-            } else {
-                (1, 1)
-            };
-        let (tr, tc) = (s0, s1);
-        let total = rows as u64 * cols as u64 * reps_r as u64 * reps_c as u64;
-        if total > MAX_PASTE {
-            self.message = format!("Colagem grande demais ({} células)", crate::app::fmt_int(total));
-            return;
-        }
-        let last_r =
-            (tr as u64 + rows as u64 * reps_r as u64 - 1).min(crate::app::MAX_ROWS as u64 - 1) as u32;
-        let last_c =
-            (tc as u64 + cols as u64 * reps_c as u64 - 1).min(crate::app::MAX_COLS as u64 - 1) as u32;
-        let cfx = CfCtx { sheet, shared: &doc.strings, today: self.today };
-        let mut changes = Vec::with_capacity(total as usize);
-        let mut styles_needed: Vec<(usize, u16, u16)> = Vec::new();
-        for r in tr..=last_r {
-            for c in tc..=last_c {
-                let (i, j) = ((r - tr) % rows, (c - tc) % cols);
-                match internal {
-                    Some(clip) => {
-                        let cell = &clip.cells[(i * cols + j) as usize];
-                        let (dr, dc) = (r as i64 - (clip.r0 + i) as i64, c as i64 - (clip.c0 + j) as i64);
-                        let (value, formula) = match &cell.formula {
-                            Some(f) => {
-                                let f = duck_calc::shift(f, dr, dc);
-                                let v = if (dr, dc) == (0, 0) {
-                                    cell.value.clone()
-                                } else {
-                                    cfx.eval_formula(&f, r, c).unwrap_or(CellValue::Empty)
-                                };
-                                (v, Some(f))
-                            }
-                            None => (cell.value.clone(), None),
-                        };
-                        changes.push(CellChange { row: r, col: c, value, formula, style: Some(cell.style) });
-                    }
-                    None => {
-                        let field = tsv
-                            .get(i as usize)
-                            .and_then(|row| row.get(j as usize))
-                            .map_or("", String::as_str);
-                        let current = sheet.cell(r, c, &doc.strings).style;
-                        let base = if current == 0 { v.blank_style(r, c) } else { current };
-                        match parse_input(field, doc.date1904, duck_core::input::today()) {
-                            Input::Formula(f) => {
-                                let value = cfx.eval_formula(&f, r, c).unwrap_or(CellValue::Empty);
-                                let f = duck_calc::locale::from_pt(&f);
-                                changes.push(CellChange {
-                                    row: r,
-                                    col: c,
-                                    value,
-                                    formula: Some(f),
-                                    style: Some(base),
-                                });
-                            }
-                            Input::Value(value, fmt) => {
-                                if let Some(f) = fmt {
-                                    let cur_fmt = doc.styles.xfs.get(base as usize).map_or(0, |x| x.num_fmt);
-                                    if should_apply(&doc.styles, cur_fmt, f) {
-                                        styles_needed.push((changes.len(), base, f));
-                                    }
-                                }
-                                changes.push(CellChange {
-                                    row: r,
-                                    col: c,
-                                    value,
-                                    formula: None,
-                                    style: Some(base),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // Recortar: apaga a origem (o que não foi coberto pelo destino).
-        let mut cut_done = false;
-        if let Some(clip) = internal
-            && clip.cut
-        {
-            if clip.sheet == doc.active {
-                for r in clip.r0..clip.r0 + clip.rows {
-                    for c in clip.c0..clip.c0 + clip.cols {
-                        if !(tr..=last_r).contains(&r) || !(tc..=last_c).contains(&c) {
-                            changes.push(CellChange {
-                                row: r,
-                                col: c,
-                                value: CellValue::Empty,
-                                formula: None,
-                                style: Some(0),
-                            });
-                        }
-                    }
-                }
-                // Os apagados vêm depois, mas não podem sobrescrever o colado.
-                cut_done = true;
-            } else {
-                self.message = "Recortar entre abas: colado como cópia".into();
-            }
-        }
-        // Formatos sugeridos pelo texto colado (datas, %, moeda).
-        if !styles_needed.is_empty() {
-            let doc = self.doc.as_mut().expect("documento");
-            let n = doc.styles.xfs.len();
-            let st = Arc::make_mut(&mut doc.styles);
-            for (k, base, f) in styles_needed {
-                changes[k].style = Some(st.derive_xf(base, |x| x.num_fmt = f));
-            }
-            if doc.styles.xfs.len() != n {
-                doc.looks = Arc::new(Looks::new(&doc.styles));
-                self.font_key = (0, 0);
-            }
-        }
-        let n = (last_r - tr + 1) as u64 * (last_c - tc + 1) as u64;
-        if self.run_command(Command::SetCells(changes)) {
-            if let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) {
-                v.anchor = (tr, tc);
-                v.cur = (last_r, last_c);
-            }
-            if cut_done {
-                self.clip = None;
-            }
-            self.message = format!("{} células coladas", crate::app::fmt_int(n));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tsv_from_other_programs() {
-        assert_eq!(parse_tsv("a\tb\r\n1\t2\r\n"), vec![vec!["a", "b"], vec!["1", "2"]]);
-        assert_eq!(parse_tsv("\"x\ny\"\t\"di \"\"aspas\"\"\"\n"), vec![vec!["x\ny", "di \"aspas\""]]);
-        assert_eq!(parse_tsv("só"), vec![vec!["só"]]);
-        assert_eq!(parse_tsv("a\t\tc"), vec![vec!["a", "", "c"]]);
-    }
 
     #[test]
     fn widths_round_trip_in_pixels() {

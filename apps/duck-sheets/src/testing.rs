@@ -18,7 +18,15 @@ pub fn app(sheets: &[(&str, &[(&str, &str)])]) -> SheetsApp {
         None,
     );
     a.text = Some(TextSystem::new_fast(13.0, 1024));
-    let styles = Arc::new(Styles::default());
+    // O estilo 0 existe, como em todo arquivo.
+    let mut styles = Styles::default();
+    if styles.xfs.is_empty() {
+        styles.fonts.push(duck_core::Font { name: "Calibri".into(), size: 11.0, ..Default::default() });
+        styles.fills.push(Default::default());
+        styles.borders.push(Default::default());
+        styles.xfs.push(Default::default());
+    }
+    let styles = Arc::new(styles);
     let looks = Arc::new(Looks::new(&styles));
     let slots = sheets
         .iter()

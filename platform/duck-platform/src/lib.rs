@@ -83,7 +83,15 @@ pub enum Cursor {
     Text,
     ResizeColumn,
     ResizeRow,
+    /// Cruz (alça de preenchimento).
+    Cross,
+    /// Mover.
+    Move,
 }
+
+mod clock;
+
+pub use clock::{LocalTime, local_time};
 
 /// Esquema de cores do sistema (e da moldura da janela).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,6 +156,8 @@ impl Window {
             Cursor::Text => CursorIcon::Text,
             Cursor::ResizeColumn => CursorIcon::ColResize,
             Cursor::ResizeRow => CursorIcon::RowResize,
+            Cursor::Cross => CursorIcon::Crosshair,
+            Cursor::Move => CursorIcon::Move,
         };
         self.inner.set_cursor(icon);
     }
