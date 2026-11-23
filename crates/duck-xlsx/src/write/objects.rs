@@ -7,77 +7,108 @@ use duck_core::drawing::{Anchor, Chart, Marker};
 use memchr::memmem;
 
 use super::cellxml::{cell_ref, escape_text};
+use crate::ns::{Kind, Scan};
 use crate::xml::{find_tag, unescape_into};
 
-fn marker_xml(m: &Marker) -> String {
+/// Conteúdo de um canto, com o prefixo que o arquivo usa.
+fn marker_xml(prefix: &[u8], m: &Marker) -> String {
+    let p = match prefix {
+        b"" => String::new(),
+        p => format!("{}:", String::from_utf8_lossy(p)),
+    };
     format!(
-        "<xdr:col>{}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{}</xdr:rowOff>",
+        "<{p}col>{}</{p}col><{p}colOff>{}</{p}colOff><{p}row>{}</{p}row><{p}rowOff>{}</{p}rowOff>",
         m.col, m.col_off, m.row, m.row_off
     )
 }
 
-/// Troca o conteúdo do primeiro `<name>…</name>` de `el`.
-fn replace_inner(el: &[u8], name: &[u8], new: &str) -> Vec<u8> {
-    let Some(t) = find_tag(el, 0, name) else { return el.to_vec() };
-    if t.self_closing {
-        return el.to_vec();
+/// Cantos de uma âncora do arquivo: conteúdo de `from` e `to` (início, fim) e
+/// o prefixo do elemento.
+#[derive(Default)]
+struct Corners<'a> {
+    from: Option<(usize, usize, &'a [u8])>,
+    to: Option<(usize, usize, &'a [u8])>,
+}
+
+/// As âncoras de um desenho, na ordem do arquivo. `None` = XML quebrado.
+fn anchor_corners(xml: &[u8]) -> Option<Vec<Corners<'_>>> {
+    let mut out: Vec<Corners> = Vec::new();
+    // Elementos abertos a partir da âncora (0 = fora de uma).
+    let mut depth = 0;
+    for e in Scan::new(xml) {
+        if depth == 0 {
+            let anchor = e.ns == b"xdr"
+                && matches!(e.local, b"twoCellAnchor" | b"oneCellAnchor" | b"absoluteAnchor")
+                && e.kind != Kind::Close;
+            if anchor {
+                out.push(Corners::default());
+                depth = (e.kind == Kind::Open) as u32;
+            }
+            continue;
+        }
+        let cur = out.last_mut()?;
+        // `from` e `to` são filhos diretos da âncora.
+        let corner = match e.local {
+            b"from" if e.ns == b"xdr" => Some(&mut cur.from),
+            b"to" if e.ns == b"xdr" => Some(&mut cur.to),
+            _ => None,
+        };
+        match e.kind {
+            Kind::Open => {
+                if depth == 1
+                    && let Some(c) = corner
+                {
+                    *c = Some((e.end, e.end, e.prefix));
+                }
+                depth += 1;
+            }
+            Kind::Close => {
+                depth -= 1;
+                if depth == 1
+                    && let Some(Some(c)) = corner
+                {
+                    c.1 = e.start;
+                }
+            }
+            Kind::Empty => {}
+        }
     }
-    let mut close = b"</".to_vec();
-    close.extend_from_slice(name);
-    close.push(b'>');
-    let Some(end) = memmem::find(&el[t.end..], &close).map(|i| t.end + i) else { return el.to_vec() };
-    [&el[..t.end], new.as_bytes(), &el[end..]].concat()
+    (depth == 0).then_some(out)
 }
 
 /// Reescreve os cantos das âncoras de um desenho, na ordem do arquivo. Se o
 /// número de âncoras não bater com o modelo, a parte fica como está.
 pub fn patch_anchors(xml: &[u8], anchors: &[Anchor]) -> Vec<u8> {
-    const NAMES: [&[u8]; 3] = [b"xdr:twoCellAnchor", b"xdr:oneCellAnchor", b"xdr:absoluteAnchor"];
-    // Elementos das âncoras: (início, fim).
-    let mut spans = Vec::new();
-    let mut pos = 0;
-    loop {
-        let next =
-            NAMES.iter().filter_map(|n| find_tag(xml, pos, n).map(|t| (t, *n))).min_by_key(|(t, _)| t.start);
-        let Some((t, name)) = next else { break };
-        let end = if t.self_closing {
-            t.end
-        } else {
-            let mut close = b"</".to_vec();
-            close.extend_from_slice(name);
-            close.push(b'>');
-            match memmem::find(&xml[t.end..], &close) {
-                Some(i) => t.end + i + close.len(),
-                None => return xml.to_vec(),
-            }
-        };
-        spans.push((t.start, end));
-        pos = end;
-    }
-    if spans.len() != anchors.len() {
+    let Some(corners) = anchor_corners(xml).filter(|c| c.len() == anchors.len()) else {
         return xml.to_vec();
-    }
-    let mut out = Vec::with_capacity(xml.len());
-    let mut last = 0;
-    for ((a, b), anchor) in spans.into_iter().zip(anchors) {
-        out.extend_from_slice(&xml[last..a]);
-        let el = &xml[a..b];
-        let el = match anchor {
-            Anchor::Two { from, to } => {
-                let e = replace_inner(el, b"xdr:from", &marker_xml(from));
-                replace_inner(&e, b"xdr:to", &marker_xml(to))
-            }
-            Anchor::One { from, .. } => replace_inner(el, b"xdr:from", &marker_xml(from)),
-            Anchor::Abs { .. } => el.to_vec(),
+    };
+    // (início, fim, novo conteúdo).
+    let mut edits = Vec::new();
+    for (c, anchor) in corners.iter().zip(anchors) {
+        let (from, to) = match anchor {
+            Anchor::Two { from, to } => (Some(from), Some(to)),
+            Anchor::One { from, .. } => (Some(from), None),
+            Anchor::Abs { .. } => (None, None),
         };
-        out.extend_from_slice(&el);
+        for (at, m) in [(c.from, from), (c.to, to)] {
+            if let (Some((a, b, prefix)), Some(m)) = (at, m) {
+                edits.push((a, b, marker_xml(prefix, m)));
+            }
+        }
+    }
+    edits.sort_unstable_by_key(|e| e.0);
+    let mut out = Vec::with_capacity(xml.len() + 64);
+    let mut last = 0;
+    for (a, b, new) in edits {
+        out.extend_from_slice(&xml[last..a]);
+        out.extend_from_slice(new.as_bytes());
         last = b;
     }
     out.extend_from_slice(&xml[last..]);
     out
 }
 
-/// Referências das séries de um gráfico (`<c:f>`) mudadas no modelo.
+/// Referências das séries de um gráfico (`c:f`) mudadas no modelo.
 /// `None` = nada mudou.
 pub fn patch_chart_refs(xml: &[u8], model: &Chart) -> Option<Vec<u8>> {
     let mut orig = crate::drawing::parse_chart(xml)?;
@@ -91,21 +122,21 @@ pub fn patch_chart_refs(xml: &[u8], model: &Chart) -> Option<Vec<u8>> {
         old.iter().zip(&new).filter(|(a, b)| a != b).map(|(a, b)| (a.as_str(), b.as_str())).collect();
     let mut out = Vec::with_capacity(xml.len());
     let mut pos = 0;
-    while let Some(t) = find_tag(xml, pos, b"c:f") {
-        if t.self_closing {
-            out.extend_from_slice(&xml[pos..t.end]);
-            pos = t.end;
+    let mut open = None;
+    for e in Scan::new(xml) {
+        // `c:f` só tem texto: a tag seguinte é a que o fecha.
+        if e.kind == Kind::Open && e.is(b"c", b"f") {
+            open = Some(e.end);
             continue;
         }
-        let Some(end) = memmem::find(&xml[t.end..], b"</c:f>").map(|i| t.end + i) else { break };
+        let Some(start) = open.take() else { continue };
         let mut text = String::new();
-        unescape_into(&xml[t.end..end], &mut text);
-        out.extend_from_slice(&xml[pos..t.end]);
-        match map.get(text.as_str()) {
-            Some(n) => escape_text(n, &mut out),
-            None => out.extend_from_slice(&xml[t.end..end]),
+        unescape_into(&xml[start..e.start], &mut text);
+        if let Some(n) = map.get(text.as_str()) {
+            out.extend_from_slice(&xml[pos..start]);
+            escape_text(n, &mut out);
+            pos = e.start;
         }
-        pos = end;
     }
     out.extend_from_slice(&xml[pos..]);
     Some(out)
@@ -218,6 +249,47 @@ mod tests {
         assert!(out.contains("<xdr:sp/></xdr:twoCellAnchor><xdr:absoluteAnchor>"), "{out}");
         // Número diferente de âncoras: fica como está.
         assert_eq!(patch_anchors(xml, &a[..1]), xml.to_vec());
+    }
+
+    /// O prefixo do arquivo fica: padrão (openpyxl) ou inventado.
+    #[test]
+    fn anchors_keep_the_prefix() {
+        const XDR: &str = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
+        let m = |row| Marker { col: 4, col_off: 0, row, row_off: 0 };
+        for (decl, p) in [("xmlns", ""), ("xmlns:q", "q:")] {
+            let xml = format!(
+                r#"<{p}wsDr {decl}="{XDR}"><{p}oneCellAnchor><{p}from><{p}col>4</{p}col><{p}colOff>0</{p}colOff><{p}row>7</{p}row><{p}rowOff>0</{p}rowOff></{p}from><{p}ext cx="9" cy="9" /><{p}sp><from xmlns="urn:x"/></{p}sp></{p}oneCellAnchor><{p}twoCellAnchor><{p}from /><{p}to><{p}row>9</{p}row></{p}to></{p}twoCellAnchor></{p}wsDr>"#
+            );
+            let a = [Anchor::One { from: m(10), cx: 9, cy: 9 }, Anchor::Two { from: m(1), to: m(12) }];
+            let out = String::from_utf8(patch_anchors(xml.as_bytes(), &a)).unwrap();
+            let to = format!(
+                "<{p}to><{p}col>4</{p}col><{p}colOff>0</{p}colOff><{p}row>12</{p}row><{p}rowOff>0</{p}rowOff></{p}to>"
+            );
+            let want = xml
+                .replace(&format!("<{p}row>7<"), &format!("<{p}row>10<"))
+                .replace(&format!("<{p}to><{p}row>9</{p}row></{p}to>"), &to);
+            assert_eq!(out, want);
+            // XML cortado: fica como está.
+            let cut = &xml.as_bytes()[..xml.len() - 40];
+            assert_eq!(patch_anchors(cut, &a), cut);
+        }
+    }
+
+    #[test]
+    fn chart_refs_keep_the_prefix() {
+        const C: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+        for (decl, p) in [("xmlns", ""), ("xmlns:c", "c:"), ("xmlns:q", "q:")] {
+            let xml = format!(
+                r#"<{p}chartSpace {decl}="{C}" xmlns:c15="urn:c15"><{p}chart><{p}plotArea><{p}barChart><{p}ser><{p}tx><{p}strRef><{p}f>'D &amp; E'!$B$1</{p}f></{p}strRef></{p}tx><{p}val><{p}numRef><{p}f>'D &amp; E'!$B$2:$B$5</{p}f></{p}numRef></{p}val><c15:f>'D &amp; E'!$B$2:$B$5</c15:f></{p}ser></{p}barChart></{p}plotArea></{p}chart></{p}chartSpace>"#
+            );
+            let mut chart = crate::drawing::parse_chart(xml.as_bytes()).unwrap();
+            assert_eq!(patch_chart_refs(xml.as_bytes(), &chart), None);
+            for r in chart.refs_mut() {
+                *r = r.replace("$B$5", "$B$8");
+            }
+            let out = String::from_utf8(patch_chart_refs(xml.as_bytes(), &chart).unwrap()).unwrap();
+            assert_eq!(out, xml.replace(&format!("$B$5</{p}f>"), &format!("$B$8</{p}f>")));
+        }
     }
 
     #[test]
