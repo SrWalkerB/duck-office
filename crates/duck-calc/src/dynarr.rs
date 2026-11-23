@@ -90,7 +90,7 @@ pub fn filter<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
 
 /// Chave de comparação (texto sem diferenciar maiúsculas).
 #[derive(PartialEq, Eq, Hash, Clone)]
-enum Key {
+pub(crate) enum Key {
     Empty,
     N(u64),
     S(String),
@@ -98,7 +98,7 @@ enum Key {
     E(u8),
 }
 
-fn key(v: &V) -> Key {
+pub(crate) fn key(v: &V) -> Key {
     match v {
         V::Empty => Key::Empty,
         V::Num(x) => Key::N(if *x == 0.0 { 0 } else { x.to_bits() }),
@@ -157,7 +157,7 @@ pub fn unique<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
 }
 
 /// Ordem de duas linhas por um valor: vazios por último, como no Excel.
-fn sort_cmp(x: &V, y: &V, desc: bool) -> Ordering {
+pub(crate) fn sort_cmp(x: &V, y: &V, desc: bool) -> Ordering {
     match (x, y) {
         (V::Empty, V::Empty) => Ordering::Equal,
         (V::Empty, _) => Ordering::Greater,
@@ -295,13 +295,17 @@ pub fn let_<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     if n < 3 || n.is_multiple_of(2) {
         return Err(CellError::Value);
     }
-    let base = e.locals.len();
+    let mut base = None;
     for k in (1..n - 1).step_by(2) {
+        // O lugar da variável é reservado antes: o valor dela pode ter outro
+        // LET ou LAMBDA, com variáveis próprias depois.
+        let at = e.push_local();
+        base.get_or_insert(at);
         let v = e.eval(a[k]);
-        e.locals.push(v);
+        e.set_local(at, v);
     }
     let r = e.eval(a[n - 1]);
-    e.locals.truncate(base);
+    e.pop_locals(base.unwrap_or(0));
     Ok(r)
 }
 

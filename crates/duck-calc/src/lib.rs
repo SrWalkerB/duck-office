@@ -20,6 +20,7 @@
 pub mod chartdata;
 pub mod dynarr;
 pub mod eval;
+pub mod fns;
 pub mod funcs;
 pub mod index;
 pub mod locale;

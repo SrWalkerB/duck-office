@@ -572,6 +572,7 @@ name = "duck-calc"
 version = "1.0.0"
 dependencies = [
  "duck-core",
+ "libm",
  "rayon",
 ]
 

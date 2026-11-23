@@ -10,6 +10,7 @@
 //!   paralelo, cada uma com o seu `Eval`.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::{OnceLock, RwLock};
@@ -19,7 +20,8 @@ use duck_core::{BookExtras, CellError, CellValue, FormulaKind, Sheet, StringTabl
 use crate::funcs;
 use crate::index::Cache;
 use crate::parse::{self, Area, BinOp, Formula, MAX_COL, MAX_ROW, Node, Resolve, SheetSel, TableInfo};
-use crate::value::{Arr, Rng, Sid, V, bool_text, compare, num_to_text, parse_number};
+use crate::recalc::Uncalculated;
+use crate::value::{Arr, Fun, Rng, Sid, V, bool_text, compare, num_to_text, parse_number};
 
 /// Resultados novos de fórmulas, por (aba, coluna) e linha.
 #[derive(Default, Debug)]
@@ -80,6 +82,9 @@ pub struct Book<'a> {
     /// Resultados de um bloco calculado de cima para baixo (saldo acumulado),
     /// visíveis às linhas seguintes do mesmo bloco.
     pub local: Option<&'a RwLock<Overlay>>,
+    /// Caminho do arquivo, para CÉL("nome.arquivo") (vazio = ainda não salvo,
+    /// `None` = não se sabe).
+    pub path: Option<String>,
     /// Maior número de linhas entre as abas (colunas inteiras em contas de
     /// matriz param aqui).
     pub max_rows: u32,
@@ -93,7 +98,17 @@ impl<'a> Book<'a> {
         date1904: bool,
     ) -> Self {
         let max_rows = sheets.iter().map(|s| s.rows()).max().unwrap_or(0);
-        let mut b = Self { sheets, shared, extras, date1904, now: 0.0, overlay: None, local: None, max_rows };
+        let mut b = Self {
+            sheets,
+            shared,
+            extras,
+            date1904,
+            now: 0.0,
+            overlay: None,
+            local: None,
+            path: None,
+            max_rows,
+        };
         b.set_now(now_serial());
         b
     }
@@ -376,8 +391,9 @@ impl Engine {
             array,
             opaque: false,
             depth: 0,
-            locals: Vec::new(),
             local_base: 0,
+            reduced: Cell::new(false),
+            stacks: None,
         };
         let v = e.eval(f.root);
         let arr = match &v {
@@ -397,6 +413,58 @@ impl Engine {
             return None;
         }
         Some(Full::One(v.to_cell()))
+    }
+
+    /// A fórmula dá o mesmo resultado sem o modo matricial? Se não (usa
+    /// matrizes dinâmicas, ou um intervalo onde caberia um valor só), o
+    /// arquivo precisa gravá-la como matriz, para o Excel não pôr `@`.
+    pub fn needs_array(&self, book: &Book, sheet: u32, row: u32, col: u32) -> bool {
+        let Some(f) = self.formula(book, sheet, row, col) else { return false };
+        if f.flags & parse::flag::DYNARRAY != 0 {
+            return true;
+        }
+        let mut e = Eval::new(book, self, &f, sheet, row, col);
+        let v = e.eval(f.root);
+        e.final_value(v);
+        e.reduced.get()
+    }
+
+    /// Por que a fórmula da célula não foi calculada, e o erro que ela mostra.
+    pub fn why_uncalculated(&self, book: &Book, sheet: u32, row: u32, col: u32) -> Uncalculated {
+        let mut out =
+            Uncalculated { sheet, row, col, error: CellError::Name, function: None, unknown: false };
+        let Some(f) = self.formula(book, sheet, row, col) else { return out };
+        // Função da tabela que o motor não calcula.
+        let opaque = f.nodes.iter().find_map(|n| match n {
+            Node::Call { f, .. } | Node::Func(f) if funcs::def(*f).opaque => Some(funcs::def(*f).pt),
+            _ => None,
+        });
+        if let Some(name) = opaque {
+            out.function = Some(name.to_string());
+            return out;
+        }
+        // Função que não existe.
+        let text = book.sheets.get(sheet as usize).and_then(|s| crate::cell_formula(s, row, col));
+        if let Some(name) = text.and_then(|t| crate::locale::unknown_function(&t)) {
+            out.function = Some(name);
+            out.unknown = true;
+            return out;
+        }
+        // Uma função só com este argumento (CÉL("cor")), ou outro arquivo: o
+        // erro que a conta deu.
+        let mut e = Eval::new(book, self, &f, sheet, row, col);
+        let v = e.eval(f.root);
+        if let V::Err(x) = e.final_value(v) {
+            out.error = x;
+        }
+        let external = f.flags & parse::flag::OPAQUE != 0
+            || f.nodes.iter().any(
+                |n| matches!(n, Node::Area(a) if matches!(a.sheet, SheetSel::Ext { sheet: u16::MAX, .. })),
+            );
+        if !external && let Node::Call { f: func, .. } = f.node(f.root) {
+            out.function = Some(funcs::def(*func).pt.to_string());
+        }
+        out
     }
 
     /// Calcula a célula. `None` = sem fórmula, ou com algo que o motor não
@@ -420,8 +488,9 @@ impl Engine {
             array,
             opaque: false,
             depth: 0,
-            locals: Vec::new(),
             local_base: 0,
+            reduced: Cell::new(false),
+            stacks: None,
         };
         let v = e.eval(f.root);
         let v = e.final_value(v);
@@ -450,10 +519,44 @@ pub struct Eval<'e> {
     /// Passou por algo que o motor não calcula: o valor guardado fica.
     pub opaque: bool,
     depth: u32,
-    /// Variáveis de LET (pilha) e o início das da fórmula atual (nomes
-    /// definidos têm as próprias).
-    pub locals: Vec<V<'e>>,
+    /// Início das variáveis da fórmula atual (nomes definidos e LAMBDA têm as
+    /// próprias).
     local_base: usize,
+    /// Um intervalo ou matriz virou um valor só (interseção implícita).
+    reduced: Cell<bool>,
+    /// Pilhas de LET, LAMBDA e das contas item a item (as fórmulas comuns
+    /// não pagam por elas).
+    stacks: Option<Box<Stacks<'e>>>,
+}
+
+#[derive(Default)]
+struct Stacks<'e> {
+    /// Variáveis de LET e LAMBDA.
+    locals: Vec<V<'e>>,
+    /// Argumentos já calculados, vistos pelas funções como nós [`TEMP`].
+    temps: Vec<V<'e>>,
+    /// Chamadas de LAMBDA uma dentro da outra, e onde a pilha da thread
+    /// estava na primeira.
+    calls: u32,
+    stack0: usize,
+}
+
+/// Nó que não está na fórmula: um argumento já calculado (índice nos bits
+/// de baixo). É como uma função recebe valores em vez de expressões
+/// (`BYROW(A1:B3;SOMA)`, `ABS` de cada item de uma matriz).
+const TEMP: u32 = 1 << 31;
+
+/// LAMBDA uma dentro da outra (recursão) além disso dá `#NÚM!`, como no
+/// Excel (que para perto de 1024).
+const MAX_CALLS: u32 = 1000;
+/// Pilha que as chamadas de LAMBDA podem usar: as threads de cálculo têm 2 MB.
+const MAX_STACK: usize = 1200 << 10;
+
+/// Posição atual na pilha da thread.
+#[inline(never)]
+fn stack_pos() -> usize {
+    let here = 0u8;
+    std::hint::black_box(&here) as *const u8 as usize
 }
 
 impl<'e> Eval<'e> {
@@ -468,12 +571,16 @@ impl<'e> Eval<'e> {
             array: false,
             opaque: false,
             depth: 0,
-            locals: Vec::new(),
             local_base: 0,
+            reduced: Cell::new(false),
+            stacks: None,
         }
     }
 
     pub fn eval(&mut self, n: u32) -> V<'e> {
+        if n & TEMP != 0 {
+            return self.temp(n);
+        }
         let f = self.f;
         match f.node(n) {
             Node::Num(x) => V::Num(*x),
@@ -500,13 +607,16 @@ impl<'e> Eval<'e> {
                 self.binary(op, x, y)
             }
             Node::Call { f: func, start, len } => {
-                let def = funcs::def(*func);
+                let def = funcs::hot(*func);
                 let args = f.call_args(*start, *len);
                 if (args.len() as u32) < def.min as u32 || args.len() as u32 > def.max as u32 {
                     return V::Err(CellError::Value);
                 }
                 if def.opaque {
                     self.opaque = true;
+                }
+                if self.array {
+                    return self.call_in_array(*func, args);
                 }
                 match (def.imp)(self, args) {
                     Ok(v) => v,
@@ -519,7 +629,10 @@ impl<'e> Eval<'e> {
                 }
                 let Some(nf) = self.eng.name_formula(self.book, *i) else { return V::Err(CellError::Name) };
                 let saved = std::mem::replace(&mut self.f, nf);
-                let base = std::mem::replace(&mut self.local_base, self.locals.len());
+                let base = {
+                    let top = self.locals_len();
+                    std::mem::replace(&mut self.local_base, top)
+                };
                 self.depth += 1;
                 let v = self.eval(nf.root);
                 self.depth -= 1;
@@ -532,9 +645,11 @@ impl<'e> Eval<'e> {
                 let v = ids.iter().map(|&i| self.eval(i)).collect();
                 V::Arr(Rc::new(Arr { rows: *rows, cols: *cols, v }))
             }
-            Node::Local(k) => {
-                self.locals.get(self.local_base + *k as usize).cloned().unwrap_or(V::Err(CellError::Name))
-            }
+            Node::Local(k) => match self.local(*k) {
+                V::Fn(x) if matches!(*x, Fun::Omitted) => V::Empty,
+                v => v,
+            },
+            Node::Lambda { .. } | Node::Func(_) | Node::Apply { .. } => self.function_node(n),
             Node::Range(a, b) => {
                 let (a, b) = (*a, *b);
                 match (self.eval(a), self.eval(b)) {
@@ -550,6 +665,231 @@ impl<'e> Eval<'e> {
                 }
             }
         }
+    }
+
+    /// Chamada no modo matricial: item a item, se a função pede.
+    #[inline(never)]
+    fn call_in_array(&mut self, func: funcs::Func, args: &[u32]) -> V<'e> {
+        let imp = funcs::hot(func).imp;
+        match funcs::lift_mask(func) {
+            0 => imp(self, args).unwrap_or_else(V::Err),
+            mask => self.lifted(imp, mask, args),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn temp(&self, n: u32) -> V<'e> {
+        self.stacks.as_ref().map_or(V::Empty, |x| x.temps[(n & !TEMP) as usize].clone())
+    }
+
+    /// Nós de funções como valor. Fora de [`Eval::eval`] para não pesar no
+    /// caminho das fórmulas comuns.
+    #[cold]
+    #[inline(never)]
+    fn function_node(&mut self, n: u32) -> V<'e> {
+        let f = self.f;
+        match f.node(n) {
+            Node::Lambda { params, optional, body } => V::Fn(Rc::new(Fun::Lambda {
+                f,
+                params: *params,
+                optional: *optional,
+                body: *body,
+                captured: self.stacks.as_ref().map_or(Vec::new(), |x| x.locals[self.local_base..].to_vec()),
+            })),
+            Node::Func(func) => V::Fn(Rc::new(Fun::Native(*func))),
+            Node::Apply { f: callee, start, len } => match self.eval(*callee) {
+                V::Fn(fun) => {
+                    let args = f
+                        .call_args(*start, *len)
+                        .iter()
+                        .map(
+                            |&n| {
+                                if self.is_missing(n) { V::Fn(Rc::new(Fun::Omitted)) } else { self.eval(n) }
+                            },
+                        )
+                        .collect();
+                    self.call(&fun, args)
+                }
+                V::Err(e) => V::Err(e),
+                _ => V::Err(CellError::Ref),
+            },
+            _ => V::Err(CellError::Value),
+        }
+    }
+
+    /// Variável da fórmula atual (um parâmetro omitido vem como [`Fun::Omitted`]).
+    pub fn local(&self, k: u32) -> V<'e> {
+        self.stacks
+            .as_ref()
+            .and_then(|x| x.locals.get(self.local_base + k as usize).cloned())
+            .unwrap_or(V::Err(CellError::Name))
+    }
+
+    fn stacks(&mut self) -> &mut Stacks<'e> {
+        self.stacks.get_or_insert_with(Default::default)
+    }
+
+    fn locals_len(&self) -> usize {
+        self.stacks.as_ref().map_or(0, |x| x.locals.len())
+    }
+
+    /// Reserva uma variável (o valor vem depois, em [`Eval::set_local`]).
+    /// Devolve a posição dela na pilha.
+    pub fn push_local(&mut self) -> usize {
+        let x = self.stacks();
+        x.locals.push(V::Err(CellError::Name));
+        x.locals.len() - 1
+    }
+
+    pub fn set_local(&mut self, at: usize, v: V<'e>) {
+        self.stacks().locals[at] = v;
+    }
+
+    /// Solta as variáveis a partir de `at`.
+    pub fn pop_locals(&mut self, at: usize) {
+        self.stacks().locals.truncate(at);
+    }
+
+    /// Avalia `f` com valores no lugar dos nós dos argumentos.
+    pub fn with_values<R>(&mut self, args: Vec<V<'e>>, f: impl FnOnce(&mut Self, &[u32]) -> R) -> R {
+        let base = self.stacks().temps.len();
+        let ids: Vec<u32> = (0..args.len()).map(|k| (base + k) as u32 | TEMP).collect();
+        self.stacks().temps.extend(args);
+        let r = f(self, &ids);
+        self.stacks().temps.truncate(base);
+        r
+    }
+
+    /// Chama um valor de função. Dentro de uma LAMBDA as operações são
+    /// elemento a elemento, como no Excel atual.
+    pub fn call(&mut self, fun: &Rc<Fun<'e>>, mut args: Vec<V<'e>>) -> V<'e> {
+        match &**fun {
+            Fun::Omitted => V::Err(CellError::Value),
+            Fun::Native(func) => {
+                let def = funcs::def(*func);
+                if args.len() < def.min as usize || args.len() > def.max as usize {
+                    return V::Err(CellError::Value);
+                }
+                if def.opaque {
+                    self.opaque = true;
+                }
+                let saved = std::mem::replace(&mut self.array, true);
+                let v = self.with_values(args, |e, ids| match (def.imp)(e, ids) {
+                    Ok(v) => v,
+                    Err(x) => V::Err(x),
+                });
+                self.array = saved;
+                v
+            }
+            Fun::Lambda { f, params, optional, body, captured } => {
+                let n = *params as usize;
+                if args.len() > n {
+                    return V::Err(CellError::Value);
+                }
+                while args.len() < n {
+                    if optional >> args.len() & 1 == 0 {
+                        return V::Err(CellError::Value);
+                    }
+                    args.push(V::Fn(Rc::new(Fun::Omitted)));
+                }
+                let x = self.stacks();
+                if x.calls == 0 {
+                    x.stack0 = stack_pos();
+                } else if x.calls >= MAX_CALLS || x.stack0.abs_diff(stack_pos()) > MAX_STACK {
+                    return V::Err(CellError::Num);
+                }
+                let top = x.locals.len();
+                x.locals.extend(captured.iter().cloned());
+                x.locals.append(&mut args);
+                x.calls += 1;
+                let base = std::mem::replace(&mut self.local_base, top);
+                let saved_f = std::mem::replace(&mut self.f, f);
+                let saved = std::mem::replace(&mut self.array, true);
+                let v = self.eval(*body);
+                self.array = saved;
+                self.f = saved_f;
+                self.local_base = base;
+                let x = self.stacks();
+                x.calls -= 1;
+                x.locals.truncate(top);
+                v
+            }
+        }
+    }
+
+    /// Função escalar com matrizes nos argumentos de `mask`: uma chamada por
+    /// item, com o formato combinado das matrizes (`ABS(A1:A3)`,
+    /// `CONT.SE(A:A;B1:B9)`).
+    #[inline(never)]
+    pub fn lifted(&mut self, imp: funcs::Imp, mask: u32, args: &[u32]) -> V<'e> {
+        let run = |e: &mut Self, ids: &[u32]| match imp(e, ids) {
+            Ok(v) => v,
+            Err(x) => V::Err(x),
+        };
+        let lifts = |k: usize| mask >> k.min(31) & 1 != 0;
+        let base = self.stacks().temps.len();
+        let mut ids: Vec<u32> = Vec::with_capacity(args.len());
+        let mut shape: Option<(u32, u32)> = None;
+        // Matrizes: posição em `ids` e valores.
+        let mut arrs: Vec<(usize, Rc<Arr<'e>>)> = Vec::new();
+        for (k, &n) in args.iter().enumerate() {
+            if !lifts(k) || self.is_missing(n) {
+                ids.push(n);
+                continue;
+            }
+            let v = self.eval(n);
+            let many = match &v {
+                V::Arr(a) => a.rows * a.cols > 1,
+                V::Ref(r) => !r.is_cell(),
+                _ => false,
+            };
+            if many {
+                let a = self.to_arr(v.clone());
+                shape = Some(match shape {
+                    None => (a.rows, a.cols),
+                    Some((r, c)) => {
+                        let dim = |x: u32, y: u32| {
+                            if x == 1 {
+                                y
+                            } else if y == 1 {
+                                x
+                            } else {
+                                x.max(y)
+                            }
+                        };
+                        (dim(r, a.rows), dim(c, a.cols))
+                    }
+                });
+                arrs.push((k, a));
+            }
+            let x = self.stacks();
+            ids.push(x.temps.len() as u32 | TEMP);
+            x.temps.push(v);
+        }
+        let out = match shape {
+            None => run(self, &ids),
+            Some((rows, cols)) => {
+                let mut v = Vec::with_capacity((rows * cols) as usize);
+                for r in 0..rows {
+                    for c in 0..cols {
+                        for (k, a) in &arrs {
+                            let inside = (a.rows == 1 || r < a.rows) && (a.cols == 1 || c < a.cols);
+                            let x = if inside { a.get(r, c).clone() } else { V::Err(CellError::NA) };
+                            self.stacks().temps[(ids[*k] & !TEMP) as usize] = x;
+                        }
+                        let x = run(self, &ids);
+                        v.push(match x {
+                            V::Ref(_) | V::Arr(_) => self.to_scalar(x),
+                            x => x,
+                        });
+                    }
+                }
+                V::Arr(Rc::new(Arr { rows, cols, v }))
+            }
+        };
+        self.stacks().temps.truncate(base);
+        out
     }
 
     /// Área compilada → intervalo na célula avaliada.
@@ -584,8 +924,10 @@ impl<'e> Eval<'e> {
     pub fn final_value(&mut self, v: V<'e>) -> V<'e> {
         match v {
             V::Ref(r) => self.deref(r),
+            V::Arr(a) if a.v.len() > 1 => self.first(&a),
             V::Arr(a) => a.v.first().cloned().unwrap_or(V::Err(CellError::Value)),
             V::Empty => V::Num(0.0),
+            V::Fn(_) => V::Err(CellError::Calc),
             v => v,
         }
     }
@@ -596,6 +938,7 @@ impl<'e> Eval<'e> {
         if r.is_cell() {
             return self.book.get(r.sheet, r.r0, r.c0);
         }
+        self.reduced.set(true);
         if self.array {
             return self.book.get(r.sheet, r.r0, r.c0);
         }
@@ -608,6 +951,12 @@ impl<'e> Eval<'e> {
         V::Err(CellError::Value)
     }
 
+    /// Primeiro item de uma matriz num lugar que pede um valor só.
+    fn first(&self, a: &Arr<'e>) -> V<'e> {
+        self.reduced.set(true);
+        a.v.first().cloned().unwrap_or(V::Err(CellError::Value))
+    }
+
     /// Avalia e reduz a um valor simples.
     pub fn scalar(&mut self, n: u32) -> V<'e> {
         let v = self.eval(n);
@@ -617,13 +966,41 @@ impl<'e> Eval<'e> {
     pub fn to_scalar(&self, v: V<'e>) -> V<'e> {
         match v {
             V::Ref(r) => self.deref(r),
+            V::Arr(a) if a.v.len() > 1 => self.first(&a),
             V::Arr(a) => a.v.first().cloned().unwrap_or(V::Err(CellError::Value)),
             v => v,
         }
     }
 
     pub fn is_missing(&self, n: u32) -> bool {
+        if n & TEMP != 0 {
+            return matches!(self.temp(n), V::Fn(f) if matches!(*f, Fun::Omitted));
+        }
         matches!(self.f.node(n), Node::Missing)
+    }
+
+    /// Nó da fórmula atual (`None` para argumentos já calculados).
+    pub fn node(&self, n: u32) -> Option<&'e Node> {
+        if n & TEMP != 0 { None } else { Some(self.f.node(n)) }
+    }
+
+    /// Argumento como matriz, com as operações elemento a elemento.
+    pub fn arr(&mut self, n: u32) -> Res<Rc<Arr<'e>>> {
+        let saved = std::mem::replace(&mut self.array, true);
+        let v = self.eval(n);
+        self.array = saved;
+        match v {
+            V::Err(x) => Err(x),
+            v => Ok(self.to_arr(v)),
+        }
+    }
+
+    /// Argumento opcional lógico.
+    pub fn opt_bool(&mut self, args: &[u32], i: usize, default: bool) -> Res<bool> {
+        match args.get(i) {
+            Some(&n) if !self.is_missing(n) => self.boolean(n),
+            _ => Ok(default),
+        }
     }
 
     pub fn num(&mut self, n: u32) -> Res<f64> {
@@ -640,6 +1017,7 @@ impl<'e> Eval<'e> {
             V::Str(s) => parse_number(s, self.book.date1904).ok_or(CellError::Value),
             V::Ref(r) => self.to_num(&self.deref(*r)),
             V::Arr(a) => self.to_num(a.v.first().unwrap_or(&V::Err(CellError::Value))),
+            V::Fn(_) => Err(CellError::Calc),
         }
     }
 
@@ -842,6 +1220,7 @@ pub fn to_text<'e>(v: V<'e>) -> Res<Cow<'e, str>> {
         V::Bool(b) => Ok(Cow::Borrowed(bool_text(b))),
         V::Err(e) => Err(e),
         V::Ref(_) | V::Arr(_) => Err(CellError::Value),
+        V::Fn(_) => Err(CellError::Calc),
     }
 }
 

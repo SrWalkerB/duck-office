@@ -8,4 +8,5 @@ rust-version.workspace = true
 
 [dependencies]
 duck-core = { version = "1.0.0", path = "../duck-core" }
+libm = "0.2"
 rayon = "1.12.0"

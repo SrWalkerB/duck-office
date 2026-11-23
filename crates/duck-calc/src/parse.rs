@@ -106,8 +106,23 @@ pub enum Node {
     /// `ref:ref` em que um dos lados não é uma referência simples
     /// (`A1:ÍNDICE(...)`).
     Range(u32, u32),
-    /// Variável de LET (posição na pilha de variáveis da fórmula).
+    /// Variável de LET ou parâmetro de LAMBDA (posição na pilha de variáveis
+    /// da fórmula).
     Local(u32),
+    /// LAMBDA com `params` parâmetros (bit `k` de `optional` = o `k` é opcional).
+    Lambda {
+        params: u32,
+        optional: u64,
+        body: u32,
+    },
+    /// Chama o valor de função `f` (`LAMBDA(x;x+1)(2)`, variável ou nome).
+    Apply {
+        f: u32,
+        start: u32,
+        len: u32,
+    },
+    /// Nome de função usado como valor (`BYROW(A1:B3;SOMA)`).
+    Func(Func),
 }
 
 /// Bits de [`Formula::flags`].
@@ -118,6 +133,10 @@ pub mod flag {
     pub const DYNAMIC: u8 = 2;
     /// Usa algo que o motor não sabe calcular: o valor guardado fica.
     pub const OPAQUE: u8 = 4;
+    /// Tem SUBTOTAL ou AGREGAR (que outro AGREGAR pode ignorar).
+    pub const SUBTOTAL: u8 = 8;
+    /// Usa funções de matriz dinâmica ou LAMBDA: o Excel grava como matriz.
+    pub const DYNARRAY: u8 = 16;
 }
 
 /// Fórmula compilada.
@@ -207,10 +226,38 @@ struct Parser<'s> {
     scope: Vec<String>,
 }
 
-/// Nome de variável de LET como o arquivo grava (`_xlpm.x`) ou digitado.
+/// Nome de variável de LET ou LAMBDA como o arquivo grava (`_xlpm.x`,
+/// `_xlop.x` se opcional) ou digitado.
 fn local_name(w: &str) -> String {
-    let w = w.strip_prefix("_xlpm.").or_else(|| w.strip_prefix("_XLPM.")).unwrap_or(w);
+    let mut w = w;
+    for p in ["_xlpm.", "_XLPM.", "_xlop.", "_XLOP."] {
+        w = w.strip_prefix(p).unwrap_or(w);
+    }
     w.to_lowercase()
+}
+
+/// LAMBDA com mais parâmetros que isso não é aceita (o Excel para em 253).
+const MAX_PARAMS: usize = 64;
+
+/// Bits de [`flag`] que a função põe na fórmula.
+fn def_flags(def: &funcs::FnDef) -> u8 {
+    let mut f = 0;
+    if def.volatile {
+        f |= flag::VOLATILE;
+    }
+    if def.dynamic {
+        f |= flag::DYNAMIC;
+    }
+    if def.opaque {
+        f |= flag::OPAQUE;
+    }
+    if matches!(def.name, "SUBTOTAL" | "AGGREGATE") {
+        f |= flag::SUBTOTAL;
+    }
+    if funcs::DYNARRAY.contains(&def.name) {
+        f |= flag::DYNARRAY;
+    }
+    f
 }
 
 fn is_ident_char(c: u8) -> bool {
@@ -345,7 +392,8 @@ impl Parser<'_> {
 
     /// `:` entre expressões que não são referências simples.
     fn range(&mut self) -> R<u32> {
-        let mut l = self.primary()?;
+        let l = self.primary()?;
+        let mut l = self.applied(l)?;
         loop {
             self.ws();
             if self.peek() != Some(b':') {
@@ -353,6 +401,7 @@ impl Parser<'_> {
             }
             self.i += 1;
             let r = self.primary()?;
+            let r = self.applied(r)?;
             l = match (&self.f.nodes[l as usize], &self.f.nodes[r as usize]) {
                 (Node::Area(a), Node::Area(b)) if a.sheet == b.sheet || b.sheet == SheetSel::This => {
                     let a = *a;
@@ -362,6 +411,90 @@ impl Parser<'_> {
                 _ => self.push(Node::Range(l, r)),
             };
         }
+    }
+
+    /// `(...)` colado num valor de função: chama a função.
+    fn applied(&mut self, mut x: u32) -> R<u32> {
+        while self.peek() == Some(b'(')
+            && matches!(
+                self.f.nodes[x as usize],
+                Node::Lambda { .. } | Node::Apply { .. } | Node::Local(_) | Node::Name(_) | Node::Call { .. }
+            )
+        {
+            self.i += 1;
+            x = self.apply(x)?;
+        }
+        Ok(x)
+    }
+
+    /// Chamada de um valor de função, depois do `(`.
+    fn apply(&mut self, f: u32) -> R<u32> {
+        let args = self.args()?;
+        let start = self.f.args.len() as u32;
+        self.f.args.extend_from_slice(&args);
+        Ok(self.push(Node::Apply { f, start, len: args.len() as u32 }))
+    }
+
+    /// Argumentos até o `)` (depois do `(`).
+    fn args(&mut self) -> R<Vec<u32>> {
+        let mut args = Vec::new();
+        if self.eat(b')') {
+            return Ok(args);
+        }
+        loop {
+            self.ws();
+            let x = if matches!(self.peek(), Some(b',') | Some(b')')) {
+                self.push(Node::Missing)
+            } else {
+                self.expr()?
+            };
+            args.push(x);
+            self.ws();
+            match self.peek() {
+                Some(b',') => self.i += 1,
+                Some(b')') => {
+                    self.i += 1;
+                    return Ok(args);
+                }
+                _ => return Err(()),
+            }
+        }
+    }
+
+    /// LAMBDA depois do `(`: parâmetros (nomes; opcionais entre colchetes ou
+    /// com `_xlop.`) e, por último, o cálculo.
+    fn lambda(&mut self) -> R<u32> {
+        let scope0 = self.scope.len();
+        let mut optional = 0u64;
+        let mut n = 0usize;
+        loop {
+            self.ws();
+            let save = self.i;
+            let bracket = self.peek() == Some(b'[');
+            if bracket {
+                self.i += 1;
+            }
+            let w = self.word().to_string();
+            let closed = !bracket || self.eat(b']');
+            self.ws();
+            if !w.is_empty() && closed && self.peek() == Some(b',') && n < MAX_PARAMS {
+                self.i += 1;
+                if bracket || w.starts_with("_xlop.") || w.starts_with("_XLOP.") {
+                    optional |= 1 << n;
+                }
+                self.scope.push(local_name(&w));
+                n += 1;
+                continue;
+            }
+            self.i = save;
+            break;
+        }
+        let body = self.expr()?;
+        self.scope.truncate(scope0);
+        if !self.eat(b')') {
+            return Err(());
+        }
+        Ok(self.push(Node::Lambda { params: n as u32, optional, body }))
     }
 
     fn primary(&mut self) -> R<u32> {
@@ -782,11 +915,36 @@ impl Parser<'_> {
         if let Some(n) = self.res.name(&w, self.sheet) {
             return Ok(self.push(Node::Name(n)));
         }
+        // Nome de função como valor (o arquivo grava `_xleta.SUM`; sem o
+        // prefixo é um nome definido que não existe).
+        if let Some(bare) = w.strip_prefix("_xleta.").or_else(|| w.strip_prefix("_XLETA."))
+            && let Some(f) = funcs::lookup(bare)
+        {
+            self.f.flags |= def_flags(funcs::def(f));
+            return Ok(self.push(Node::Func(f)));
+        }
         Ok(self.push(Node::Err(CellError::Name)))
     }
 
     fn call(&mut self, name: &str) -> R<u32> {
         let f = funcs::lookup(name);
+        if f.is_none() {
+            // Variável que guarda uma função (`LET(f;LAMBDA(x;x+1);f(2))`) ou
+            // nome definido com uma LAMBDA.
+            let lw = local_name(name);
+            if let Some(k) = self.scope.iter().rposition(|n| *n == lw) {
+                let x = self.push(Node::Local(k as u32));
+                return self.apply(x);
+            }
+            if let Some(n) = self.res.name(name, self.sheet) {
+                let x = self.push(Node::Name(n));
+                return self.apply(x);
+            }
+        }
+        if f.is_some_and(|f| funcs::def(f).name == "LAMBDA") {
+            self.f.flags |= flag::DYNARRAY;
+            return self.lambda();
+        }
         let is_let = f.is_some_and(|f| funcs::def(f).name == "LET");
         let scope0 = self.scope.len();
         let mut args = Vec::new();
@@ -831,16 +989,7 @@ impl Parser<'_> {
             self.f.flags |= flag::OPAQUE;
             return Ok(self.push(Node::Err(CellError::Name)));
         };
-        let def = funcs::def(f);
-        if def.volatile {
-            self.f.flags |= flag::VOLATILE;
-        }
-        if def.dynamic {
-            self.f.flags |= flag::DYNAMIC;
-        }
-        if def.opaque {
-            self.f.flags |= flag::OPAQUE;
-        }
+        self.f.flags |= def_flags(funcs::def(f));
         let start = self.f.args.len() as u32;
         self.f.args.extend_from_slice(&args);
         Ok(self.push(Node::Call { f, start, len: args.len() as u32 }))
