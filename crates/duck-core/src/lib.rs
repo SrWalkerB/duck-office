@@ -15,18 +15,24 @@
 //!   juntadas depois ([`Sheet::merge_part`]) em ordem fixa, então o resultado
 //!   é idêntico com qualquer número de threads (ADR-012).
 
+pub mod cells;
 pub mod cond;
 pub mod cube;
 pub mod drawing;
 pub mod edit;
+pub mod fill;
 pub mod input;
 mod layout;
 pub mod numfmt;
+pub mod numfmt_pt;
 pub mod outline;
 pub mod pivot;
+pub mod replace;
+pub mod rich;
 pub mod shape;
 pub mod shift;
 mod styles;
+pub mod tabs;
 
 use std::collections::HashMap;
 
@@ -275,6 +281,7 @@ pub struct Cell<'a> {
 
 /// 1024 linhas de uma coluna durante a montagem: 11 KB, escrita direta.
 /// Alocado só se a coluna tiver algo nessas linhas.
+#[derive(Clone)]
 pub struct Block {
     pub kind: [u8; BLOCK_ROWS],
     pub style: [u16; BLOCK_ROWS],
@@ -335,12 +342,14 @@ fn widen(k: u8, v: u32) -> u64 {
 }
 
 /// Estilos de um bloco compactado.
+#[derive(Clone)]
 enum StyleLane {
     Same(u16),
     Each(Box<[u16; BLOCK_ROWS]>),
 }
 
 /// Payloads de um bloco compactado.
+#[derive(Clone)]
 enum PayloadLane {
     /// Todos zero (blocos só com estilo, ou só zeros e índices 0).
     Zero,
@@ -350,6 +359,7 @@ enum PayloadLane {
 }
 
 /// Bloco depois da montagem: 1 KB de tipos mais o que não se repete.
+#[derive(Clone)]
 struct Packed {
     kind: [u8; BLOCK_ROWS],
     style: StyleLane,
@@ -430,6 +440,7 @@ impl Packed {
 }
 
 /// Um bloco em montagem ou já compactado.
+#[derive(Clone)]
 enum Slot {
     Wide(Box<Block>),
     Packed(Box<Packed>),
@@ -527,6 +538,7 @@ const SHARED_BIT: u32 = 0x8000_0000;
 
 /// Ids de fórmula de um bloco. Fórmulas copiadas para baixo costumam ter o
 /// mesmo id no bloco inteiro (modelo deduplicado ou grupo compartilhado).
+#[derive(Clone)]
 enum Ids {
     Same(u32),
     Each(Box<[u32; BLOCK_ROWS]>),
@@ -578,7 +590,7 @@ impl Ids {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Column {
     blocks: Vec<Option<Slot>>,
     /// Ids de fórmula, alocados só nos blocos que têm fórmula.
@@ -888,6 +900,7 @@ impl SheetPart {
 // Aba
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct Sheet {
     pub name: String,
     pub hidden: bool,
@@ -1223,6 +1236,9 @@ impl Sheet {
     pub fn shared_intact(&self, row: u32, col: u32) -> bool {
         let Some(f) = self.formula(row, col) else { return false };
         let FormulaKind::Shared { si } = f.kind else { return false };
+        if self.edits.retexted.contains(&si) {
+            return false;
+        }
         let id = self.formula_id(f.anchor_row, f.anchor_col);
         if id == 0 || id & SHARED_BIT != 0 {
             return false;
@@ -1337,7 +1353,7 @@ pub struct DefinedName {
 
 /// Outro arquivo referenciado pelas fórmulas (`[1]Aba!A1`), com os valores
 /// que o Excel guardou dele (`xl/externalLinks/externalLinkN.xml`).
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ExternalBook {
     /// Caminho ou nome do arquivo, como está nos relacionamentos.
     pub target: String,
@@ -1349,7 +1365,7 @@ pub struct ExternalBook {
 
 /// O que o motor de cálculo precisa além das abas: nomes definidos e
 /// arquivos externos.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct BookExtras {
     pub names: Vec<DefinedName>,
     pub externals: Vec<ExternalBook>,

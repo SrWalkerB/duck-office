@@ -2,7 +2,7 @@
 
 Suíte office nativa e focada em performance, para Windows, Linux e macOS. O primeiro app é o **duck-sheets** (planilhas compatíveis com `.xlsx`/`.xlsm`), feito para abrir arquivos gigantes sem travar.
 
-Roadmap e status das fases: [ROADMAP.md](ROADMAP.md) · Decisões de arquitetura: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+Roadmap e status das fases: [ROADMAP.md](ROADMAP.md) · Decisões de arquitetura: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · Medições: [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
 
 ## Estrutura
 
@@ -54,15 +54,21 @@ cargo run --release -p duck-sheets -- caminho/arquivo.xlsx
 
 Sem arquivo, abre uma planilha em branco (Ctrl+O abre um arquivo, ou arraste-o para a janela). Teclas: setas (+Shift seleciona, +Ctrl vai até a borda dos dados), PageUp/PageDown, Ctrl+Home/End, Ctrl+PageUp/PageDown (abas), Ctrl+C (copia a seleção), Ctrl+F e F3 (busca), Ctrl+G ou F5 (ir para), Ctrl+O (abrir), Ctrl+A, Ctrl + roda ou Ctrl +/−/0 (zoom; também no controle do canto inferior direito).
 
-A faixa de opções em cima tem as abas **Arquivo** (novo, abrir, recentes, salvar, salvar como, "Abrir com" do sistema), **Página Inicial** (área de transferência, fonte, alinhamento, número, células, edição), **Inserir** (linhas, colunas, mesclagem) e **Exibir** (zoom, linhas de grade, cabeçalhos, congelar painéis). O clique direito na grade ou nos cabeçalhos abre um menu com as ações mais comuns.
+A faixa de opções em cima tem as abas **Arquivo** (novo, abrir, recentes, salvar, salvar como, "Abrir com" do sistema), **Página Inicial** (área de transferência, fonte, alinhamento, número, células, edição), **Inserir** (linhas, colunas, mesclagem) e **Exibir** (zoom, linhas de grade, cabeçalhos, congelar painéis, tema claro, escuro ou o do sistema). O clique direito na grade ou nos cabeçalhos abre um menu com as ações mais comuns.
 
 Edição: digitar substitui a célula; F2, duplo clique ou clique na barra de fórmulas editam o conteúdo; Enter/Tab confirmam e Esc cancela; Delete apaga a seleção; Ctrl+C, Ctrl+X e Ctrl+V copiam, recortam e colam (de outros programas também); Ctrl+Z e Ctrl+Y desfazem e refazem; Ctrl+S salva e Ctrl+Shift+S salva como. A barra de ferramentas tem negrito, itálico, sublinhado, tachado, cores, alinhamento, formatos de número, bordas e inserir/apagar linhas e colunas (também Ctrl+N/B, Ctrl+I, Ctrl+U, Ctrl+5, Ctrl+Shift+1/3/4/5/7 e Ctrl+Alt+= / Ctrl+Alt+-).
+
+Ao digitar uma fórmula, na célula ou na barra, aparece a lista de funções, nomes, tabelas e colunas de tabela que começam com o que foi escrito (sem diferenciar maiúsculas nem acentos): ↑ e ↓ escolhem, Tab ou o clique inserem, Esc fecha a lista e Enter confirma a célula. Dentro dos parênteses, a assinatura da função mostra o argumento atual em destaque.
+
+Com a fórmula aberta, clicar numa célula escreve a referência dela onde cabe uma (depois de `=`, operador, `(` ou `;`); em outro lugar, o clique confirma a edição. Arrastar ou Shift+clique faz um intervalo, o cabeçalho dá a coluna ou a linha inteira, e as setas também apontam (F2 alterna com andar no texto). O próximo clique troca a referência; depois de um operador ou `;`, começa outra. F4 alterna `$A$1`, `A$1`, `$A1` e `A1`. Para apontar em outra aba, clique na guia dela: confirmar volta para a aba da célula. Cada referência tem uma cor, no texto e na grade, e o parêntese que falta no fim é fechado ao confirmar.
+
+No tema escuro a planilha também escurece, só na tela: as cores gravadas no arquivo não mudam. A escolha fica em `preferencias.txt`, na pasta de configuração do usuário (`%APPDATA%\duck-office` ou `~/.config/duck-office`).
 
 O que se digita é lido como no Excel em português: `1.234,56`, `10%`, `R$ 10`, `22/11/2026`, `14:30`, `VERDADEIRO`, `=A1*2`. As fórmulas digitadas são calculadas na hora (e o que depende delas acompanha); uma função que o motor ainda não tem fica sem valor e o arquivo salvo pede ao Excel para recalcular ao abrir.
 
 Objetos: formas, imagens e controles com link ou macro respondem ao clique; os botões +/− dos grupos abrem e fecham linhas e colunas. As macros VBA do arquivo rodam num interpretador próprio, que pergunta uma vez por arquivo e só enxerga a planilha (sem arquivos, internet ou outros programas); Ctrl+Z desfaz a macro inteira.
 
-Opções: `--sheet N` (aba inicial, 1 = primeira), `--cell B12`, `--zoom 80`, `--find texto`, `--novo` (planilha em branco). Para testar a edição sem a janela: `--edit A1=valor` (também `copiar:A1:B2`, `colar:D5`, `inserir:A5:A6`, `formatar:negrito:A1:B2`, `mesclar-centralizar:A1:C1`, `ocultar-linhas:A3:A4`, `congelar:B2`, `largura=20:C1`...), `--undo N`, `--save-to cópia.xlsx`; e, para screenshots, `--aba exibir` e `--menu bordas` (abre um menu).
+Opções: `--sheet N` (aba inicial, 1 = primeira), `--cell B12`, `--zoom 80`, `--find texto`, `--novo` (planilha em branco), `--tema claro|escuro|sistema` (só nesta execução; em `--screenshot` e `--bench`, sem isto, vale o claro). Para testar a edição sem a janela: `--edit A1=valor` (também `copiar:A1:B2`, `colar:D5`, `inserir:A5:A6`, `formatar:negrito:A1:B2`, `mesclar-centralizar:A1:C1`, `ocultar-linhas:A3:A4`, `congelar:B2`, `largura=20:C1`...), `--undo N`, `--save-to cópia.xlsx`; e, para screenshots, `--aba exibir`, `--menu bordas` (abre um menu) e `--digitar "=so"` (digita na célula ativa e deixa a edição aberta; `{baixo}`, `{shift-direita}`, `{tab}`, `{enter}`, `{esc}`, `{f2}`, `{f4}`... são teclas, `{clique:B2}`, `{shift-clique:B5}`, `{arrastar:B2:B10}`, `{coluna:B}`, `{linha:3}` e `{aba:Nome}` são cliques, e `{barra}` no começo edita na barra de fórmulas).
 
 Medir (abre, rola a aba, mostra os tempos e sai) e screenshot (renderiza fora da tela depois de carregar tudo):
 

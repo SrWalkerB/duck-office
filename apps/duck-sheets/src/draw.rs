@@ -12,29 +12,13 @@ use duck_core::{
     BorderStyle, CellRange, CfApply, CfCtx, CfKind, HAlign, RichRun, Sheet, Styles, VAlign, Value,
 };
 use duck_text::TextStyle;
-use duck_ui::{Align, InputColors, Painter, Rect, Rgba, Tab, TabColors, rgb};
+use duck_ui::{Align, InputColors, Painter, Rect, Rgba, Tab, rgb};
 
 use crate::app::{Geom, Quad, SheetsApp, View, cell_name, col_name, fmt_int};
 use crate::look::{Edge, Kind, Look, Looks, general_fit, show};
+use crate::theme::Theme;
 
-pub const WHITE: Rgba = [255, 255, 255, 255];
-const GRID: Rgba = rgb(0xE1E1E1);
-const HEADER_BG: Rgba = rgb(0xF8F9FA);
-const HEADER_TEXT: Rgba = rgb(0x5F6368);
-const HEADER_LINE: Rgba = rgb(0xD5D7DA);
-const HEADER_SEL: Rgba = rgb(0xD3E3FD);
-const HEADER_SEL_FULL: Rgba = rgb(0x0B57D0);
-const ACCENT: Rgba = rgb(0x0B57D0);
-const EDIT_BORDER: Rgba = ACCENT;
-const SEL_FILL: Rgba = [14, 101, 235, 26];
-const HIT_FILL: Rgba = [255, 213, 0, 110];
-const FROZEN_LINE: Rgba = rgb(0xBDC1C6);
-const TRACK: Rgba = rgb(0xF1F3F4);
-const THUMB: Rgba = rgb(0xBDC1C6);
-const THUMB_ACTIVE: Rgba = rgb(0x80868B);
-const UI_TEXT: Rgba = rgb(0x202124);
-const UI_MUTED: Rgba = rgb(0x5F6368);
-const BAR_LINE: Rgba = rgb(0xDADCE0);
+const WHITE: Rgba = [255, 255, 255, 255];
 
 /// Colunas olhadas além da borda da tela para texto que transborda.
 const OVERFLOW_LOOK: u32 = 24;
@@ -45,6 +29,7 @@ struct Ctx<'a> {
     view: &'a View,
     looks: &'a Looks,
     styles: &'a Styles,
+    th: &'static Theme,
     strings: &'a duck_core::StringTable,
     date1904: bool,
     fonts: &'a [TextStyle],
@@ -91,6 +76,11 @@ struct Fx {
 }
 
 /// Junta a formatação condicional (por cima) com o estilo da tabela (por baixo).
+/// O preenchimento que vale para a célula, como está no arquivo.
+fn cell_fill(look: &Look, fx: Option<&Fx>) -> Option<Rgba> {
+    fx.and_then(|f| f.fill).or(look.fill).or(fx.and_then(|f| f.under))
+}
+
 fn merge_fx(cf: Option<Fx>, t: Option<Fx>) -> Option<Fx> {
     match (cf, t) {
         (None, t) => t,
@@ -251,7 +241,7 @@ fn spans(axis: &crate::axis::Axis, origin: f64, start: u32, end: u32, lo: f32, h
 }
 
 /// Posição na tela do início do item `i` num painel.
-fn pos(axis: &crate::axis::Axis, origin: f64, i: u32, lo: f32, g: f32) -> f32 {
+pub(crate) fn pos(axis: &crate::axis::Axis, origin: f64, i: u32, lo: f32, g: f32) -> f32 {
     lo + ((axis.offset(i) as f64 - origin) * g as f64).round() as f32
 }
 
@@ -299,6 +289,7 @@ fn draw_camera(
     range: &str,
     r: Rect,
     clip: &Rect,
+    th: &'static Theme,
 ) -> bool {
     let Some((si, rg)) = camera_range(doc, range) else { return false };
     if doc.calc.version(si) == 0 {
@@ -315,7 +306,7 @@ fn draw_camera(
     }
     let g = (r.w() / w).min(r.h() / h);
     let vis = r.intersect(clip);
-    p.fill(vis, &vis, WHITE);
+    p.fill(vis, &vis, th.paper);
     // A parte visível: o painel começa nela.
     let quad = Quad {
         rect: vis,
@@ -337,6 +328,7 @@ fn draw_camera(
         view,
         looks: &doc.looks,
         styles: &doc.styles,
+        th,
         strings: &doc.strings,
         date1904: doc.date1904,
         fonts: &fonts,
@@ -356,6 +348,7 @@ fn draw_camera(
         g,
         date1904: doc.date1904,
         images,
+        th,
     };
     // Uma câmera dentro de outra fica com a imagem guardada.
     crate::chart::draw_objects(p, &octx, &sheet.layout.objects, view, &quad, &mut |_, _, _, _| false);
@@ -364,6 +357,7 @@ fn draw_camera(
 
 impl SheetsApp {
     pub fn build_frame(&mut self) {
+        let th = self.theme();
         let geom = self.geom();
         self.ensure_font_styles(geom.g);
         let header_style = self.header_style(geom.g);
@@ -376,6 +370,10 @@ impl SheetsApp {
         self.formula_text(&mut formula);
         let active = self.active_format();
         let filter_buttons = self.filter_buttons(&geom);
+        // Referências da fórmula em edição: no texto e na grade.
+        let (refs, ref_colors) = self.editor_refs();
+        let spans = crate::pointing::spans(&refs, &ref_colors, th);
+        let outlines = self.outlines(&refs, &ref_colors, th);
 
         let (vthumb, hthumb) = (self.vthumb(&geom), self.hthumb(&geom));
         let text = self.text.as_mut().expect("texto");
@@ -393,6 +391,7 @@ impl SheetsApp {
                     view,
                     looks: &doc.looks,
                     styles: &doc.styles,
+                    th,
                     strings: &doc.strings,
                     date1904: doc.date1904,
                     fonts: &self.font_styles,
@@ -405,31 +404,33 @@ impl SheetsApp {
                     tables: table_looks(sheet, &doc.styles),
                 };
                 // Fundo da grade.
-                p.fill(geom.grid, &geom.grid, WHITE);
+                p.fill(geom.grid, &geom.grid, th.paper);
                 let octx = crate::chart::ObjCtx {
                     styles: &doc.styles,
                     font: self.font_styles.first().copied().unwrap_or(ui),
                     g: geom.g,
                     date1904: doc.date1904,
                     images: &self.images.uv,
+                    th,
                 };
                 for q in geom.quads.iter().rev() {
                     if !q.rect.is_empty() {
                         draw_cells(&mut p, &cx, q, &mut buf, &mut buf2);
                         let (images, today) = (&self.images.uv, self.today);
                         let mut live = |p: &mut Painter, range: &str, r: Rect, clip: &Rect| {
-                            draw_camera(p, doc, images, today, px, range, r, clip)
+                            draw_camera(p, doc, images, today, px, range, r, clip, th)
                         };
                         crate::chart::draw_objects(&mut p, &octx, &sheet.layout.objects, view, q, &mut live);
                     }
                 }
+                crate::pointing::draw_outlines(&mut p, &geom, view, &outlines, px);
                 // Linhas dos painéis congelados.
                 if view.frozen_rows > 0 {
                     let y = geom.grid.y0 + geom.fh;
                     p.fill(
                         Rect::new(geom.rowhdr.x0, y - px, geom.grid.x1, y),
                         &Rect::everything(),
-                        FROZEN_LINE,
+                        th.frozen_line,
                     );
                 }
                 if view.frozen_cols > 0 {
@@ -437,7 +438,7 @@ impl SheetsApp {
                     p.fill(
                         Rect::new(x - px, geom.colhdr.y0, x, geom.grid.y1),
                         &Rect::everything(),
-                        FROZEN_LINE,
+                        th.frozen_line,
                     );
                 }
                 if view.headers {
@@ -445,25 +446,19 @@ impl SheetsApp {
                 }
                 // Editor sobre a célula.
                 if let Some(ed) = &self.editor
-                    && let Some(cell) = cell_screen_rect(&geom, view, ed.row, ed.col)
+                    && let Some((r, style, pad)) = crate::complete::cell_editor(ed, &geom, view, p.text, ui)
                 {
-                    let style = ui.with_px((11.0 * 96.0 / 72.0 * geom.g).round().max(6.0));
-                    let pad = (3.0 * geom.g).round().max(1.0);
-                    let need = p.text.measure_styled(&ed.input.text, style) + 2.0 * pad + 8.0 * geom.g;
-                    let r =
-                        Rect::new(cell.x0, cell.y0, (cell.x0 + need).max(cell.x1).min(geom.grid.x1), cell.y1);
-                    let colors =
-                        InputColors { focus: EDIT_BORDER, border: EDIT_BORDER, ..InputColors::default() };
-                    ed.input.draw(&mut p, r, style, pad, !ed.in_bar, &colors, "");
-                    p.stroke(r.inset(-px), &Rect::everything(), 2.0 * px, EDIT_BORDER);
+                    let colors = InputColors { focus: th.selection, border: th.selection, ..th.input };
+                    ed.input.draw_spans(&mut p, r, style, pad, !ed.in_bar, &colors, "", &spans);
+                    p.stroke(r.inset(-px), &Rect::everything(), 2.0 * px, th.selection);
                 }
-                draw_scrollbars(&mut p, vthumb, &geom, self.drag);
+                draw_scrollbars(&mut p, vthumb, &geom, self.drag, th);
             }
             None => {
                 p.fill(
                     geom.grid.intersect(&Rect::new(0.0, geom.fbar.y1, geom.w, geom.tabs.y0)),
                     &Rect::everything(),
-                    WHITE,
+                    th.paper,
                 );
                 let msg = if self.loader.is_some() || self.doc.is_some() {
                     if self.message.is_empty() { "Carregando…".to_string() } else { self.message.clone() }
@@ -473,17 +468,17 @@ impl SheetsApp {
                 };
                 let area = Rect::new(0.0, geom.fbar.y1, geom.w, geom.tabs.y0);
                 let big = ui.with_px(15.0 * s);
-                p.label(&msg, big, area, Align::Center, 0.0, UI_MUTED);
+                p.label(&msg, big, area, Align::Center, 0.0, th.muted);
             }
         }
 
         // Barra de fórmulas.
         let fbar = geom.fbar;
-        p.fill(fbar, &fbar, WHITE);
-        p.fill(Rect::new(0.0, fbar.y1 - px, geom.w, fbar.y1), &fbar, BAR_LINE);
+        p.fill(fbar, &fbar, th.body);
+        p.fill(Rect::new(0.0, fbar.y1 - px, geom.w, fbar.y1), &fbar, th.line);
         let nb = geom.namebox.inset((4.0 * s).round());
         if self.namebox_focus {
-            self.namebox.draw(&mut p, nb, ui, 6.0 * s, true, &InputColors::default(), "");
+            self.namebox.draw(&mut p, nb, ui, 6.0 * s, true, &th.input, "");
         } else {
             buf.clear();
             if let Some((_, v)) = self.doc.as_ref().and_then(|d| d.current()) {
@@ -494,38 +489,40 @@ impl SheetsApp {
                     cell_name(v.cur.0, v.cur.1, &mut buf);
                 }
             }
-            p.fill(nb, &nb, WHITE);
-            p.stroke(nb, &nb, px, BAR_LINE);
-            p.label(&buf, ui, nb, Align::Left, 6.0 * s, UI_TEXT);
+            p.fill(nb, &nb, th.field);
+            p.stroke(nb, &nb, px, th.line);
+            p.label(&buf, ui, nb, Align::Left, 6.0 * s, th.text);
         }
         p.fill(
             Rect::new(geom.namebox.x1, fbar.y0 + 6.0 * s, geom.namebox.x1 + px, fbar.y1 - 6.0 * s),
             &fbar,
-            BAR_LINE,
+            th.line,
         );
         let fx = Rect::new(geom.namebox.x1, fbar.y0, geom.formula.x0, fbar.y1);
         let mut italic = ui;
         italic.italic = true;
-        p.label("fx", italic, fx, Align::Center, 0.0, UI_MUTED);
+        p.label("fx", italic, fx, Align::Center, 0.0, th.muted);
         match &self.editor {
             Some(ed) => {
-                let colors = InputColors { border: WHITE, focus: WHITE, ..InputColors::default() };
-                ed.input.draw(&mut p, geom.formula.inset(2.0 * s), ui, 2.0 * s, ed.in_bar, &colors, "");
+                let colors = InputColors { border: th.body, focus: th.body, background: th.body, ..th.input };
+                let focused = ed.in_bar || ed.away;
+                let r = geom.formula.inset(2.0 * s);
+                ed.input.draw_spans(&mut p, r, ui, 2.0 * s, focused, &colors, "", &spans);
             }
             None => {
                 // Uma linha só: quebras viram espaço.
                 let formula = formula.replace(['\n', '\r'], " ");
-                p.label(&formula, ui, geom.formula, Align::Left, 4.0 * s, UI_TEXT);
+                p.label(&formula, ui, geom.formula, Align::Left, 4.0 * s, th.text);
             }
         }
 
         // Busca.
         if let Some(f) = &self.find {
             let r = find_rect(&geom);
-            p.fill(r.inset(-px), &Rect::everything(), BAR_LINE);
-            p.fill(r, &r, WHITE);
+            p.fill(r.inset(-px), &Rect::everything(), th.line);
+            p.fill(r, &r, th.menu);
             let input = Rect::new(r.x0 + 6.0 * s, r.y0 + 5.0 * s, r.x1 - 120.0 * s, r.y1 - 5.0 * s);
-            f.input.draw(&mut p, input, ui, 6.0 * s, f.focused, &InputColors::default(), "Buscar na aba");
+            f.input.draw(&mut p, input, ui, 6.0 * s, f.focused, &th.input, "Buscar na aba");
             buf.clear();
             if f.job.is_some() {
                 buf.push_str("buscando…");
@@ -537,7 +534,7 @@ impl SheetsApp {
                 }
             }
             let info = Rect::new(input.x1, r.y0, r.x1, r.y1);
-            p.label(&buf, ui, info, Align::Center, 4.0 * s, UI_MUTED);
+            p.label(&buf, ui, info, Align::Center, 4.0 * s, th.muted);
         }
 
         // Abas.
@@ -566,27 +563,27 @@ impl SheetsApp {
             }
         }
         let tabs_rect = geom.tabs;
-        self.tabbar.draw(&mut p, tabs_rect, &tabs, active_tab, ui, 14.0 * s, &TabColors::default());
+        self.tabbar.draw(&mut p, tabs_rect, &tabs, active_tab, ui, 14.0 * s, &th.tabs);
         // Aba ativa nova: traz para a vista (depois o usuário rola à vontade).
         let active_sheet = self.doc.as_ref().map(|d| d.active);
         if tabs.len() > 1 && self.tab_revealed != active_sheet {
             self.tabbar.reveal(active_tab, tabs_rect.w());
             self.tab_revealed = active_sheet;
         }
-        p.fill(Rect::new(tabs_rect.x1, tabs_rect.y0, geom.w, tabs_rect.y1), &Rect::everything(), HEADER_BG);
+        p.fill(Rect::new(tabs_rect.x1, tabs_rect.y0, geom.w, tabs_rect.y1), &Rect::everything(), th.bg);
         p.fill(
             Rect::new(tabs_rect.x1, tabs_rect.y0, geom.w, tabs_rect.y0 + px),
             &Rect::everything(),
-            BAR_LINE,
+            th.line,
         );
         if self.doc.as_ref().and_then(|d| d.current()).is_some() {
-            draw_hscroll(&mut p, hthumb, &geom, self.drag);
+            draw_hscroll(&mut p, hthumb, &geom, self.drag, th);
         }
 
         // Barra de status.
         let st = geom.status;
-        p.fill(st, &st, HEADER_BG);
-        p.fill(Rect::new(0.0, st.y0, geom.w, st.y0 + px), &st, BAR_LINE);
+        p.fill(st, &st, th.bg);
+        p.fill(Rect::new(0.0, st.y0, geom.w, st.y0 + px), &st, th.line);
         let small = ui.with_px(12.0 * s);
         let left = match (&self.hover_link, self.hover_act) {
             (_, Some((_, tip))) => tip.to_string(),
@@ -597,7 +594,7 @@ impl SheetsApp {
         };
         let zoombar = crate::zoombar::layout(&geom);
         let st_text = Rect::new(st.x0, st.y0, zoombar.area().x0, st.y1);
-        p.label(&left, small, st_text, Align::Left, 10.0 * s, UI_MUTED);
+        p.label(&left, small, st_text, Align::Left, 10.0 * s, th.muted);
         buf.clear();
         if let Some(stats) = stats
             && stats.count > 1
@@ -617,21 +614,11 @@ impl SheetsApp {
             let avg = self.recent_cpu.iter().sum::<f64>() / self.recent_cpu.len() as f64;
             let _ = write!(buf, "   ·   {avg:.2} ms/frame");
         }
-        p.label(&buf, small, st_text, Align::Right, 10.0 * s, UI_MUTED);
+        p.label(&buf, small, st_text, Align::Right, 10.0 * s, th.muted);
 
         // Faixa de opções, menus e caixa de diálogo por último: ficam por cima.
-        let theme = crate::ribbon::Theme {
-            bg: HEADER_BG,
-            body: WHITE,
-            line: BAR_LINE,
-            text: UI_TEXT,
-            muted: UI_MUTED,
-            hover: rgb(0xE8EAED),
-            on: HEADER_SEL,
-            accent: ACCENT,
-        };
         if let Some((_, v)) = self.doc.as_ref().and_then(|d| d.current()) {
-            zoombar.draw(&mut p, &geom, small, v.zoom as i32, self.hover_act.map(|t| t.0), &theme);
+            zoombar.draw(&mut p, &geom, small, v.zoom as i32, self.hover_act.map(|t| t.0), th);
         }
         let view = self.doc.as_ref().and_then(|d| d.current()).map(|(_, v)| (v.grid, v.headers));
         let num_fmt_name = match (active.as_ref(), self.doc.as_ref()) {
@@ -644,12 +631,13 @@ impl SheetsApp {
             headers: view.is_none_or(|v| v.1),
             colors: self.colors,
             num_fmt_name,
+            mode: self.mode,
         };
         let file_open = self
             .popup
             .as_ref()
             .is_some_and(|m| m.owner == Some(crate::ribbon::Act::Drop(crate::ribbon::Drop::File)));
-        crate::filter::draw_buttons(&mut p, &geom, &filter_buttons, &theme);
+        crate::filter::draw_buttons(&mut p, &geom, &filter_buttons, th);
         crate::ribbon::draw(
             &mut p,
             &geom,
@@ -658,16 +646,22 @@ impl SheetsApp {
             &state,
             self.hover_act.map(|t| t.0),
             file_open,
-            &theme,
+            th,
         );
+        // Autocompletar: por cima da faixa e das barras, embaixo dos menus.
+        if let (Some(ed), Some((_, view))) = (&self.editor, self.doc.as_ref().and_then(|d| d.current()))
+            && let Some(b) = crate::complete::boxes(ed, &geom, view, p.text, ui)
+        {
+            crate::complete::draw(&mut p, ed, &b, s, ui, self.mouse, th);
+        }
         if let Some(m) = &self.popup {
-            m.draw(&mut p, &geom, ui, self.mouse, &theme);
+            m.draw(&mut p, &geom, ui, self.mouse, th);
         }
         if let Some(fp) = &self.filter_panel {
-            fp.draw(&mut p, &geom, ui, self.mouse, &theme);
+            fp.draw(&mut p, &geom, ui, self.mouse, th);
         }
         if let Some(pr) = &self.prompt {
-            pr.draw(&mut p, &geom, ui, &theme);
+            pr.draw(&mut p, &geom, ui, th);
         }
 
         self.instances = out;
@@ -706,6 +700,7 @@ pub fn find_rect(g: &Geom) -> Rect {
 
 fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut String) {
     let v = cx.view;
+    let th = cx.th;
     let g = cx.g;
     let px = cx.px;
     let clip = q.rect;
@@ -801,10 +796,10 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
     // 1. Linhas de grade.
     if v.grid {
         for c in &cols {
-            p.fill(Rect::new(c.b - px, clip.y0, c.b, grid_bottom), &clip, GRID);
+            p.fill(Rect::new(c.b - px, clip.y0, c.b, grid_bottom), &clip, th.grid);
         }
         for r in &rows {
-            p.fill(Rect::new(clip.x0, r.b - px, grid_right, r.b), &clip, GRID);
+            p.fill(Rect::new(clip.x0, r.b - px, grid_right, r.b), &clip, th.grid);
         }
     }
 
@@ -816,13 +811,12 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
             }
             let cell = &cells[ri * nc + ci];
             let fx = fx_at(ri, ci);
-            if let Some(fill) =
-                fx.and_then(|f| f.fill).or(cx.look_of(cell.style, r.i, c.i).fill).or(fx.and_then(|f| f.under))
-            {
-                p.fill(Rect::new(c.a - px, r.a - px, c.b, r.b), &clip, fill);
+            let fill = cell_fill(cx.look_of(cell.style, r.i, c.i), fx.as_ref());
+            if let Some(fill) = fill {
+                p.fill(Rect::new(c.a - px, r.a - px, c.b, r.b), &clip, th.fill(fill));
             }
             if let Some(bar) = fx.and_then(|f| f.bar) {
-                data_bar(p, Rect::new(c.a, r.a, c.b - px, r.b - px), &bar, px, &clip);
+                data_bar(p, Rect::new(c.a, r.a, c.b - px, r.b - px), &bar, px, &clip, fill, th);
             }
         }
     }
@@ -831,17 +825,16 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
             Rect::new(x_of(m.first_col), y_of(m.first_row), x_of(m.last_col + 1), y_of(m.last_row + 1));
         let anchor = cx.sheet.cell(m.first_row, m.first_col, cx.strings);
         let fx = merge_fx[mi];
-        match fx
-            .and_then(|f| f.fill)
-            .or(cx.look_of(anchor.style, m.first_row, m.first_col).fill)
-            .or(fx.and_then(|f| f.under))
-        {
-            Some(fill) => p.fill(Rect::new(rect.x0 - px, rect.y0 - px, rect.x1, rect.y1), &clip, fill),
+        let fill = cell_fill(cx.look_of(anchor.style, m.first_row, m.first_col), fx.as_ref());
+        match fill {
+            Some(fill) => {
+                p.fill(Rect::new(rect.x0 - px, rect.y0 - px, rect.x1, rect.y1), &clip, th.fill(fill))
+            }
             // Sem preenchimento: apaga as linhas de grade de dentro.
-            None => p.fill(Rect::new(rect.x0, rect.y0, rect.x1 - px, rect.y1 - px), &clip, WHITE),
+            None => p.fill(Rect::new(rect.x0, rect.y0, rect.x1 - px, rect.y1 - px), &clip, th.paper),
         }
         if let Some(bar) = fx.and_then(|f| f.bar) {
-            data_bar(p, Rect::new(rect.x0, rect.y0, rect.x1 - px, rect.y1 - px), &bar, px, &clip);
+            data_bar(p, Rect::new(rect.x0, rect.y0, rect.x1 - px, rect.y1 - px), &bar, px, &clip, fill, th);
         }
     }
 
@@ -851,7 +844,7 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
         for &(r, c) in cx.hits[a..].iter().take_while(|h| h.0 <= r_last) {
             if let (Some(ri), Some(ci)) = (ri_of(r), ci_of(c)) {
                 let (rs, cs) = (rows[ri], cols[ci]);
-                p.fill(Rect::new(cs.a, rs.a, cs.b - px, rs.b - px), &clip, HIT_FILL);
+                p.fill(Rect::new(cs.a, rs.a, cs.b - px, rs.b - px), &clip, th.hit_fill);
             }
         }
     }
@@ -880,7 +873,9 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
                     _ => r.i == m.last_row,
                 },
             };
-            let [left, right, top, bottom] = edges;
+            let bg = cell_fill(look, fx_at(ri, ci).as_ref());
+            let shown = |e: Edge| Edge { color: th.line_on(e.color, bg), ..e };
+            let [left, right, top, bottom] = edges.map(|e| e.map(shown));
             if let Some(e) = left.filter(|_| on(0)) {
                 edge(p, &clip, false, c.a - px, r.a - px, r.b, e, px, g);
             }
@@ -1022,12 +1017,12 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
                 Rect::new(active.x1, active.y0, sel.x1, active.y1),
             ];
             for part in parts {
-                p.fill(part.intersect(&sel), &clip, SEL_FILL);
+                p.fill(part.intersect(&sel), &clip, th.sel_fill);
             }
-            p.stroke(sel.inset(-px), &clip, px, ACCENT);
+            p.stroke(sel.inset(-px), &clip, px, th.selection);
         }
         let b = (2.0 * cx.px).max(2.0);
-        p.stroke(Rect::new(active.x0 - px, active.y0 - px, active.x1, active.y1), &clip, b, ACCENT);
+        p.stroke(Rect::new(active.x0 - px, active.y0 - px, active.x1, active.y1), &clip, b, th.selection);
     }
 }
 
@@ -1104,12 +1099,14 @@ fn draw_cell_text(
     let mut style = cx.font(look);
     let pad = cx.pad;
     let px = cx.px;
+    let th = cx.th;
     let mut color = shown.color.unwrap_or(look.color);
     let mut cell = cell;
     let font = cx.looks.fonts.get(look.font as usize);
     let (mut underline, mut strike) = (font.is_some_and(|f| f.underline), font.is_some_and(|f| f.strike));
+    let bg = cell_fill(look, fx);
+    color = th.ink(fx.and_then(|f| f.color).unwrap_or(color), bg);
     if let Some(fx) = fx {
-        color = fx.color.unwrap_or(color);
         underline = fx.underline.unwrap_or(underline);
         strike = fx.strike.unwrap_or(strike);
         if let Some(f) = font
@@ -1138,7 +1135,7 @@ fn draw_cell_text(
                 _ => (cell.y0 + cell.y1 - px - side) / 2.0,
             };
             let clip = Rect::new(cell.x0, cell.y0, cell.x1 - px, cell.y1 - px).intersect(&q.rect);
-            crate::cficon::draw(p, ic, x.round(), y.round(), side, &clip);
+            crate::cficon::draw(p, ic, x.round(), y.round(), side, &clip, th, bg);
             cell.x0 += side + pad;
         }
         if fx.hide {
@@ -1228,7 +1225,7 @@ fn draw_cell_text(
         _ => None,
     };
     let segs = match rich {
-        Some(runs) => rich_segs(p, cx, look, &base, runs, buf.len()),
+        Some(runs) => rich_segs(p, cx, look, &base, runs, buf.len(), bg),
         None => vec![base.clone()],
     };
 
@@ -1368,7 +1365,7 @@ fn draw_cell_text(
         span.x0 = cell.x0 - gained;
         // Apaga as linhas de grade verticais por baixo do texto.
         if v.grid && (span.x0 < cell.x0 || span.x1 > cell.x1) {
-            let bg = look.fill.unwrap_or(WHITE);
+            let bg = th.fill(look.fill.unwrap_or(WHITE));
             for s in cols.iter() {
                 let line = s.b;
                 if line > span.x0 + 0.5
@@ -1399,33 +1396,38 @@ fn draw_cell_text(
     }
 }
 
-/// Barra de dados numa célula.
-fn data_bar(p: &mut Painter, cell: Rect, b: &BarFx, px: f32, clip: &Rect) {
+/// Barra de dados numa célula (`fill` = o preenchimento dela no arquivo).
+#[allow(clippy::too_many_arguments)]
+fn data_bar(p: &mut Painter, cell: Rect, b: &BarFx, px: f32, clip: &Rect, fill: Option<Rgba>, th: &Theme) {
     let inset = (2.0 * px).max(1.0);
     let (x0, w) = (cell.x0 + px, cell.w() - 2.0 * px);
     let at = |f: f32| (x0 + w * f).round();
     let r = Rect::new(at(b.from.min(b.to)), cell.y0 + inset, at(b.from.max(b.to)), cell.y1 - inset);
+    let color = th.fill(b.color);
     if b.gradient {
-        // Da cor cheia até quase branco, em faixas verticais.
+        // Da cor cheia até quase branco (no escuro, quase o fundo da célula),
+        // em faixas verticais.
+        let end = if th.dark { th.fill(fill.unwrap_or(WHITE)) } else { WHITE };
         let steps = ((r.w() / (2.0 * px)).ceil() as usize).clamp(1, 48);
         for k in 0..steps {
             let (t0, t1) = (k as f32 / steps as f32, (k + 1) as f32 / steps as f32);
             let t = (t0 + t1) / 2.0 * 0.85;
             let t = if b.from > b.to { 0.85 - t } else { t };
-            let c = |v: u8| (v as f32 + (255.0 - v as f32) * t).round() as u8;
+            let c = |k: usize| (color[k] as f32 + (end[k] as f32 - color[k] as f32) * t).round() as u8;
             let part = Rect::new((r.x0 + r.w() * t0).round(), r.y0, (r.x0 + r.w() * t1).round(), r.y1);
-            p.fill(part, clip, [c(b.color[0]), c(b.color[1]), c(b.color[2]), 255]);
+            p.fill(part, clip, [c(0), c(1), c(2), 255]);
         }
     } else {
-        p.fill(r, clip, b.color);
+        p.fill(r, clip, color);
     }
     if let Some(c) = b.border
         && r.w() > 0.0
     {
-        p.stroke(r, clip, px, c);
+        p.stroke(r, clip, px, th.line_on(c, fill));
     }
     if let Some((x, c)) = b.axis {
         let x = at(x);
+        let c = th.line_on(c, fill);
         p.dashed(Rect::new(x, cell.y0, x + px, cell.y1), clip, c, 4.0 * px, 2.0 * px);
     }
 }
@@ -1444,7 +1446,15 @@ struct Seg {
 
 /// Trechos de um texto rico, com a fonte de cada um resolvida a partir da
 /// fonte da célula.
-fn rich_segs(p: &mut Painter, cx: &Ctx, look: &Look, base: &Seg, runs: &[RichRun], len: usize) -> Vec<Seg> {
+fn rich_segs(
+    p: &mut Painter,
+    cx: &Ctx,
+    look: &Look,
+    base: &Seg,
+    runs: &[RichRun],
+    len: usize,
+    bg: Option<Rgba>,
+) -> Vec<Seg> {
     let cell_font = cx.looks.fonts.get(look.font as usize);
     let mut out = Vec::with_capacity(runs.len());
     for (k, run) in runs.iter().enumerate() {
@@ -1467,7 +1477,7 @@ fn rich_segs(p: &mut Painter, cx: &Ctx, look: &Look, base: &Seg, runs: &[RichRun
         out.push(Seg {
             range: a..b,
             style,
-            color: f.color.and_then(|c| cx.styles.rgb(c)).map_or(base.color, duck_ui::rgb),
+            color: f.color.and_then(|c| cx.styles.rgb(c)).map_or(base.color, |c| cx.th.ink(rgb(c), bg)),
             underline: f.underline,
             strike: f.strike,
             rise: match f.script {
@@ -1568,6 +1578,7 @@ fn decorate(p: &mut Painter, cx: &Ctx, seg: &Seg, x: f32, y: f32, w: f32, lh: f3
 
 fn draw_headers(p: &mut Painter, cx: &Ctx, geom: &Geom, style: TextStyle, buf: &mut String) {
     let v = cx.view;
+    let th = cx.th;
     let px = cx.px;
     let (r0, c0, r1, c1) = v.sel();
     let all_rows = r0 == 0 && r1 == v.rows.len() - 1;
@@ -1576,7 +1587,7 @@ fn draw_headers(p: &mut Painter, cx: &Ctx, geom: &Geom, style: TextStyle, buf: &
 
     // Colunas: painel congelado e painel que rola.
     let ch = geom.colhdr;
-    p.fill(ch, &ch, HEADER_BG);
+    p.fill(ch, &ch, th.header_bg);
     for q in [&geom.quads[0], &geom.quads[1]] {
         let strip = Rect::new(q.rect.x0, ch.y0, q.rect.x1, ch.y1);
         if strip.is_empty() {
@@ -1586,21 +1597,21 @@ fn draw_headers(p: &mut Painter, cx: &Ctx, geom: &Geom, style: TextStyle, buf: &
             let r = Rect::new(s.a, ch.y0, s.b, ch.y1);
             let selected = s.i >= c0 && s.i <= c1;
             if selected {
-                p.fill(r, &strip, if all_rows { HEADER_SEL_FULL } else { HEADER_SEL });
+                p.fill(r, &strip, if all_rows { th.header_full } else { th.header_sel });
             }
             buf.clear();
             col_name(s.i, buf);
-            let color = if selected && all_rows { WHITE } else { HEADER_TEXT };
+            let color = if selected && all_rows { th.header_full_text } else { th.header_text };
             let y = (ch.y0 + (ch.h() - lh) / 2.0).floor();
             p.text_aligned(buf, style, s.a, s.b, y, Align::Center, &strip.intersect(&r), color);
-            p.fill(Rect::new(s.b - px, ch.y0, s.b, ch.y1), &strip, HEADER_LINE);
+            p.fill(Rect::new(s.b - px, ch.y0, s.b, ch.y1), &strip, th.header_line);
         }
     }
-    p.fill(Rect::new(ch.x0, ch.y1 - px, ch.x1, ch.y1), &ch, HEADER_LINE);
+    p.fill(Rect::new(ch.x0, ch.y1 - px, ch.x1, ch.y1), &ch, th.header_line);
 
     // Linhas.
     let rh = geom.rowhdr;
-    p.fill(rh, &rh, HEADER_BG);
+    p.fill(rh, &rh, th.header_bg);
     for q in [&geom.quads[0], &geom.quads[2]] {
         let strip = Rect::new(rh.x0, q.rect.y0, rh.x1, q.rect.y1);
         if strip.is_empty() {
@@ -1610,46 +1621,52 @@ fn draw_headers(p: &mut Painter, cx: &Ctx, geom: &Geom, style: TextStyle, buf: &
             let r = Rect::new(rh.x0, s.a, rh.x1, s.b);
             let selected = s.i >= r0 && s.i <= r1;
             if selected {
-                p.fill(r, &strip, if all_cols { HEADER_SEL_FULL } else { HEADER_SEL });
+                p.fill(r, &strip, if all_cols { th.header_full } else { th.header_sel });
             }
             buf.clear();
             let _ = write!(buf, "{}", s.i + 1);
-            let color = if selected && all_cols { WHITE } else { HEADER_TEXT };
+            let color = if selected && all_cols { th.header_full_text } else { th.header_text };
             let y = (s.a + (s.b - s.a - lh) / 2.0).floor();
             p.text_aligned(buf, style, rh.x0, rh.x1, y, Align::Center, &strip.intersect(&r), color);
-            p.fill(Rect::new(rh.x0, s.b - px, rh.x1, s.b), &strip, HEADER_LINE);
+            p.fill(Rect::new(rh.x0, s.b - px, rh.x1, s.b), &strip, th.header_line);
         }
     }
-    p.fill(Rect::new(rh.x1 - px, rh.y0, rh.x1, rh.y1), &rh, HEADER_LINE);
+    p.fill(Rect::new(rh.x1 - px, rh.y0, rh.x1, rh.y1), &rh, th.header_line);
     // Canto.
     let corner = geom.corner;
-    p.fill(corner, &corner, HEADER_BG);
-    crate::outline::draw(p, geom, v, style);
-    p.fill(Rect::new(corner.x1 - px, corner.y0, corner.x1, corner.y1), &corner, HEADER_LINE);
-    p.fill(Rect::new(corner.x0, corner.y1 - px, corner.x1, corner.y1), &corner, HEADER_LINE);
+    p.fill(corner, &corner, th.header_bg);
+    crate::outline::draw(p, geom, v, style, th);
+    p.fill(Rect::new(corner.x1 - px, corner.y0, corner.x1, corner.y1), &corner, th.header_line);
+    p.fill(Rect::new(corner.x0, corner.y1 - px, corner.x1, corner.y1), &corner, th.header_line);
 }
 
-fn draw_scrollbars(p: &mut Painter, vthumb: (f32, f32), g: &Geom, drag: Option<crate::app::Drag>) {
+fn draw_scrollbars(
+    p: &mut Painter,
+    vthumb: (f32, f32),
+    g: &Geom,
+    drag: Option<crate::app::Drag>,
+    th: &Theme,
+) {
     let vs = g.vscroll;
-    p.fill(vs, &vs, TRACK);
+    p.fill(vs, &vs, th.track);
     let inset = (3.0 * g.s).round();
     let active = matches!(drag, Some(crate::app::Drag::VThumb { .. }));
     p.fill(
         Rect::new(vs.x0 + inset, vthumb.0, vs.x1 - inset, vthumb.0 + vthumb.1),
         &vs,
-        if active { THUMB_ACTIVE } else { THUMB },
+        if active { th.thumb_active } else { th.thumb },
     );
 }
 
-fn draw_hscroll(p: &mut Painter, hthumb: (f32, f32), g: &Geom, drag: Option<crate::app::Drag>) {
+fn draw_hscroll(p: &mut Painter, hthumb: (f32, f32), g: &Geom, drag: Option<crate::app::Drag>, th: &Theme) {
     let hs = g.hscroll;
-    p.fill(hs, &hs, TRACK);
+    p.fill(hs, &hs, th.track);
     let inset = (3.0 * g.s).round();
     let active = matches!(drag, Some(crate::app::Drag::HThumb { .. }));
     p.fill(
         Rect::new(hthumb.0, hs.y0 + inset, hthumb.0 + hthumb.1, hs.y1 - inset),
         &hs,
-        if active { THUMB_ACTIVE } else { THUMB },
+        if active { th.thumb_active } else { th.thumb },
     );
 }
 

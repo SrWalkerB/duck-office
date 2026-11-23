@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 
 use duck_core::{AutoFilter, CellRange, Command, FilterColumn, FilterKind, Sheet, StringTable, Value};
 use duck_text::TextStyle;
-use duck_ui::{Align, InputColors, Painter, Rect, TextInput};
+use duck_ui::{Align, Painter, Rect, TextInput};
 use rayon::prelude::*;
 
 use crate::app::{Geom, SheetsApp, View};
@@ -272,19 +272,15 @@ impl Panel {
         g: &Geom,
         ui: TextStyle,
         mouse: (f32, f32),
-        th: &crate::ribbon::Theme,
+        th: &crate::theme::Theme,
     ) {
         let s = g.s;
         let px = s.round().max(1.0);
         let all = Rect::everything();
         let r = self.rect;
-        p.fill(
-            Rect::new(r.x0 + 2.0 * s, r.y0 + 2.0 * s, r.x1 + 3.0 * s, r.y1 + 3.0 * s),
-            &all,
-            [0, 0, 0, 30],
-        );
+        p.fill(Rect::new(r.x0 + 2.0 * s, r.y0 + 2.0 * s, r.x1 + 3.0 * s, r.y1 + 3.0 * s), &all, th.shadow);
         p.fill(r.inset(-px), &all, th.line);
-        p.fill(r, &all, [255, 255, 255, 255]);
+        p.fill(r, &all, th.menu);
         let a = self.areas(s);
         for (rect, label) in [(a.sort_asc, "Classificar de A a Z"), (a.sort_desc, "Classificar de Z a A")] {
             if rect.contains(mouse.0, mouse.1) {
@@ -294,7 +290,7 @@ impl Panel {
         }
         let sep = (a.sort_desc.y1 + 4.0 * s).round();
         p.fill(Rect::new(r.x0 + 8.0 * s, sep, r.x1 - 8.0 * s, sep + px), &all, th.line);
-        self.search.draw(p, a.search, ui, 6.0 * s, true, &InputColors::default(), "Buscar");
+        self.search.draw(p, a.search, ui, 6.0 * s, true, &th.input, "Buscar");
         p.stroke(a.list, &all, px, th.line);
         let vis = self.visible();
         for (k, x) in vis.iter().enumerate().skip(self.scroll).take(LIST_ROWS) {
@@ -312,15 +308,15 @@ impl Panel {
                 _ => (self.is_checked(*x), false),
             };
             let bx = Rect::new(row.x0 + 6.0 * s, row.y0 + 5.0 * s, row.x0 + 20.0 * s, row.y0 + 19.0 * s);
-            p.fill(bx, &a.list, if on { th.accent } else { [255, 255, 255, 255] });
+            p.fill(bx, &a.list, if on { th.accent } else { th.field });
             p.stroke(bx, &a.list, px, if on { th.accent } else { th.muted });
             if on {
                 // Marca: um traço só, dobrado em (6, 10) (três vértices por
                 // lado, em quina), para os dois braços se encontrarem.
                 let at = |x: f32, y: f32| [bx.x0 + x * s, bx.y0 + y * s];
-                let white = [255, 255, 255, 255];
-                p.polygon(&[at(2.6, 7.2), at(3.8, 6.0), at(6.0, 8.2), at(6.0, 10.6)], &a.list, white);
-                p.polygon(&[at(6.0, 8.2), at(10.4, 3.8), at(11.6, 5.0), at(6.0, 10.6)], &a.list, white);
+                let mark = th.on_accent;
+                p.polygon(&[at(2.6, 7.2), at(3.8, 6.0), at(6.0, 8.2), at(6.0, 10.6)], &a.list, mark);
+                p.polygon(&[at(6.0, 8.2), at(10.4, 3.8), at(11.6, 5.0), at(6.0, 10.6)], &a.list, mark);
             } else if partial {
                 p.fill(bx.inset(3.0 * s), &a.list, th.accent);
             }
@@ -344,16 +340,9 @@ impl Panel {
             );
         }
         for (rect, label, primary) in [(a.ok, "OK", true), (a.cancel, "Cancelar", false)] {
-            p.fill(rect, &all, if primary { th.accent } else { [255, 255, 255, 255] });
+            p.fill(rect, &all, if primary { th.accent } else { th.menu });
             p.stroke(rect, &all, px, if primary { th.accent } else { th.line });
-            p.label(
-                label,
-                ui,
-                rect,
-                Align::Center,
-                0.0,
-                if primary { [255, 255, 255, 255] } else { th.text },
-            );
+            p.label(label, ui, rect, Align::Center, 0.0, if primary { th.on_accent } else { th.text });
         }
     }
 }
@@ -403,7 +392,7 @@ impl SheetsApp {
 }
 
 /// Desenha os botões de filtro (ver [`SheetsApp::filter_buttons`]).
-pub fn draw_buttons(p: &mut Painter, g: &Geom, buttons: &[(Rect, Active, u32)], th: &crate::ribbon::Theme) {
+pub fn draw_buttons(p: &mut Painter, g: &Geom, buttons: &[(Rect, Active, u32)], th: &crate::theme::Theme) {
     {
         let s = g.g;
         let px = g.s.round().max(1.0);
@@ -411,9 +400,9 @@ pub fn draw_buttons(p: &mut Painter, g: &Geom, buttons: &[(Rect, Active, u32)], 
             let (b, c) = (*b, *c);
             let clip = g.grid;
             let filtered = f.filter.columns.iter().any(|x| f.filter.range.first_col + x.col == c);
-            p.fill(b, &clip, if filtered { th.accent } else { [255, 255, 255, 255] });
+            p.fill(b, &clip, if filtered { th.accent } else { th.field });
             p.stroke(b, &clip, px, if filtered { th.accent } else { th.muted });
-            let fg = if filtered { [255, 255, 255, 255] } else { th.text };
+            let fg = if filtered { th.on_accent } else { th.text };
             let (cx, cy) = ((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0);
             for i in 0..3 {
                 let w = (6.0 - 2.0 * i as f32) * s;

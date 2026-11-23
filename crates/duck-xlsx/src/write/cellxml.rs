@@ -224,11 +224,29 @@ pub fn write_cell_with(
             escape_text(s, out);
             out.extend_from_slice(b"</v>");
         }
-        Value::Text(s) => {
-            out.extend_from_slice(b"<is><t xml:space=\"preserve\">");
-            escape_text(s, out);
-            out.extend_from_slice(b"</t></is>");
-        }
+        Value::Text(s) => match sheet.rich_at(row, col, shared) {
+            // Um `<r>` por trecho; sem fonte própria, vale a da célula.
+            Some(runs) => {
+                out.extend_from_slice(b"<is>");
+                for (k, r) in runs.iter().enumerate() {
+                    let end = runs.get(k + 1).map_or(s.len(), |n| n.start as usize);
+                    let Some(text) = s.get(r.start as usize..end).filter(|t| !t.is_empty()) else { continue };
+                    out.extend_from_slice(b"<r>");
+                    if let Some(f) = &r.font {
+                        super::styles::run_xml(f, out);
+                    }
+                    out.extend_from_slice(b"<t xml:space=\"preserve\">");
+                    escape_text(text, out);
+                    out.extend_from_slice(b"</t></r>");
+                }
+                out.extend_from_slice(b"</is>");
+            }
+            None => {
+                out.extend_from_slice(b"<is><t xml:space=\"preserve\">");
+                escape_text(s, out);
+                out.extend_from_slice(b"</t></is>");
+            }
+        },
         Value::Bool(b) => out.extend_from_slice(if b { b"<v>1</v>" } else { b"<v>0</v>" }),
         Value::Error(e) => {
             out.extend_from_slice(b"<v>");

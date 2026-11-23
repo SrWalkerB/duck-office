@@ -21,6 +21,7 @@
 - [ADR-012 · Escalar com o hardware: paralelismo e SIMD](#adr-012--escalar-com-o-hardware-paralelismo-e-simd)
 - [ADR-013 · Formato de arquivo nativo (futuro, em discussão)](#adr-013--formato-de-arquivo-nativo-futuro-em-discussão)
 - [ADR-014 · Salvar por remendo, com conferência](#adr-014--salvar-por-remendo-com-conferência)
+- [ADR-015 · Tema escuro: a tela muda, o arquivo não](#adr-015--tema-escuro-a-tela-muda-o-arquivo-não)
 - [Roadmap](#roadmap)
 - [Questões em aberto](#questões-em-aberto)
 
@@ -497,6 +498,32 @@ Tendência inicial: **container próprio com codificação de colunas inspirada 
 
 ---
 
+## ADR-015 · Tema escuro: a tela muda, o arquivo não
+
+**Contexto.** O modo escuro da interface é só trocar cores. A área das células é outra coisa: quase tudo nela vem do arquivo (preenchimentos, fontes, bordas, formatação condicional, gráficos), foi escolhido contra um fundo branco e não pode mudar ao salvar.
+
+**Decisão.**
+
+- **Um tema só** (`apps/duck-sheets/src/theme.rs`): a struct `Theme`, com uma paleta clara e uma escura, tem todas as cores da interface. O `duck-ui` não tem mais cores padrão: os campos e as abas recebem as do tema. Um teste confere o contraste (4,5:1) dos pares texto/fundo nas duas paletas.
+- **A planilha escurece junto**, com as cores do arquivo adaptadas **na hora de desenhar**. Os estilos resolvidos (`Looks`), o modelo, o clipboard, a busca e o gravador continuam com as originais: o mesmo arquivo editado e salvo nos dois temas sai idêntico, byte a byte.
+- **Fundos**: os claros viram escuros do mesmo matiz (em OKLab, branco = fundo da planilha); os escuros e os vivos (amarelo, laranja) ficam como estão.
+- **Textos**: a cor do arquivo fica se contrasta 4,5:1 com o fundo mostrado; senão a claridade muda, no mesmo matiz, até chegar lá. É o que garante a leitura em qualquer combinação. Texto da cor do próprio fundo (escondido de propósito) continua escondido.
+- **Linhas**: as que apareciam continuam aparecendo (até 3:1), e as discretas continuam discretas.
+- **Objetos** (gráficos, formas, segmentações, controles): as mesmas regras, aplicadas às instâncias que cada um acabou de desenhar. O fundo de um texto é o último retângulo ou triângulo embaixo dele; o das linhas e das outras partes, o fundo do objeto (uma linha de gráfico não muda de cor ao cruzar uma barra). Assim `chart.rs` e `shape.rs` não sabem de tema. Imagens não mudam.
+- As contas ficam num cache por (cor, fundo): no escuro a montagem do frame custa de 2% a 5% a mais.
+- **Sistema**: `duck-platform` expõe o esquema de cores (`Window::color_scheme`, `set_color_scheme` para a barra de título) e o evento `SchemeChanged`. No Windows e no macOS a troca chega com a janela aberta; onde o sistema não informa, vale o claro. As caixas nativas (abrir, salvar, perguntas) seguem o sistema.
+- A escolha (aba Exibir) vai para `preferencias.txt`, ao lado dos recentes. `--screenshot` e `--bench` sem `--tema` usam sempre o claro, para não depender da preferência de quem roda.
+
+**Alternativas rejeitadas.**
+
+- *Deixar a planilha branca* (como o Excel fez por anos): só a moldura escurece, e o que ocupa a tela continua claro.
+- *Inverter tudo*: gráficos e cabeçalhos coloridos perdem a identidade, e texto branco sobre azul vira preto sobre azul.
+- *Manter os preenchimentos como estão*: planilhas com fundo branco pintado (comuns) ficariam claras no meio do escuro.
+
+**Consequências.** No tema escuro a cor na tela não é a do arquivo: quem está escolhendo cores para imprimir ou mandar a alguém confere no claro (um clique na aba Exibir). A paleta de cores do menu mostra as originais.
+
+---
+
 ## Roadmap
 
 | Fase | Entrega | Critério de pronto |
@@ -839,6 +866,7 @@ As diferenças encontradas pela conferência e corrigidas mostram o tipo de comp
 ### Status da F5 (22/11/2026): gráficos e segmentações de dados na tela
 
 - **Leitura** (`duck-xlsx/src/drawing.rs`): `xl/drawings/drawingN.xml` de cada aba, com âncoras de duas células, de uma célula e absolutas. Os elementos são percorridos como árvore (filhos diretos com aninhamento, porque grupos ficam dentro de grupos com o mesmo nome de tag); `mc:AlternateContent` usa o `mc:Choice`. Grupos guardam a posição dos filhos num espaço próprio (`chOff`/`chExt`): as transformações são compostas até o elemento de cima, e cada objeto fica com a fração da âncora que ocupa.
+- **Prefixos** (`duck-xlsx/src/ns.rs`): os leitores procuram os nomes que o Excel grava (`xdr:`, `c:`, `a:`...). Desenhos e gráficos com outros prefixos (namespace padrão do openpyxl, `ns0:`) são convertidos antes, resolvendo os namespaces; quem já usa os de costume passa sem cópia. O gravador remenda o original e mantém os prefixos dele.
 - **Modelo** (`duck-core/src/drawing.rs`): `Object { anchor, frac, kind }` em `Layout::objects`. Gráfico = plots (tipo, agrupamento, eixo secundário, rótulos) com séries (fórmulas das referências, valores e categorias em cache, cores, linha, rótulos); cores do tema guardadas com os ajustes (`lumMod`, `lumOff`, `shade`, `tint`) e resolvidas no desenho.
 - **Segmentações**: os caches (`xl/slicerCaches/`) são lidos uma vez por arquivo. Os de tabela dinâmica trazem os itens (índices nos `sharedItems` do cache da tabela dinâmica, ligados pelo `pivotCacheId` do `x14:pivotCacheDefinition`) e a seleção; os de tabela do Excel apontam para (tabela, coluna) e os itens são calculados no app, em paralelo, com o texto que a célula mostra e a marca do filtro da tabela.
 - **Desenho** (`apps/duck-sheets/src/chart.rs`): a âncora vira pixels pelas larguras e alturas da visão (acompanha zoom, rolagem e painéis congelados; cada painel recorta os seus). O `duck-gfx` ganhou um tipo de instância triângulo; o `Painter` recorta triângulos na CPU (Sutherland–Hodgman) e monta linhas grossas, polígonos e fatias de pizza com eles. Escala "bonita" do eixo (1, 2, 2,5, 5 × 10ⁿ), largura das barras pela regra do Excel (`gapWidth`, `overlap`), propriedades de texto (`c:txPr`: tamanho, negrito, cor — eixos com texto branco ficam escondidos, como no arquivo).
@@ -882,6 +910,22 @@ Conferência: 38 de 38 dinâmicas com registros idênticas ao Excel; 100% das f�
 - **Regressão** (`duck-bench regress`): as métricas acima, por arquivo, contra uma linha de base. A das planilhas reais fica fora do git e não guarda nomes nem conteúdo; a da vitrine (`scripts/bench/vitrine.txt`) roda no CI.
 
 Conferência: 74 de 74 séries de gráficos iguais, 38 de 38 dinâmicas com registros idênticas, 28 de 34 do modelo idênticas (13.129 de 13.144 valores), 100% das fórmulas, 6 de 6 macros da planilha maior e round-trip em todos os modos. Os arquivos salvos são conferidos pelo nosso leitor e pelo calamine; não foram abertos no Excel.
+
+### Status de 23/11/2026: autocompletar fórmulas e modo escuro
+
+- **Tabela de funções** (`duck-calc/src/funcs.rs`): cada `FnDef` ganhou os argumentos em português (`teste_lógico; [valor_se_verdadeiro]; …`) e uma linha de descrição. É a única lista: o autocompletar mostra o que está nela e não é opaco. Um teste confere, para cada função, que obrigatórios e opcionais batem com o mínimo e o máximo que o motor aceita.
+- **Análise** (`apps/duck-sheets/src/complete.rs`): uma passada pelo texto até o cursor acha o trecho digitado e a função em volta, pulando textos entre aspas, nomes de aba, `Tabela[...]`, matrizes e erros. Sem montar a fórmula: funciona com ela pela metade. Os nomes e tabelas do arquivo são reunidos uma vez por edição.
+- **Ordem**: primeiro o que começa com o texto; depois o que começa numa parte do nome (`vazio` acha CONTAR.VAZIO), sem o ponto (`contse`), pelo nome em inglês (`vlook` acha PROCV) e o que contém. Uma referência como `B2` só vira sugestão se um nome começa assim.
+- **Teclado**: a lista só toma setas, Tab, Esc e PageUp/PageDown enquanto está aberta. Esc fecha até a próxima palavra; mover o cursor também fecha. Com F2, ela só abre quando se digita.
+- **Com só o `=`**, nada de lista, como no Excel: a lista cheia taparia as células e prenderia as setas, que nessa hora confirmam e andam. Em vez dela, uma dica de uma linha, que diz que as sugestões existem.
+- **Lugar**: embaixo do editor, ou em cima se não couber; a lista perde linhas antes de sair da janela (testado com janelas pequenas).
+- **Referências por clique** (`pointing.rs`): a mesma análise do texto diz se cabe uma referência no cursor; se não cabe, o clique confirma a edição, como antes. A recém-apontada fica guardada no editor (trecho, aba, âncora): o próximo clique, arraste ou seta reescreve esse trecho, e qualquer tecla que mexe no texto a fixa. As setas apontam quando a fórmula foi começada digitando ou logo depois de um clique; F2 alterna com andar no texto.
+- **Outra aba**: o editor lembra a aba da célula; trocar de aba só muda o que está à vista (o editor continua na barra de fórmulas), e confirmar ou cancelar volta. Um clique que confirma estando em outra aba só confirma: não vale na aba de origem, que tem outra geometria.
+- **Cores**: as referências são lidas do texto a cada frame (a mesma área tem a mesma cor) e desenhadas no texto (`TextInput::draw_spans`) e na grade; a apontada, tracejada. Nomes, tabelas e outros arquivos ficam sem cor.
+- **Parênteses**: ao confirmar, os que faltam no fim são fechados se a fórmula termina num valor e, com mais de um aberto, cada função fica com uma quantidade de argumentos que ela aceita.
+- **Modo escuro**: ADR-015.
+
+Conferido na vitrine, nos dois temas: células, formatação condicional, gráficos, formas, menus, paleta, filtro, busca, lista, assinatura e referências apontadas. Os cliques passam pelo mesmo código do mouse (`--digitar` com `--save-to`, lendo a fórmula gravada). O tema claro sai igual, pixel a pixel, ao de antes da mudança.
 
 ### Funções e LAMBDA (23/11/2026)
 

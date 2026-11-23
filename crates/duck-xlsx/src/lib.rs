@@ -17,6 +17,7 @@ pub mod cube;
 pub mod drawing;
 mod extras;
 pub mod filter;
+mod ns;
 mod package;
 mod parts;
 pub mod pivot;
@@ -35,7 +36,7 @@ use duck_par::InFlight;
 
 pub use package::Package;
 pub use sheet::SheetReport;
-pub use write::{SaveOptions, SaveReport, save_file};
+pub use write::{SaveOptions, SaveReport, TabOrigin, TabOut, TabPlan, save_file};
 
 #[derive(Debug)]
 pub enum Error {
@@ -123,10 +124,16 @@ impl LoadReport {
 pub type SheetResult = Result<(Sheet, SheetReport), Error>;
 
 /// Uma aba listada no workbook.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SheetInfo {
     pub name: String,
     pub hidden: bool,
+    /// Só o VBA reexibe (`veryHidden`).
+    pub very_hidden: bool,
+    /// Parte no pacote (`xl/worksheets/sheet1.xml`).
+    pub part: String,
+    /// `sheetId`.
+    pub id: u32,
     /// Tamanho do XML descompactado.
     pub xml_bytes: u64,
     /// A aba tem gráficos, imagens, tabelas ou tabelas dinâmicas (partes
@@ -159,6 +166,9 @@ impl Book {
             .map(|m| SheetInfo {
                 name: m.name.clone(),
                 hidden: m.hidden,
+                very_hidden: m.very_hidden,
+                part: m.path.clone(),
+                id: m.id,
                 xml_bytes: self.pkg.entry(&m.path).map(|e| e.size).unwrap_or(0),
                 objects: parts::sheet_objects(&self.pkg, &m.path),
             })

@@ -4,14 +4,11 @@
 use duck_core::outline::{Group, Outline};
 use duck_core::{Command, Sheet};
 use duck_text::TextStyle;
-use duck_ui::{Align, Painter, Rect, Rgba, rgb};
+use duck_ui::{Align, Painter, Rect};
 
 use crate::app::{Geom, View};
 
 const STEP: f32 = 14.0;
-const LINE: Rgba = rgb(0x7F7F7F);
-const BOX: Rgba = rgb(0xFFFFFF);
-const BG: Rgba = rgb(0xF3F4F6);
 
 /// Larguras das faixas (linhas, colunas) em pixels; 0 sem grupos.
 pub fn gutters(o: &Outline, s: f32) -> (f32, f32) {
@@ -139,7 +136,7 @@ pub fn hit(g: &Geom, v: &View, x: f32, y: f32) -> Option<Hit> {
     None
 }
 
-pub fn draw(p: &mut Painter, g: &Geom, v: &View, ui: TextStyle) {
+pub fn draw(p: &mut Painter, g: &Geom, v: &View, ui: TextStyle, th: &crate::theme::Theme) {
     let (px, all) = (g.s.round().max(1.0), Rect::everything());
     let small = ui.with_px((10.0 * g.s).round());
     for rows in [true, false] {
@@ -152,7 +149,7 @@ pub fn draw(p: &mut Painter, g: &Geom, v: &View, ui: TextStyle) {
         } else {
             Rect::new(0.0, g.fbar.y1, g.grid.x1, g.colhdr.y0)
         };
-        p.fill(area, &all, BG);
+        p.fill(area, &all, th.outline_bg);
         for gr in st.groups() {
             let closed = st.collapsed(gr);
             let lane = st.lane(gr.level);
@@ -177,27 +174,27 @@ pub fn draw(p: &mut Painter, g: &Geom, v: &View, ui: TextStyle) {
                             Rect::new(p0 + 2.0 * px, lane, p0 + 3.0 * px, lane + 5.0 * g.s),
                         )
                     };
-                    p.fill(bar, &all, LINE);
+                    p.fill(bar, &all, th.outline_line);
                     if f == gr.first {
-                        p.fill(tick, &all, LINE);
+                        p.fill(tick, &all, th.outline_line);
                     }
                 }
             }
             if let Some(b) = st.button(gr) {
-                p.fill(b, &all, BOX);
-                p.stroke(b, &all, px, LINE);
+                p.fill(b, &all, th.outline_box);
+                p.stroke(b, &all, px, th.outline_line);
                 let (cx, cy) = (((b.x0 + b.x1) / 2.0).floor(), ((b.y0 + b.y1) / 2.0).floor());
                 let r = (2.5 * g.s).round();
-                p.fill(Rect::new(cx - r, cy, cx + r + px, cy + px), &all, LINE);
+                p.fill(Rect::new(cx - r, cy, cx + r + px, cy + px), &all, th.outline_line);
                 if closed {
-                    p.fill(Rect::new(cx, cy - r, cx + px, cy + r + px), &all, LINE);
+                    p.fill(Rect::new(cx, cy - r, cx + px, cy + r + px), &all, th.outline_line);
                 }
             }
         }
         for (l, b) in st.levels() {
-            p.fill(b, &all, BOX);
-            p.stroke(b, &all, px, LINE);
-            p.label(&l.to_string(), small, b, Align::Center, 0.0, rgb(0x404040));
+            p.fill(b, &all, th.outline_box);
+            p.stroke(b, &all, px, th.outline_line);
+            p.label(&l.to_string(), small, b, Align::Center, 0.0, th.outline_text);
         }
     }
 }

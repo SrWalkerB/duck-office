@@ -3,6 +3,8 @@
 
 use duck_ui::{Painter, Rect, Rgba};
 
+use crate::theme::Theme;
+
 const RED: Rgba = [0xE0, 0x44, 0x3E, 255];
 const YELLOW: Rgba = [0xF1, 0xC2, 0x32, 255];
 const GREEN: Rgba = [0x3E, 0x9B, 0x3E, 255];
@@ -90,11 +92,16 @@ pub fn icon(set: &str, idx: usize, n: usize) -> Icon {
     Icon { shape, color }
 }
 
-/// Desenha o ícone num quadrado de lado `s` com canto em (x, y).
-pub fn draw(p: &mut Painter, ic: Icon, x: f32, y: f32, s: f32, clip: &Rect) {
+/// Desenha o ícone num quadrado de lado `s` com canto em (x, y), numa célula
+/// com o preenchimento `fill` (do arquivo).
+#[allow(clippy::too_many_arguments)]
+pub fn draw(p: &mut Painter, ic: Icon, x: f32, y: f32, s: f32, clip: &Rect, th: &Theme, fill: Option<Rgba>) {
+    // No escuro, as partes pretas e as cinzas (apagadas) mudam com o fundo.
+    let shade = |c: Rgba| th.line_on(c, fill);
+    let (light, gray) = (shade(LIGHT), shade(GRAY));
     let at = |u: f32, v: f32| [x + u * s, y + v * s];
     let poly = |pts: &[[f32; 2]]| pts.iter().map(|q| at(q[0], q[1])).collect::<Vec<_>>();
-    let c = ic.color;
+    let c = if matches!(ic.color, BLACK | GRAY | LIGHT) { shade(ic.color) } else { ic.color };
     let center = at(0.5, 0.5);
     let bar = |u0: f32, v0: f32, u1: f32, v1: f32| {
         let (a, b) = (at(u0, v0), at(u1, v1));
@@ -127,7 +134,7 @@ pub fn draw(p: &mut Painter, ic: Icon, x: f32, y: f32, s: f32, clip: &Rect) {
             p.shape(&poly(&[[0.5, 0.04], [0.96, 0.5], [0.5, 0.96], [0.04, 0.5]]), clip, c);
         }
         Shape::Flag => {
-            p.fill(bar(0.14, 0.06, 0.24, 0.96), clip, GRAY);
+            p.fill(bar(0.14, 0.06, 0.24, 0.96), clip, gray);
             p.shape(&poly(&[[0.24, 0.08], [0.94, 0.34], [0.24, 0.6]]), clip, c);
         }
         Shape::Check(round) => {
@@ -153,7 +160,7 @@ pub fn draw(p: &mut Painter, ic: Icon, x: f32, y: f32, s: f32, clip: &Rect) {
                     at(0.5 + r * sin, 0.53 - r * cos)
                 })
                 .collect();
-            p.shape(&pts, clip, if halves == 2 { c } else { LIGHT });
+            p.shape(&pts, clip, if halves == 2 { c } else { light });
             if halves == 1 {
                 // Metade esquerda: do topo (0) à ponta de baixo (5).
                 let left: Vec<[f32; 2]> = [0, 9, 8, 7, 6, 5].iter().map(|&k: &usize| pts[k]).collect();
@@ -163,7 +170,7 @@ pub fn draw(p: &mut Painter, ic: Icon, x: f32, y: f32, s: f32, clip: &Rect) {
         Shape::Pie(quarters) => {
             p.disc(center, s * 0.46, clip, c);
             if quarters < 4 {
-                p.disc(center, s * 0.38, clip, WHITE);
+                p.disc(center, s * 0.38, clip, th.fill(fill.unwrap_or(WHITE)));
                 // Fatia a partir do topo, no sentido horário.
                 let steps = quarters as usize * 6;
                 let mut pts = vec![center];
@@ -178,14 +185,14 @@ pub fn draw(p: &mut Painter, ic: Icon, x: f32, y: f32, s: f32, clip: &Rect) {
             for k in 0..4 {
                 let u = 0.06 + 0.23 * k as f32;
                 let top = 0.7 - 0.2 * k as f32;
-                p.fill(bar(u, top, u + 0.18, 0.94), clip, if k < full { c } else { LIGHT });
+                p.fill(bar(u, top, u + 0.18, 0.94), clip, if k < full { c } else { light });
             }
         }
         Shape::Boxes(full) => {
             // De baixo para cima, da esquerda para a direita.
             for k in 0..4u8 {
                 let (u, v) = (0.08 + 0.45 * (k % 2) as f32, 0.53 - 0.45 * (k / 2) as f32);
-                p.fill(bar(u, v, u + 0.39, v + 0.39), clip, if k < full { c } else { LIGHT });
+                p.fill(bar(u, v, u + 0.39, v + 0.39), clip, if k < full { c } else { light });
             }
         }
     }

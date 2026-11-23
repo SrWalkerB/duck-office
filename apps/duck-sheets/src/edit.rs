@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use duck_core::input::{Input, parse_input};
 use duck_core::{CellChange, CellValue, CfCtx, CfState, Command, Sheet, Value};
-use duck_platform::{Context, Key, Modifiers, SaveChoice};
+use duck_platform::{Clipboard, Context, Key, Modifiers, SaveChoice};
 use duck_ui::TextInput;
 
 use crate::app::{SheetsApp, Slot, col_px, row_px};
@@ -32,6 +32,13 @@ pub struct Editor {
     pub enter_mode: bool,
     /// O cursor está na barra de fórmulas (senão, na célula).
     pub in_bar: bool,
+    /// Aba da célula editada, e se outra está à vista (apontando lá).
+    pub sheet: usize,
+    pub away: bool,
+    /// Referência recém-apontada: o próximo clique ou seta a troca.
+    pub point: Option<crate::pointing::Point>,
+    /// Lista de sugestões e assinatura da função.
+    pub complete: crate::complete::State,
 }
 
 /// Salvamento em andamento.
@@ -473,18 +480,42 @@ impl SheetsApp {
         if let Some(f) = &mut self.find {
             f.focused = false;
         }
-        self.editor = Some(Editor { row, col, input, enter_mode, in_bar });
+        let sheet = self.doc.as_ref().map_or(0, |d| d.active);
+        self.editor = Some(Editor {
+            row,
+            col,
+            input,
+            enter_mode,
+            in_bar,
+            sheet,
+            away: false,
+            point: None,
+            complete: Default::default(),
+        });
+        // A lista só abre ao digitar; ao editar o que já existe, só a assinatura.
+        self.refresh_complete(initial.is_some());
     }
 
     pub fn cancel_edit(&mut self) {
-        self.editor = None;
+        if let Some(ed) = self.editor.take() {
+            self.back_home(&ed);
+        }
+    }
+
+    /// De volta para a aba da célula editada (depois de apontar em outra).
+    fn back_home(&mut self, ed: &Editor) {
+        if self.doc.as_ref().is_some_and(|d| d.active != ed.sheet) {
+            self.switch_sheet(ed.sheet);
+        }
     }
 
     /// Confirma o que foi digitado. `false` se não havia editor.
     pub fn commit_edit(&mut self) -> bool {
         let Some(ed) = self.editor.take() else { return false };
+        self.back_home(&ed);
         let (r, c) = (ed.row, ed.col);
-        let text = ed.input.text;
+        // Parênteses que faltam no fim (`=SOMA(B2:B10`).
+        let text = crate::pointing::close_parens(&ed.input.text).unwrap_or(ed.input.text);
         // Sem mudança (F2 e Enter sem mexer): nada a fazer.
         let mut before = String::new();
         self.formula_text_at(r, c, &mut before);
@@ -544,13 +575,40 @@ impl SheetsApp {
     /// Teclas com o editor aberto. `None` = sem editor (segue o fluxo normal).
     pub fn editor_key(
         &mut self,
-        cx: &mut Context,
+        clipboard: &mut Clipboard,
         key: &Key,
         mods: Modifiers,
         text: Option<&str>,
     ) -> Option<bool> {
-        let ed = self.editor.as_mut()?;
+        self.editor.as_ref()?;
+        if self.complete_key(key, mods) {
+            return Some(true);
+        }
         let shift = mods.shift;
+        let ctrl = mods.ctrl || mods.logo;
+        let arrow = match key {
+            Key::ArrowUp => (-1, 0),
+            Key::ArrowDown => (1, 0),
+            Key::ArrowLeft => (0, -1),
+            Key::ArrowRight => (0, 1),
+            _ => (0, 0),
+        };
+        if arrow != (0, 0) && !mods.alt && self.point_key(arrow.0, arrow.1, shift, ctrl) {
+            return Some(true);
+        }
+        // Ctrl+PageUp/PageDown: apontar em outra aba.
+        if ctrl && matches!(key, Key::PageUp | Key::PageDown) && self.can_point() {
+            self.cycle_sheet(*key == Key::PageDown);
+            return Some(true);
+        }
+        if *key == Key::F(4) && !ctrl && !mods.alt {
+            let ed = self.editor.as_mut()?;
+            if crate::pointing::cycle_in(ed) {
+                self.refresh_complete(false);
+            }
+            return Some(true);
+        }
+        let ed = self.editor.as_mut()?;
         let mv = |app: &mut Self, dr: i32, dc: i32| {
             app.commit_edit();
             app.move_cur(dr, dc, false, false);
@@ -563,9 +621,13 @@ impl SheetsApp {
             Key::ArrowDown if ed.enter_mode => mv(self, 1, 0),
             Key::ArrowLeft if ed.enter_mode => mv(self, 0, -1),
             Key::ArrowRight if ed.enter_mode => mv(self, 0, 1),
-            Key::F(2) => ed.enter_mode = !ed.enter_mode,
+            Key::F(2) => self.toggle_pointing(),
             _ => {
-                let r = ed.input.key(key, mods, text, cx.clipboard());
+                let r = ed.input.key(key, mods, text, clipboard);
+                if r.handled {
+                    ed.point = None;
+                    self.refresh_complete(r.changed);
+                }
                 return Some(r.handled || !(mods.ctrl || mods.logo));
             }
         }

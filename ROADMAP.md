@@ -197,6 +197,16 @@ Tudo o que as duas planilhas reais de teste usam, com os mesmos resultados do Ex
 - [x] **Regressão** (`duck-bench regress`): contagens, acertos, tempo e memória contra uma linha de base; no CI, com a vitrine.
 - [ ] Macros que excluem abas ou usam outros programas (PowerPoint, Outlook) param com um erro claro.
 
+## ✅ Depois da F6 · Conforto de uso
+
+- [x] **Autocompletar fórmulas** na célula e na barra: as funções que o motor calcula (a lista sai da tabela do `duck-calc`), nomes definidos, tabelas e colunas, sem diferenciar maiúsculas nem acentos; assinatura com o argumento atual em destaque; teclado e mouse.
+- [x] **Modo escuro**: tema claro, escuro ou o do sistema (aba Exibir), lembrado entre execuções e trocado com a janela aberta. A planilha escurece só na tela; o arquivo salvo é idêntico nos dois temas.
+- [x] **Referências por clique**: clicar, arrastar ou andar com as setas escreve a referência (células, colunas e linhas inteiras, outras abas); F4, cores no texto e na grade, e o parêntese que falta fechado ao confirmar.
+- [ ] Ctrl+clique para somar outra referência com `;`; arrastar o contorno colorido para mudar a referência; cores para nomes e tabelas.
+- [ ] Recusar (ou perguntar sobre) uma fórmula que não dá para ler, como `=SOMA(`: hoje ela é gravada como foi digitada.
+- [ ] Clicar ou arrastar dentro do texto do editor para mover o cursor e selecionar.
+- [ ] Tema do sistema no Linux onde o compositor não informa (X11): hoje "seguir o sistema" fica no claro.
+
 ## ⏳ F7+ · O resto da suíte
 
 - [ ] Formato de arquivo nativo (ADR-013, em discussão).
