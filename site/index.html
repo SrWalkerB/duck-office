@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>duck-sheets</title>
 <meta name="claude:viewport-fit-sides" content="cover">
-<meta name="description" content="O leitor de planilhas que abre arquivos gigantes num instante e nunca trava. Para Windows, Linux e macOS.">
+<meta name="description" content="O editor de planilhas que abre, calcula e salva arquivos gigantes num instante e nunca trava. Para Windows, Linux e macOS.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
@@ -109,7 +109,7 @@ body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-a
 .chrome i:nth-child(1) { background: #FF5F57; }
 .chrome i:nth-child(2) { background: #FEBC2E; }
 .chrome i:nth-child(3) { background: #28C840; }
-.chrome span { flex: 1; text-align: center; font-size: 13px; color: #4A4A4F; font-weight: 500; margin-right: 52px; }
+.chrome span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; font-size: 13px; color: #4A4A4F; font-weight: 500; margin-right: 52px; }
 
 /* Números */
 .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 40px; margin-top: 64px; }
@@ -213,7 +213,32 @@ kbd { font: 600 17px var(--sans); min-width: 44px; height: 44px; padding: 0 12px
 .grow-bar { transition: transform 1.4s cubic-bezier(.2,.7,.2,1); }
 .js .grow-bar:not(.in) { transform: scaleX(0.04); }
 .mem-fill.old { width: 100%; background: #B9B9BF; }
-.mem-fill.new { width: calc(517 / 954 * 100%); background: linear-gradient(90deg, #5B8CFF, #8F6BFF); }
+.mem-fill.new { width: calc(552 / 954 * 100%); background: linear-gradient(90deg, #5B8CFF, #8F6BFF); }
+
+/* Painéis, fórmulas e tabela de números */
+.feature .sub strong { color: var(--ink); }
+.fbar { margin: 52px auto 0; max-width: 760px; display: flex; align-items: center; gap: 14px; padding: 15px 20px; border-radius: 14px; background: #1C1C1E; box-shadow: inset 0 0 0 1px #2C2C2E; text-align: left; }
+.fbar i { color: var(--gray-dark); font-family: Georgia, serif; font-size: 18px; }
+.fbar code { font: 500 clamp(13px, 1.7vw, 17px) ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: 0; color: #E8E8ED; overflow-wrap: anywhere; }
+.fnames { margin-top: 52px !important; max-width: 46em; color: var(--gray-dark); font-size: 15px; line-height: 1.6; }
+.bench-wrap { margin: 48px auto 0; max-width: 860px; overflow-x: auto; border-radius: 22px; box-shadow: 0 0 0 1px var(--line); }
+.bench-wrap:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.bench { width: 100%; border-collapse: collapse; font-size: 16px; text-align: left; font-variant-numeric: tabular-nums; }
+.bench th, .bench td { padding: 12px 22px; }
+.bench tbody tr + tr { border-top: 1px solid #E8E8ED; }
+.bench th { font-weight: 500; color: var(--ink); }
+.bench td { text-align: right; font-weight: 600; white-space: nowrap; }
+.bench thead th { font-weight: 700; font-size: 18px; text-align: right; padding-top: 20px; white-space: nowrap; }
+.bench thead small { display: block; font-size: 13px; font-weight: 400; color: var(--gray); }
+.bench .g th { background: var(--snow); font-size: 13px; font-weight: 600; color: var(--gray); padding-block: 8px; }
+.bench sup { font-size: 0.65em; color: var(--gray); margin-left: 2px; }
+.band.snow .mem-track { background: var(--white); }
+.band.plain .platforms div { background: var(--snow); }
+.vba { font: 500 14px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: 0; color: #E8E8ED; }
+.vba b { color: #8FB0FF; font-weight: 600; }
+.paste.spill { grid-template-columns: repeat(4, 1fr); }
+.paste.spill span { text-align: center !important; padding: 6px 4px; border-radius: 8px; background: var(--white); box-shadow: 0 0 0 1px #C9D8FF; }
+.paste.spill .f { grid-column: 1 / -1; text-align: left !important; background: none; box-shadow: none; padding: 0; font-weight: 600; color: var(--blue); }
 
 /* Roteiro */
 .road { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; margin-top: 56px; list-style: none; padding: 0; }
@@ -303,6 +328,7 @@ footer .inner { display: flex; justify-content: space-between; gap: 12px; flex-w
 .js .rise:not(.in) { transform: translateY(36px); }
 
 @media (max-width: 900px) {
+  .nav nav { display: none; }
   .bento { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tile.s2, .tile.s3, .tile.s4 { grid-column: span 1; }
   .tile.wide-m { grid-column: span 2; }
@@ -319,6 +345,11 @@ footer .inner { display: flex; justify-content: space-between; gap: 12px; flex-w
   .steps div b { font-size: 18px; }
 }
 @media (max-width: 560px) {
+  .bench { font-size: 14px; }
+  .bench th, .bench td { padding: 10px 9px; }
+  .bench thead th { font-size: 15px; }
+  .bench thead small { white-space: normal; }
+  .paste.spill { grid-template-columns: repeat(2, 1fr); }
   .bento, .road, .platforms { grid-template-columns: minmax(0, 1fr); }
   .tile.wide-m { grid-column: span 1; }
   .mem-row { grid-template-columns: minmax(0, 1fr); gap: 8px; }
@@ -358,8 +389,9 @@ footer .inner { display: flex; justify-content: space-between; gap: 12px; flex-w
     <nav aria-label="Seções">
       <a href="#comparativo">Comparativo</a>
       <a href="#excel">Igual ao Excel</a>
-      <a href="#busca">Busca</a>
-      <a href="#mais">Recursos</a>
+      <a href="#paineis">Painéis</a>
+      <a href="#formulas">Fórmulas</a>
+      <a href="#numeros">Números</a>
       <a href="#aberto">Código aberto</a>
       <a href="#roteiro">O que vem</a>
     </nav>
@@ -373,7 +405,7 @@ footer .inner { display: flex; justify-content: space-between; gap: 12px; flex-w
     <div class="inner">
       <p class="eyebrow">duck-sheets</p>
       <h1 class="headline"><span class="l1">Planilhas gigantes.</span><br><span class="l2 gradient shine">Abertas num instante.</span></h1>
-      <p class="sub">Aquele arquivo enorme que deixa o computador pensando? Aqui ele aparece na tela antes de você piscar. <strong>E nunca trava.</strong></p>
+      <p class="sub">Aquele arquivo enorme que deixa o computador pensando? Aqui ele aparece na tela antes de você piscar. Abre, calcula, edita e salva. <strong>E nunca trava.</strong></p>
       <div class="ctas">
         <a href="#comparativo">Ver o comparativo</a>
         <a href="#mais">Conhecer os recursos</a>
@@ -383,7 +415,7 @@ footer .inner { display: flex; justify-content: space-between; gap: 12px; flex-w
       <div class="stage">
         <div class="window" id="win">
           <div class="chrome"><i></i><i></i><i></i><span>vendas-2026.xlsx — duck-sheets</span></div>
-          <img src="img/app.png" width="2880" height="1676" alt="O duck-sheets com uma planilha de vendas por loja: barras de faturamento, porcentagem da meta em cores do vermelho ao verde, setas de variação e a situação de cada loja.">
+          <img src="img/app.png" width="2880" height="1676" alt="O duck-sheets com um painel de vendas: faixa de opções, tabela filtrada com centenas de linhas, segmentações de região e canal e três gráficos.">
         </div>
       </div>
     </div>
@@ -393,12 +425,12 @@ footer .inner { display: flex; justify-content: space-between; gap: 12px; flex-w
     <div class="inner center">
       <p class="eyebrow">Velocidade</p>
       <h2 class="title" style="margin-top:10px">Rápido de um jeito<br>que você sente.</h2>
-      <p class="sub" style="margin-top:22px">Testamos com uma planilha de trabalho real de 194 MB, com 20 abas e 22 milhões de células. Um arquivo que o OnlyOffice nem consegue abrir.</p>
-      <p class="caption">Medido no Windows, num PC com placa de vídeo AMD RX 9070 XT.</p>
+      <p class="sub" style="margin-top:22px">Testamos com uma planilha de trabalho real de 194 MB, com 20 abas, 24 milhões de células e 10 milhões de fórmulas. Um arquivo que o OnlyOffice nem consegue abrir.</p>
+      <p class="caption">Medido num Ryzen 9 5950X (16 núcleos), 64 GB e AMD RX 9070 XT, Windows 11, em 23/11/2026.</p>
       <div class="stats">
-        <div class="stat rise"><b class="gradient" data-count="0.19" data-dec="2" data-suffix=" s">0,19 s</b><span>para mostrar a primeira tela com dados</span></div>
-        <div class="stat rise"><b class="gradient" data-count="0.6" data-dec="1" data-suffix=" s">0,6 s</b><span>para deixar as 20 abas prontas</span></div>
-        <div class="stat rise"><b class="gradient" data-count="22" data-dec="0" data-suffix=" mi">22 mi</b><span>de células carregadas, sem engasgar</span></div>
+        <div class="stat rise"><b class="gradient" data-count="0.23" data-dec="2" data-suffix=" s">0,23 s</b><span>para mostrar a primeira tela com dados</span></div>
+        <div class="stat rise"><b class="gradient" data-count="0.65" data-dec="2" data-suffix=" s">0,65 s</b><span>para deixar as 20 abas prontas</span></div>
+        <div class="stat rise"><b class="gradient" data-count="24" data-dec="0" data-suffix=" mi">24 mi</b><span>de células carregadas, sem engasgar</span></div>
       </div>
     </div>
   </section>
@@ -438,7 +470,7 @@ footer .inner { display: flex; justify-content: space-between; gap: 12px; flex-w
           <div class="ratio rise"><b class="gradient" id="r2" data-count="17" data-dec="0" data-suffix="×">17×</b><span>mais rápido mesmo esperando o arquivo inteiro</span></div>
           <div class="ratio rise"><b class="gradient" id="r3" data-count="3" data-dec="0" data-suffix="×">3×</b><span>menos memória (<span id="mem-cmp">0,8 GB contra 2,4 GB</span>)</span></div>
         </div>
-        <p class="method">Como medimos: MacBook Air M1 com 8 GB, OnlyOffice 9.0.4, planilhas sintéticas de 37 colunas geradas pelo projeto. O duck-sheets mede os próprios tempos (<code>--bench</code>). No OnlyOffice, um script tira capturas da tela a cada meio segundo e marca o primeiro quadro em que a grade com dados aparece. Valores de duas rodadas, depois de uma de aquecimento. Rode você mesmo: <code>scripts/bench/vs_onlyoffice.py</code>.</p>
+        <p class="method">Como medimos: em 22/11/2026, num MacBook Air M1 com 8 GB, com o OnlyOffice 9.0.4 e planilhas sintéticas de 37 colunas geradas pelo projeto. O duck-sheets mede os próprios tempos (<code>--bench</code>). No OnlyOffice, um script tira capturas da tela a cada meio segundo e marca o primeiro quadro em que a grade com dados aparece. Valores de duas rodadas, depois de uma de aquecimento. Rode você mesmo: <code>scripts/bench/vs_onlyoffice.py</code>.</p>
       </div>
     </div>
   </section>
@@ -451,9 +483,9 @@ footer .inner { display: flex; justify-content: space-between; gap: 12px; flex-w
         <div class="bar"><span><b>relatorio-anual.xlsm</b> · 194 MB</span><span id="ld-status">Abrindo…</span></div>
         <div class="cells" id="cells"></div>
         <div class="steps">
-          <div id="s1"><b>0,19 s</b>Primeira tela</div>
+          <div id="s1"><b>0,23 s</b>Primeira tela</div>
           <div id="s2"><b>Rolar</b>Já funciona</div>
-          <div id="s3"><b>0,6 s</b>Todas as 20 abas</div>
+          <div id="s3"><b>0,65 s</b>Todas as 20 abas</div>
         </div>
       </div>
     </div>
@@ -473,7 +505,7 @@ footer .inner { display: flex; justify-content: space-between; gap: 12px; flex-w
         </ul>
       </div>
       <div class="card-img rise">
-        <img src="img/zoom.png" width="1562" height="880" loading="lazy" alt="Planilha com zoom de 150%: título em faixa azul, lojas, pedidos e faturamento em reais com barras de dados.">
+        <img src="img/zoom.png" width="1777" height="1001" loading="lazy" alt="Planilha com zoom de 150%: título em faixa azul, lojas, pedidos e faturamento em reais com barras de dados.">
       </div>
     </div>
   </section>
@@ -484,8 +516,42 @@ footer .inner { display: flex; justify-content: space-between; gap: 12px; flex-w
       <h2 class="title" style="margin-top:10px">Cores que contam<br>a história dos números.</h2>
       <p class="sub" style="margin-top:22px">Escalas de cor, barras de dados, setas e destaques aparecem do jeito que foram criados no Excel. Bata o olho e veja quem está acima da meta.</p>
       <div class="cond-img card-img rise">
-        <img src="img/condicional.png" width="1073" height="799" loading="lazy" alt="Porcentagem da meta em escala do vermelho ao verde, setas de variação para cima e para baixo e a situação de cada loja em verde, amarelo ou vermelho.">
+        <img src="img/condicional.png" width="939" height="799" loading="lazy" alt="Porcentagem da meta em escala do vermelho ao verde, setas de variação para cima e para baixo e a situação de cada loja em verde, amarelo ou vermelho.">
       </div>
+    </div>
+  </section>
+
+  <section class="band" id="paineis">
+    <div class="inner feature flip">
+      <div class="copy">
+        <p class="eyebrow">Painéis</p>
+        <h2 class="title">Filtrou?<br>Tudo muda.</h2>
+        <p class="sub">Gráficos, segmentações e tabelas dinâmicas funcionam de verdade, não são só um desenho. Na nossa maior planilha de teste, as tabelas dinâmicas com os dados no próprio arquivo saem idênticas às do Excel: <strong>38 de 38</strong>, com 94 mil valores conferidos.</p>
+        <ul class="checks">
+          <li>Gráficos que mudam junto com as células</li>
+          <li>Segmentações e linhas do tempo clicáveis</li>
+          <li>Tabelas dinâmicas, inclusive as do Power Pivot</li>
+          <li>Botões, caixas de seleção, formas e imagens</li>
+        </ul>
+      </div>
+      <div class="card-img rise">
+        <img src="img/painel.png" width="1387" height="1134" loading="lazy" alt="Segmentações de região e canal com itens marcados, gráfico de colunas com a linha da meta, gráfico de rosca por canal e as 8 maiores lojas em barras.">
+      </div>
+    </div>
+  </section>
+
+  <section class="band dark" id="formulas">
+    <div class="inner center">
+      <p class="eyebrow">Fórmulas</p>
+      <h2 class="title" style="margin-top:10px">10 milhões de contas.<br>Menos de um segundo.</h2>
+      <p class="sub" style="margin-top:22px">O duck-sheets recalcula a planilha inteira em segundo plano, com todos os núcleos. E o resultado bate: cada fórmula foi comparada com o valor que o Excel gravou.</p>
+      <div class="fbar rise"><i>fx</i><code>=SOMASES(Vendas[Total];Vendas[Região];"Sul";Vendas[Mês];"jan")</code></div>
+      <div class="stats">
+        <div class="stat rise"><b class="gradient" data-count="10" data-dec="0" data-suffix=" mi">10 mi</b><span>de fórmulas na mesma planilha</span></div>
+        <div class="stat rise"><b class="gradient" data-count="0.67" data-dec="2" data-suffix=" s">0,67 s</b><span>para recalcular todas elas</span></div>
+        <div class="stat rise"><b class="gradient" data-count="100" data-dec="0" data-suffix="%">100%</b><span>com o mesmo resultado do Excel</span></div>
+      </div>
+      <p class="fnames">SOMASES · PROCV · PROCX · ÍNDICE · CORRESP · FILTRO · ÚNICO · CLASSIFICAR · LET · TEXTO · FIMMÊS e mais de 150 funções, em português.</p>
     </div>
   </section>
 
@@ -493,9 +559,22 @@ footer .inner { display: flex; justify-content: space-between; gap: 12px; flex-w
     <div class="inner center">
       <p class="eyebrow">Busca</p>
       <h2 class="title" style="margin-top:10px">Ache qualquer coisa.<br>Com ou sem acento.</h2>
-      <p class="sub" style="margin-top:22px">Aperte <strong>Ctrl+F</strong> e digite. O duck-sheets procura em todas as células ao mesmo tempo, e “sao” encontra “São Paulo”. Em 593 mil células, a busca leva 33 milésimos de segundo.</p>
+      <p class="sub" style="margin-top:22px">Aperte <strong>Ctrl+F</strong> e digite. O duck-sheets procura em todas as células ao mesmo tempo, e “sao” encontra “São Paulo”. Nesta aba de 900 mil células, a busca levou 4 milésimos de segundo.</p>
       <div class="search-shot rise">
-        <div class="card-img"><img src="img/busca.png" width="2879" height="1050" loading="lazy" alt="Busca por “sao”, sem acento, encontrando e destacando em amarelo as lojas de São Paulo e São José dos Campos."></div>
+        <div class="card-img"><img src="img/busca.png" width="2852" height="1050" loading="lazy" alt="Busca por “sao”, sem acento, numa aba com 60 mil pedidos: 10.342 células encontradas, com São Paulo, São José dos Campos e São Luís em amarelo."></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="band dark" id="salvar">
+    <div class="inner center">
+      <p class="eyebrow">Editar e salvar</p>
+      <h2 class="title" style="margin-top:10px">Salva só o que mudou.<br>E confere antes.</h2>
+      <p class="sub" style="margin-top:22px">O que você não tocou é copiado igual, byte a byte: macros, gráficos, conexões. O que mudou é relido e comparado com a sua tela. Só então o arquivo original é trocado.</p>
+      <div class="stats">
+        <div class="stat rise"><b class="gradient" data-count="0.2" data-dec="1" data-suffix=" s">0,2 s</b><span>para salvar 194 MB sem mudanças: 701 partes idênticas</span></div>
+        <div class="stat rise"><b class="gradient" data-count="2.7" data-dec="1" data-suffix=" s">2,7 s</b><span>depois de 500 edições, com a conferência incluída</span></div>
+        <div class="stat rise"><b class="gradient">0</b><span>diferenças em 24 milhões de células conferidas por outro leitor</span></div>
       </div>
     </div>
   </section>
@@ -536,6 +615,31 @@ footer .inner { display: flex; justify-content: space-between; gap: 12px; flex-w
           <p>Selecione e veja soma, média e contagem.</p>
           <div class="art"><div class="sumbar"><span>Soma <b>14.681,73</b></span><span>Média <b>917,61</b></span></div></div>
         </div>
+        <div class="tile s2">
+          <h3>Filtre e classifique.</h3>
+          <p>As setas no cabeçalho, com busca e lista de valores.</p>
+          <div class="art"><span class="chip x">Sudeste</span><span class="chip x">Sul</span><span class="chip c">Norte</span></div>
+        </div>
+        <div class="tile s2">
+          <h3>Agrupe e resuma.</h3>
+          <p>Abra e feche grupos de linhas e colunas.</p>
+          <div class="art keys-flat"><kbd>+</kbd><kbd>−</kbd><kbd>1</kbd><kbd>2</kbd></div>
+        </div>
+        <div class="tile s2">
+          <h3>Errou? Desfaça.</h3>
+          <p>Edição, filtro, segmentação ou macro inteira.</p>
+          <div class="art keys"><kbd>Ctrl</kbd><span class="plus">+</span><kbd>Z</kbd></div>
+        </div>
+        <div class="tile s3 ink wide-m">
+          <h3>Macros que rodam. E só na planilha.</h3>
+          <p>O código VBA da sua planilha é executado num ambiente fechado: sem acesso aos seus arquivos, à internet ou a outros programas. E só depois que você permite.</p>
+          <div class="art"><span class="vba"><b>Sub</b> TrocarCampo()<br>&nbsp;&nbsp;Range("B3").Value = "Margem"<br><b>End Sub</b></span></div>
+        </div>
+        <div class="tile s3 wide-m">
+          <h3>Uma fórmula. A lista inteira.</h3>
+          <p>FILTRO, ÚNICO e CLASSIFICAR se espalham pelas células vizinhas e acompanham os dados.</p>
+          <div class="art"><div class="paste spill"><span class="f">=ÚNICO(Vendas[Região])</span><span>Sudeste</span><span>Sul</span><span>Nordeste</span><span>Norte</span></div></div>
+        </div>
         <div class="tile s4 wide-m">
           <h3>Copie e cole em qualquer lugar.</h3>
           <p>Ctrl+C leva o que você está vendo para o e-mail, outro programa ou outra planilha, com os números já formatados.</p>
@@ -566,19 +670,52 @@ footer .inner { display: flex; justify-content: space-between; gap: 12px; flex-w
     </div>
   </section>
 
-  <section class="band">
+  <section class="band" id="numeros">
     <div class="inner center">
-      <h2 class="title">Metade da memória.<br>Mais espaço para o resto.</h2>
-      <p class="sub" style="margin-top:22px">Na última versão, o pico de memória para abrir aquele arquivo de 22 milhões de células caiu quase pela metade. Sobra espaço para o resto do seu dia.</p>
-      <div class="mem rise">
-        <div class="mem-row"><div class="lbl"><b>Antes</b>pico ao abrir</div><div class="mem-track"><div class="mem-fill old grow-bar" data-count="954" data-dec="0" data-suffix=" MB">954 MB</div></div></div>
-        <div class="mem-row"><div class="lbl"><b>Agora</b>pico ao abrir</div><div class="mem-track"><div class="mem-fill new grow-bar" data-count="517" data-dec="0" data-suffix=" MB">517 MB</div></div></div>
+      <p class="eyebrow">Números</p>
+      <h2 class="title" style="margin-top:10px">Duas planilhas reais.<br>Tudo medido.</h2>
+      <p class="sub" style="margin-top:22px">Uma base de dados enorme e um painel cheio de objetos, as duas do dia a dia de uma empresa.</p>
+      <div class="bench-wrap" tabindex="0" role="region" aria-label="Tabela de medições">
+        <table class="bench">
+          <thead><tr><th scope="col"></th><th scope="col">Base de dados<small>194 MB · 20 abas</small></th><th scope="col">Painel<small>19 MB · 21 abas</small></th></tr></thead>
+          <tbody>
+            <tr class="g"><th scope="rowgroup" colspan="3">O que tem dentro</th></tr>
+            <tr><th scope="row">Células com valor</th><td>24.171.714</td><td>1.338.957</td></tr>
+            <tr><th scope="row">Fórmulas</th><td>10.111.650</td><td>140.250</td></tr>
+            <tr><th scope="row">Gráficos · segmentações · dinâmicas</th><td>37 · 46 · 72</td><td>20 · 26 · 21</td></tr>
+            <tr class="g"><th scope="rowgroup" colspan="3">Abrir e calcular</th></tr>
+            <tr><th scope="row">Primeira tela com dados</th><td>0,23 s</td><td>0,27 s</td></tr>
+            <tr><th scope="row">Todas as abas prontas</th><td>0,65 s</td><td>0,35 s</td></tr>
+            <tr><th scope="row">Recalcular todas as fórmulas</th><td>0,67 s</td><td>0,01 s</td></tr>
+            <tr><th scope="row">Fórmulas iguais ao Excel</th><td>100%</td><td>100%<sup>1</sup></td></tr>
+            <tr><th scope="row">Dinâmicas com o layout do Excel</th><td>67 de 72<sup>2</sup></td><td>21 de 21</td></tr>
+            <tr class="g"><th scope="rowgroup" colspan="3">Salvar, com a conferência</th></tr>
+            <tr><th scope="row">Sem mudanças</th><td>0,20 s</td><td>1,0 s</td></tr>
+            <tr><th scope="row">Depois de 500 edições</th><td>2,7 s</td><td>1,1 s</td></tr>
+            <tr><th scope="row">Diferenças na cópia salva<sup>3</sup></th><td>0</td><td>0</td></tr>
+            <tr class="g"><th scope="rowgroup" colspan="3">Memória do programa inteiro</th></tr>
+            <tr><th scope="row">Com tudo aberto</th><td>499 MB</td><td>289 MB</td></tr>
+            <tr><th scope="row">Pico ao abrir</th><td>552 MB</td><td>426 MB</td></tr>
+          </tbody>
+        </table>
       </div>
-      <p class="caption" style="margin-top:24px">Medido no Windows, num PC com placa de vídeo AMD RX 9070 XT.</p>
+      <p class="method">Medido num Ryzen 9 5950X (16 núcleos), 64 GB e AMD RX 9070 XT, Windows 11, em 23/11/2026. Abertura: mediana de 5 rodadas, depois de uma de aquecimento, com o computador em uso normal. ¹ 140.249 calculadas e iguais; 1 usa uma função ainda não suportada e mantém o valor gravado. ² As 38 com os dados no arquivo e 29 das 34 do Modelo de Dados (Power Pivot). ³ Células e fórmulas comparadas com o calamine, um leitor independente. Detalhes e comandos: <a href="https://github.com/SrWalkerB/duck-office/blob/main/docs/BENCHMARKS.md">docs/BENCHMARKS.md</a>.</p>
     </div>
   </section>
 
   <section class="band snow">
+    <div class="inner center">
+      <h2 class="title">Faz muito mais.<br>Com menos memória.</h2>
+      <p class="sub" style="margin-top:22px">A primeira versão só mostrava a planilha e chegava a 954 MB para abrir aquele arquivo de 194 MB. Hoje ela calcula, edita e mexe nos painéis, com 42% menos no pico.</p>
+      <div class="mem rise">
+        <div class="mem-row"><div class="lbl"><b>Primeira versão</b>pico ao abrir</div><div class="mem-track"><div class="mem-fill old grow-bar" data-count="954" data-dec="0" data-suffix=" MB">954 MB</div></div></div>
+        <div class="mem-row"><div class="lbl"><b>Agora</b>pico ao abrir</div><div class="mem-track"><div class="mem-fill new grow-bar" data-count="552" data-dec="0" data-suffix=" MB">552 MB</div></div></div>
+      </div>
+      <p class="caption" style="margin-top:24px">Medido no mesmo PC: em 21/11/2026 e em 23/11/2026.</p>
+    </div>
+  </section>
+
+  <section class="band plain">
     <div class="inner center">
       <h2 class="title">Um programa de verdade.<br>Em todo computador.</h2>
       <p class="sub" style="margin-top:22px">Nada de navegador escondido por trás. O duck-sheets é nativo, abre como qualquer aplicativo e funciona igual nos três sistemas.</p>
@@ -633,14 +770,18 @@ footer .inner { display: flex; justify-content: space-between; gap: 12px; flex-w
     <div class="inner">
       <div class="center">
         <p class="eyebrow">O que vem por aí</p>
-        <h2 class="title" style="margin-top:10px">Isso é só o começo.</h2>
+        <h2 class="title" style="margin-top:10px">Muito já chegou.<br>E isso é só o começo.</h2>
         <p class="sub" style="margin-top:22px">O duck-sheets é o primeiro app do duck-office, uma suíte de escritório inteira construída para ser rápida.</p>
       </div>
       <ol class="road">
         <li class="done"><span class="tag">Pronto</span><h3>Abrir e ver</h3><p>Planilhas enormes abertas num instante, com a aparência do Excel.</p></li>
-        <li class="next"><span class="tag">Próximo passo</span><h3>Editar e salvar</h3><p>Mudar células e formatos, desfazer, e salvar sem perder macros nem gráficos.</p></li>
-        <li><span class="tag">Depois</span><h3>Fórmulas</h3><p>Recalcular planilhas gigantes sem travar, com os mesmos resultados do Excel.</p></li>
-        <li><span class="tag">Mais adiante</span><h3>Textos e slides</h3><p>Gráficos, tabelas dinâmicas e, sobre a mesma base, documentos e apresentações.</p></li>
+        <li class="done"><span class="tag">Pronto</span><h3>Editar e salvar</h3><p>Células, formatos, linhas e colunas, com desfazer e sem perder o resto do arquivo.</p></li>
+        <li class="done"><span class="tag">Pronto</span><h3>Fórmulas</h3><p>Milhões de fórmulas recalculadas sem travar, com os mesmos resultados do Excel.</p></li>
+        <li class="done"><span class="tag">Pronto</span><h3>Painéis e macros</h3><p>Gráficos, tabelas dinâmicas, segmentações, botões e o VBA da planilha.</p></li>
+        <li class="done"><span class="tag">Pronto</span><h3>Modelo de Dados</h3><p>As tabelas dinâmicas do Power Pivot recalculadas, sem o Excel.</p></li>
+        <li class="next"><span class="tag">Próximo passo</span><h3>Versão para baixar</h3><p>O teste final nos três sistemas e os pacotes.</p></li>
+        <li><span class="tag">Depois</span><h3>Editar gráficos</h3><p>Criar e mudar gráficos, LAMBDA, impressão e PDF.</p></li>
+        <li><span class="tag">Mais adiante</span><h3>Textos e slides</h3><p>Documentos e apresentações sobre a mesma base, com a mesma pressa.</p></li>
       </ol>
     </div>
   </section>
@@ -654,7 +795,7 @@ footer .inner { display: flex; justify-content: space-between; gap: 12px; flex-w
         <path d="M21.6 15.5l3.5.6-3.4 1.8z" fill="#FFC21A"/>
       </svg>
       <h2 class="headline">duck-sheets.<br><span class="gradient shine">Grátis. Em breve.</span></h2>
-      <p class="sub">A primeira versão para baixar chega quando editar e salvar estiverem prontos. Até lá, o código já está aberto para quem quiser acompanhar.</p>
+      <p class="sub">O código da versão 1.0 já está pronto e aberto. A versão para baixar chega depois do teste final no Windows, no Linux e no macOS.</p>
     </div>
   </section>
 </main>
