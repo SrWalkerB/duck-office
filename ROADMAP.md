@@ -198,9 +198,20 @@ Tudo o que as duas planilhas reais de teste usam, com os mesmos resultados do Ex
 - [x] **Autocompletar fórmulas** na célula e na barra: as funções que o motor calcula (a lista sai da tabela do `duck-calc`), nomes definidos, tabelas e colunas, sem diferenciar maiúsculas nem acentos; assinatura com o argumento atual em destaque; teclado e mouse.
 - [x] **Modo escuro**: tema claro, escuro ou o do sistema (aba Exibir), lembrado entre execuções e trocado com a janela aberta. A planilha escurece só na tela; o arquivo salvo é idêntico nos dois temas.
 - [x] **Referências por clique**: clicar, arrastar ou andar com as setas escreve a referência (células, colunas e linhas inteiras, outras abas); F4, cores no texto e na grade, e o parêntese que falta fechado ao confirmar.
+- [x] **Abas**: criar, renomear, excluir, duplicar, mover, cor, ocultar e reexibir, pelo mouse ou pelo menu da guia. Fórmulas, nomes, gráficos, dinâmicas e segmentações ajustados; gravado no `workbook.xml`, nas relações e nos tipos; desfazer e refazer.
+- [x] **Alça de preenchimento**, duplo clique, Ctrl+D e Ctrl+R, com as séries em português.
+- [x] **Substituir** (Ctrl+H) na aba ou na pasta inteira, em fórmulas ou valores.
+- [x] **Várias linhas na célula** (Alt+Enter), com o editor crescendo; o texto rico é mantido no que não mudou.
+- [x] **Colar especial** e **pincel de formatação**.
+- [x] **Seleção múltipla** (Ctrl+clique e Ctrl+arrastar), com formatação, limpar, copiar e estatísticas.
+- [x] **AutoSoma, data e hora, Ctrl+Enter, mover pela borda, inserir e excluir só células**; mínimo e máximo na barra de status.
+- [x] **Formatar células** (Ctrl+1): número, alinhamento, fonte, borda e preenchimento.
+- [ ] Excluir uma aba quando outra tem segmentação ligada a uma tabela dela; deslocar células que cortam uma tabela: hoje são recusados com aviso.
+- [ ] Recortar e colar entre abas como mover (hoje cola uma cópia).
 - [ ] Ctrl+clique para somar outra referência com `;`; arrastar o contorno colorido para mudar a referência; cores para nomes e tabelas.
 - [ ] Recusar (ou perguntar sobre) uma fórmula que não dá para ler, como `=SOMA(`: hoje ela é gravada como foi digitada.
-- [ ] Clicar ou arrastar dentro do texto do editor para mover o cursor e selecionar.
+- [x] Clicar dentro do texto do editor para mover o cursor.
+- [ ] Arrastar dentro do texto do editor para selecionar.
 - [ ] Tema do sistema no Linux onde o compositor não informa (X11): hoje "seguir o sistema" fica no claro.
 
 ## ⏳ F7+ · O resto da suíte

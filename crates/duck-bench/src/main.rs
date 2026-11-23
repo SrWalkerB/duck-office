@@ -7,6 +7,7 @@
 //! duck-bench gen    SAIDA.xlsx [--rows N] [--cols M]         gera planilha sintética
 //! duck-bench preview [ARQUIVO] [--mb N]                      mede o caminho da primeira tela (F2)
 //! duck-bench roundtrip [ARQUIVO] [--rewrite-all] [--edit N] [--estrutura] [--abas] [--celulas] [--level L] [--keep]  salva numa cópia e confere (F3)
+//! duck-bench conferir-pacote ARQUIVO                         procura erros de pacote (relações, tipos, ids, nomes)
 //! duck-bench gen-showcase SAIDA.xlsx                         planilha de vitrine (formatos, bordas, painéis)
 //! duck-bench calc [ARQUIVO] [--hoje AAAA-MM-DD]              calcula cada fórmula e compara com o Excel (F4)
 //! ```

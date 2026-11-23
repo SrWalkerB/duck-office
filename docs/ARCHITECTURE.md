@@ -927,6 +927,20 @@ Conferência: 74 de 74 séries de gráficos iguais, 38 de 38 dinâmicas com regi
 
 Conferido na vitrine, nos dois temas: células, formatação condicional, gráficos, formas, menus, paleta, filtro, busca, lista, assinatura e referências apontadas. Os cliques passam pelo mesmo código do mouse (`--digitar` com `--save-to`, lendo a fórmula gravada). O tema claro sai igual, pixel a pixel, ao de antes da mudança.
 
+### Status de 23/11/2026: abas e edição essencial
+
+- **Abas no gravador** (`duck-xlsx/src/write/workbook.rs`): `SaveOptions.tabs` (`TabPlan`) diz a ordem final e de onde vem cada aba (`TabOrigin::File`, `Copy` ou `Blank`). A cópia clona a folha, as relações e as partes que são só dela, com nomes e ids novos; a exclusão tira as partes que ficam sem dono. `workbook.xml`, relações, tipos, nomes definidos e as fontes das dinâmicas são remendados; o resto do arquivo é copiado sem descompactar, como no ADR-014.
+- **Referências** (`duck-calc/src/{sheetrefs,tabs}.rs`): renomear e excluir reescrevem fórmulas de célula, nomes, formatação condicional, gráficos e links por trechos de texto: o que não cita a aba não muda nem de espaço. Excluir vira `#REF!`.
+- **Desfazer do arquivo inteiro**: `Command::Book(BookOp)` guarda a operação do app (`TabOp`) na mesma pilha dos outros comandos; o `duck-core` só a transporta. Depois de salvar, os passos que trariam de volta uma aba que já saiu do arquivo são descartados.
+- **Mover e deslocar células** (`duck_core::cells`, `duck-calc/src/cellops.rs`): `CellOp::{Move, Shift}` é planejado antes de aplicar (o que se move, quais fórmulas mudam de texto, o que impede) e gravado também nas mesclagens, links, nomes, gráficos, controles e formatação condicional. Uma operação que cortaria uma tabela é recusada inteira.
+- **Preencher** (`duck_core::fill`): decidir a série é uma função pura; o app só aplica o resultado como um comando.
+- **Seleção múltipla**: a visão guarda as áreas extras, e cada ação decide o que aceita.
+- **Editor de várias linhas**: o `TextInput` do `duck-ui` ganhou linhas e teste de ponto. O texto rico (`duck_core::rich`) mantém a formatação do que não mudou.
+- **Caixas** (`forms.rs`): colar especial, substituir, inserir, excluir e Formatar células são listas de campos, testáveis sem janela; a linha de comando preenche os mesmos campos.
+- **Mouse testável**: as rotinas de apertar, mover e soltar não dependem da janela; os testes fazem os arrastes em cima da geometria real.
+
+Conferência: `duck-bench roundtrip --abas --celulas` (cria, copia, renomeia, move, oculta e exclui abas; move e desloca células) com 0 divergências na vitrine e nas planilhas reais que o duck-sheets lê, e `duck-bench conferir-pacote`, que procura no pacote salvo relações sem alvo, tipos faltando, ids repetidos e nomes inválidos. Não foi aberto no Excel.
+
 ---
 
 ## Questões em aberto
