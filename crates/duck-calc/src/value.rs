@@ -64,6 +64,39 @@ pub enum V<'e> {
     Str(Cow<'e, str>),
     Ref(Rng),
     Arr(Rc<Arr<'e>>),
+    /// Função como valor (LAMBDA, ou o nome de uma função: `BYROW(A1:B3;SOMA)`).
+    Fn(Rc<Fun<'e>>),
+}
+
+/// Valor de função.
+#[derive(Clone, Debug)]
+pub enum Fun<'e> {
+    /// LAMBDA com as variáveis visíveis onde ela foi escrita.
+    Lambda {
+        f: &'e crate::parse::Formula,
+        params: u32,
+        /// Bit `k` = o parâmetro `k` é opcional.
+        optional: u64,
+        body: u32,
+        captured: Vec<V<'e>>,
+    },
+    /// Função da planilha pelo nome.
+    Native(crate::funcs::Func),
+    /// Parâmetro opcional que não foi passado.
+    Omitted,
+}
+
+impl PartialEq for Fun<'_> {
+    fn eq(&self, o: &Self) -> bool {
+        match (self, o) {
+            (Fun::Lambda { f, body, .. }, Fun::Lambda { f: g, body: b, .. }) => {
+                std::ptr::eq(*f, *g) && body == b
+            }
+            (Fun::Native(a), Fun::Native(b)) => a == b,
+            (Fun::Omitted, Fun::Omitted) => true,
+            _ => false,
+        }
+    }
 }
 
 impl<'e> V<'e> {
@@ -93,6 +126,7 @@ impl<'e> V<'e> {
                 cols: a.cols,
                 v: a.v.iter().cloned().map(V::into_owned).collect(),
             })),
+            V::Fn(_) => V::Err(CellError::Calc),
         }
     }
 
@@ -105,6 +139,7 @@ impl<'e> V<'e> {
             V::Err(e) => CellValue::Error(*e),
             V::Str(s) => CellValue::Text(s.to_string()),
             V::Ref(_) | V::Arr(_) => CellValue::Error(CellError::Value),
+            V::Fn(_) => CellValue::Error(CellError::Calc),
         }
     }
 }

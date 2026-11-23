@@ -67,6 +67,17 @@ impl Sheet {
         }
     }
 
+    /// Trechos de texto rico de um texto devolvido por [`Sheet::cell`] (da
+    /// tabela compartilhada ou das tabelas da aba).
+    pub fn rich_of<'a>(&'a self, s: &str, shared: &'a StringTable) -> Option<&'a [RichRun]> {
+        // Texto da tabela compartilhada: não precisa olhar as da aba.
+        let (lo, hi) = shared.byte_range();
+        if (lo..hi).contains(&(s.as_ptr() as usize)) {
+            return shared.rich_of(s);
+        }
+        self.strings.iter().find_map(|t| t.rich_of(s))
+    }
+
     /// Guarda os trechos de texto rico de uma célula de texto editada (cada
     /// texto digitado tem a sua entrada na tabela de strings das edições).
     pub(crate) fn set_rich_runs(&mut self, row: u32, col: u32, runs: Vec<RichRun>) {

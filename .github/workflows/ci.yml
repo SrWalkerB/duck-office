@@ -61,6 +61,8 @@ jobs:
             ./target/release/duck-bench roundtrip "$f" --rewrite-all
             ./target/release/duck-bench roundtrip "$f" --edit 500
             ./target/release/duck-bench roundtrip "$f" --estrutura
+            ./target/release/duck-bench roundtrip "$f" --abas --celulas
+            ./target/release/duck-bench roundtrip "$f" --estrutura --abas --celulas
           done
 
       # Contagens e acertos da vitrine (formas, gráficos, fórmulas, links,

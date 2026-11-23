@@ -40,7 +40,7 @@ pub use cond::{
     Bar, BarAxis, BarLook, CfApply, CfCtx, CfKind, CfOp, CfRule, CfState, Cfvo, CfvoKind, ExtId, Period,
     TextOp,
 };
-pub use edit::{CellChange, CellValue, Command, Edits, OpsHandle, RawCell};
+pub use edit::{BookOp, CellChange, CellValue, Command, Edits, OpsHandle, RawCell};
 pub use layout::{
     AutoFilter, CellRange, ColSpec, ControlRef, FilterColumn, FilterKind, Hyperlink, Layout, Pane, RowSpec,
     SheetView, Table,

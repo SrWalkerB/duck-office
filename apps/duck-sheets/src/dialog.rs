@@ -9,7 +9,7 @@ use crate::app::{Geom, SheetsApp};
 use crate::theme::Theme;
 
 /// Para que serve a caixa aberta (o que os botões fazem).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Kind {
     /// Só um aviso.
     Message,
@@ -513,7 +513,7 @@ impl SheetsApp {
         let keep = match o {
             Outcome::None => true,
             Outcome::Changed => {
-                if d.kind == Kind::Validation {
+                if matches!(d.kind, Kind::Validation) {
                     crate::valid::refresh(&mut d);
                 }
                 true

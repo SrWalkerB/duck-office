@@ -15,13 +15,18 @@ use crate::dialog::{Dialog, Field, Kind, wrap};
 use crate::theme::Theme;
 
 /// O que foi digitado e a validação não aceitou (à espera da resposta).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Pending {
     pub sheet: usize,
-    pub change: CellChange,
+    /// Célula em que se digitou.
+    pub cell: (u32, u32),
+    /// A mudança, se a resposta for continuar.
+    pub cmd: Command,
     /// Como foi digitado.
     pub text: String,
     pub alert: DvAlert,
+    /// Para todas as células selecionadas (Ctrl+Enter).
+    pub all: bool,
 }
 
 /// Lista suspensa aberta.
@@ -500,30 +505,59 @@ impl SheetsApp {
         }
     }
 
-    /// A validação aceita `change` (digitado como `text`) na aba ativa? Se
-    /// não, abre o aviso da regra e devolve `false`.
-    pub fn validate(&mut self, change: &CellChange, text: &str) -> bool {
-        let Some(doc) = self.doc.as_ref() else { return true };
-        let Some((sheet, _)) = doc.current() else { return true };
-        let Some(rule) = duck_core::valid::at(&sheet.layout.validations, change.row, change.col) else {
-            return true;
+    /// A regra que não aceita o que foi digitado na aba ativa (entre várias, a
+    /// mais severa). `None` = tudo aceito.
+    pub fn broken_rule(&self, changes: &[CellChange]) -> Option<DataValidation> {
+        let (sheet, _) = self.doc.as_ref()?.current()?;
+        let rules = &sheet.layout.validations;
+        if !changes.iter().any(|x| duck_core::valid::at(rules, x.row, x.col).is_some()) {
+            return None;
+        }
+        let severity = |a: DvAlert| match a {
+            DvAlert::Stop => 2,
+            DvAlert::Warning => 1,
+            DvAlert::Information => 0,
         };
-        if !rule.show_error || rule.kind == DvKind::Any {
-            return true;
-        }
-        let (rule, active) = (rule.clone(), doc.active);
-        let ok = self.with_book(|b, s| {
-            let value = match &change.formula {
-                Some(f) => duck_calc::valid::typed_formula(b, s, change.row, change.col, f)?,
-                None => change.value.clone(),
-            };
-            duck_calc::valid::check(b, s, &rule, change.row, change.col, &value)
+        let mut worst: Option<&DataValidation> = None;
+        self.with_book(|b, s| {
+            for x in changes {
+                let Some(rule) = duck_core::valid::at(rules, x.row, x.col) else { continue };
+                if !rule.show_error || rule.kind == DvKind::Any {
+                    continue;
+                }
+                // Uma tão severa quanto já achada não muda nada.
+                if worst.is_some_and(|w| severity(w.alert) >= severity(rule.alert)) {
+                    continue;
+                }
+                let typed = match &x.formula {
+                    Some(f) => duck_calc::valid::typed_formula(b, s, x.row, x.col, f),
+                    None => Some(x.value.clone()),
+                };
+                // O que não dá para calcular é aceito.
+                let ok = typed.and_then(|v| duck_calc::valid::check(b, s, rule, x.row, x.col, &v));
+                if ok == Some(false) {
+                    worst = Some(rule);
+                    if rule.alert == DvAlert::Stop {
+                        break;
+                    }
+                }
+            }
         });
-        if ok.flatten().unwrap_or(true) {
-            return true;
-        }
-        let pending =
-            Pending { sheet: active, change: change.clone(), text: text.to_string(), alert: rule.alert };
+        worst.cloned()
+    }
+
+    /// Abre o aviso da regra que não aceitou `cmd` (digitado em `cell` como
+    /// `text`; `all` = com Ctrl+Enter, na seleção toda).
+    pub fn ask_invalid(
+        &mut self,
+        rule: &DataValidation,
+        cmd: Command,
+        cell: (u32, u32),
+        text: String,
+        all: bool,
+    ) {
+        let Some(sheet) = self.doc.as_ref().map(|d| d.active) else { return };
+        let pending = Pending { sheet, cell, cmd, text, alert: rule.alert, all };
         let default = "Este valor não segue as regras de validação de dados desta célula.";
         let mut body = if rule.error.is_empty() { default.to_string() } else { rule.error.clone() };
         let buttons: &[&'static str] = match rule.alert {
@@ -537,7 +571,11 @@ impl SheetsApp {
         let title = if rule.error_title.is_empty() { "Validação de dados" } else { &rule.error_title };
         self.dialog =
             Some(Dialog::new(Kind::Invalid(Box::new(pending)), title, vec![Field::info(&body)], buttons));
-        false
+    }
+
+    /// Há um valor inválido à espera de resposta?
+    pub fn answering(&self) -> bool {
+        self.dialog.as_ref().is_some_and(|d| matches!(d.kind, Kind::Invalid(_)))
     }
 
     /// Resposta ao aviso de valor inválido (`None` = Esc).
@@ -557,7 +595,11 @@ impl SheetsApp {
         }
         match what {
             Do::Retry => {
-                self.go_to(p.change.row, p.change.col);
+                // O que se ia fazer depois de digitar não abre por cima.
+                (self.form, self.popup) = (None, None);
+                if !p.all {
+                    self.go_to(p.cell.0, p.cell.1);
+                }
                 self.start_edit(Some(&p.text), false);
                 if let Some(ed) = &mut self.editor {
                     ed.enter_mode = false;
@@ -565,7 +607,7 @@ impl SheetsApp {
                 }
             }
             Do::Keep => {
-                self.run_command(Command::SetCells(vec![p.change]));
+                self.run_command(p.cmd);
             }
             Do::Drop => {}
         }
@@ -844,6 +886,26 @@ mod tests {
         assert_eq!(read(DvKind::Whole, "=SOMA(A1;2)").unwrap(), "SUM(A1,2)");
         assert_eq!(read(DvKind::Custom, "CONT.SE(A:A;A1)=1").unwrap(), "COUNTIF(A:A,A1)=1");
         assert!(read(DvKind::Whole, "abc").is_err() && read(DvKind::Whole, " ").is_err());
+        // As funções novas: com os prefixos no arquivo, sem eles na tela.
+        for (kind, pt, file) in [
+            (DvKind::Custom, "=LET(x;A1;x>1,5)", "_xlfn.LET(_xlpm.x,A1,_xlpm.x>1.5)"),
+            (
+                DvKind::Custom,
+                "=LAMBDA(a;b;a+b)(A1;1)>2",
+                "_xlfn.LAMBDA(_xlpm.a,_xlpm.b,_xlpm.a+_xlpm.b)(A1,1)>2",
+            ),
+            (DvKind::Decimal, "=PROCX(A1;B:B;C:C;0,5)", "_xlfn.XLOOKUP(A1,B:B,C:C,0.5)"),
+            (DvKind::List, "=FILTRO(A1:A9;B1:B9>1,5)", "_xlfn._xlws.FILTER(A1:A9,B1:B9>1.5)"),
+        ] {
+            assert_eq!(show(kind, file), pt);
+            if kind == DvKind::List {
+                let mut l = v(kind, "");
+                set_source(&mut l, pt);
+                assert_eq!(l.f1, file);
+            } else {
+                assert_eq!(read(kind, pt).unwrap(), file);
+            }
+        }
         let mut l = v(DvKind::List, "");
         set_source(&mut l, "a; b ;;c");
         assert_eq!(l.f1, "\"a,b,c\"");

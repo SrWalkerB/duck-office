@@ -31,7 +31,7 @@ impl SheetsApp {
                 self.apply_fmt(f);
             }
             Act::Fmt(f) => self.apply_fmt(f),
-            Act::Paste => self.paste(cx),
+            Act::Paste => self.paste(cx, Default::default()),
             Act::Cut | Act::Copy => {
                 if let Some(t) = self.copy_text(act == Act::Cut) {
                     cx.clipboard().set_text(&t);
@@ -78,6 +78,23 @@ impl SheetsApp {
                 }
             }
             Act::Drop(_) => {}
+            Act::Tab(t) => self.run_tab_act(t),
+            Act::PasteAs(what, transpose) => {
+                self.paste(cx, crate::paste::PasteOpts { what, transpose, ..Default::default() })
+            }
+            Act::PasteSpecial => {
+                if let Some(t) = cx.clipboard().get_text() {
+                    self.ask_paste_special(t);
+                } else {
+                    self.message = "Nada para colar".into();
+                }
+            }
+            Act::Painter => self.toggle_painter(false),
+            Act::Replace => self.open_replace(),
+            Act::AutoSum => self.autosum(),
+            Act::Cells(insert) => self.ask_cells(insert),
+            Act::FillCopy(down) => self.fill_copy(down),
+            Act::FormatCells => self.ask_format(0),
             Act::Shift { insert, cols } => {
                 let axis = if cols { duck_core::Axis::Cols } else { duck_core::Axis::Rows };
                 self.shift_selection(insert, Some(axis));
@@ -132,9 +149,7 @@ impl SheetsApp {
             Act::Autofit => {
                 let Some((_, v)) = self.doc.as_ref().and_then(|d| d.current()) else { return };
                 let (_, c0, _, c1) = v.sel();
-                for c in c0..=c1.min(c0 + 200) {
-                    self.autofit_col(c);
-                }
+                self.autofit_cols(&(c0..=c1.min(c0 + 200)).collect::<Vec<_>>());
             }
         }
     }
@@ -223,15 +238,35 @@ impl SheetsApp {
                 Item::sep(),
                 Item::new("Desfazer mesclagem", Act::Merge(Merge::Unmerge)),
             ],
+            Drop::Fill => vec![
+                Item::new("Para baixo", Act::FillCopy(true)).key("Ctrl+D"),
+                Item::new("Para a direita", Act::FillCopy(false)).key("Ctrl+R"),
+            ],
+            Drop::Paste => {
+                use crate::paste::What;
+                vec![
+                    Item::new("Valores", Act::PasteAs(What::Values, false)).key("Ctrl+Shift+V"),
+                    Item::new("Fórmulas", Act::PasteAs(What::Formulas, false)),
+                    Item::new("Formatos", Act::PasteAs(What::Formats, false)),
+                    Item::new("Larguras das colunas", Act::PasteAs(What::Widths, false)),
+                    Item::new("Transpor", Act::PasteAs(What::All, true)),
+                    Item::sep(),
+                    Item::new("Colar especial…", Act::PasteSpecial).key("Ctrl+Alt+V"),
+                ]
+            }
             Drop::Insert => vec![
+                Item::new("Células…", Act::Cells(true)),
                 Item::new("Linhas acima", Act::Shift { insert: true, cols: false }).key("Ctrl+Alt+="),
                 Item::new("Colunas à esquerda", Act::Shift { insert: true, cols: true }),
             ],
             Drop::Delete => vec![
+                Item::new("Células…", Act::Cells(false)),
                 Item::new("Linhas", Act::Shift { insert: false, cols: false }).key("Ctrl+Alt+-"),
                 Item::new("Colunas", Act::Shift { insert: false, cols: true }),
             ],
             Drop::Format => vec![
+                Item::new("Formatar células…", Act::FormatCells).key("Ctrl+1"),
+                Item::sep(),
                 Item::new("Altura da linha…", Act::RowHeight),
                 Item::new("Largura da coluna…", Act::ColWidth),
                 Item::new("Ajustar largura da coluna", Act::Autofit),
@@ -284,25 +319,31 @@ impl SheetsApp {
         self.commit_edit();
         let g = self.geom();
         let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) else { return };
-        let (r0, c0, r1, c1) = v.sel();
+        let areas = v.areas();
         let (nr, nc) = (v.rows.len(), v.cols.len());
-        let inside = |r: u32, c: u32| (r0..=r1).contains(&r) && (c0..=c1).contains(&c);
+        let inside =
+            |r: u32, c: u32| areas.iter().any(|a| (a.0..=a.2).contains(&r) && (a.1..=a.3).contains(&c));
+        let full_col = |c: u32| areas.iter().any(|a| a.0 == 0 && a.2 == nr - 1 && (a.1..=a.3).contains(&c));
+        let full_row = |r: u32| areas.iter().any(|a| a.1 == 0 && a.3 == nc - 1 && (a.0..=a.2).contains(&r));
         if g.colhdr.contains(x, y) {
             let q = if x < g.grid.x0 + g.fw { &g.quads[0] } else { &g.quads[1] };
             let (_, c) = g.cell_in(v, q, x, q.rect.y0);
-            if !(inside(0, c) && r0 == 0 && r1 == nr - 1) {
+            if !full_col(c) {
+                v.single();
                 v.anchor = (0, c);
                 v.cur = (nr - 1, c);
             }
         } else if g.rowhdr.contains(x, y) {
             let q = if y < g.grid.y0 + g.fh { &g.quads[0] } else { &g.quads[2] };
             let (r, _) = g.cell_in(v, q, q.rect.x0, y);
-            if !(inside(r, 0) && c0 == 0 && c1 == nc - 1) {
+            if !full_row(r) {
+                v.single();
                 v.anchor = (r, 0);
                 v.cur = (r, nc - 1);
             }
         } else if let Some((r, c)) = g.hit(v, x, y) {
             if !inside(r, c) {
+                v.single();
                 v.anchor = (r, c);
                 v.cur = (r, c);
             }
@@ -315,7 +356,10 @@ impl SheetsApp {
             Item::new("Recortar", Act::Cut).key("Ctrl+X"),
             Item::new("Copiar", Act::Copy).key("Ctrl+C"),
             Item::new("Colar", Act::Paste).key("Ctrl+V"),
+            Item::new("Colar especial…", Act::PasteSpecial).key("Ctrl+Alt+V"),
             Item::sep(),
+            Item::new("Inserir células…", Act::Cells(true)),
+            Item::new("Excluir células…", Act::Cells(false)),
             Item::new("Inserir linhas acima", Act::Shift { insert: true, cols: false }),
             Item::new("Inserir colunas à esquerda", Act::Shift { insert: true, cols: true }),
             Item::new("Excluir linhas", Act::Shift { insert: false, cols: false }),
@@ -343,6 +387,7 @@ impl SheetsApp {
         });
         items.extend([
             Item::sep(),
+            Item::new("Formatar células…", Act::FormatCells).key("Ctrl+1"),
             Item::new("Largura da coluna…", Act::ColWidth),
             Item::new("Altura da linha…", Act::RowHeight),
             Item::new("Ocultar linhas", Act::Hide { rows: true, hide: true }),
@@ -433,51 +478,42 @@ impl SheetsApp {
             self.clear_selection();
             return;
         }
-        let Some((r0, c0, r1, c1)) = self.sel_cells(2_000_000) else { return };
+        let Some(areas) = self.sel_areas(2_000_000) else { return };
         let Some((sheet, _)) = self.doc.as_ref().and_then(|d| d.current()) else { return };
         let mut more = Vec::new();
         if c == Clear::All {
             // Como no Excel: notas e validação saem junto.
-            let range = CellRange { first_row: r0, first_col: c0, last_row: r1, last_col: c1 };
-            let mut notes = sheet.layout.notes.clone();
-            notes.retain(|n| !range.contains(n.row, n.col) || n.thread.is_some());
+            let (mut notes, mut rules) = (sheet.layout.notes.clone(), sheet.layout.validations.clone());
+            for &(r0, c0, r1, c1) in &areas {
+                let range = CellRange { first_row: r0, first_col: c0, last_row: r1, last_col: c1 };
+                notes.retain(|n| !range.contains(n.row, n.col) || n.thread.is_some());
+                duck_core::valid::clear(&mut rules, range, &duck_calc::shift);
+            }
             if notes.len() != sheet.layout.notes.len() {
                 more.push(Command::Notes(notes));
             }
-            let rules = crate::valid::with_rule(sheet, range, None, (r0, c0));
             if rules != sheet.layout.validations {
                 more.push(Command::Validations(rules));
             }
         }
+        let all = areas
+            .into_iter()
+            .flat_map(|(r0, c0, r1, c1)| (r0..=r1).flat_map(move |r| (c0..=c1).map(move |c| (r, c))));
         let cmd = match c {
-            Clear::All => {
-                let mut v = Vec::new();
-                for r in r0..=r1 {
-                    for col in c0..=c1 {
-                        if !sheet.raw(r, col).is_blank() {
-                            v.push(CellChange {
-                                row: r,
-                                col,
-                                value: CellValue::Empty,
-                                formula: None,
-                                style: Some(0),
-                            });
-                        }
-                    }
-                }
-                Command::SetCells(v)
-            }
-            _ => {
-                let mut v = Vec::new();
-                for r in r0..=r1 {
-                    for col in c0..=c1 {
-                        if sheet.raw(r, col).style != 0 {
-                            v.push((r, col, 0));
-                        }
-                    }
-                }
-                Command::SetStyles(v)
-            }
+            Clear::All => Command::SetCells(
+                all.filter(|&(r, c)| !sheet.raw(r, c).is_blank())
+                    .map(|(row, col)| CellChange {
+                        row,
+                        col,
+                        value: CellValue::Empty,
+                        formula: None,
+                        style: Some(0),
+                    })
+                    .collect(),
+            ),
+            _ => Command::SetStyles(
+                all.filter(|&(r, c)| sheet.raw(r, c).style != 0).map(|(r, c)| (r, c, 0)).collect(),
+            ),
         };
         more.insert(0, cmd);
         self.run_command(Command::Group(more));
@@ -485,16 +521,16 @@ impl SheetsApp {
 
     pub(crate) fn hide(&mut self, rows: bool, hide: bool) {
         let Some((sheet, v)) = self.doc.as_ref().and_then(|d| d.current()) else { return };
-        let (r0, c0, r1, c1) = v.sel();
+        let areas = v.areas();
         let cmd = if rows {
             let list: Vec<(u32, bool)> = if hide {
-                (r0..=r1.min(r0 + 1_000_000)).map(|r| (r, true)).collect()
+                areas.iter().flat_map(|a| a.0..=a.2.min(a.0 + 1_000_000)).map(|r| (r, true)).collect()
             } else {
                 sheet
                     .layout
                     .rows
                     .iter()
-                    .filter(|s| s.hidden && (r0..=r1).contains(&s.row))
+                    .filter(|s| s.hidden && areas.iter().any(|a| (a.0..=a.2).contains(&s.row)))
                     .map(|s| (s.row, false))
                     .collect()
             };
@@ -503,10 +539,11 @@ impl SheetsApp {
             }
             Command::RowsHidden(list)
         } else {
+            let cols = areas.iter().flat_map(|a| a.1..=a.3);
             let list: Vec<(u32, bool)> = if hide {
-                (c0..=c1).map(|c| (c, true)).collect()
+                cols.map(|c| (c, true)).collect()
             } else {
-                (c0..=c1).filter(|&c| sheet.col_hidden(c)).map(|c| (c, false)).collect()
+                cols.filter(|&c| sheet.col_hidden(c)).map(|c| (c, false)).collect()
             };
             if list.is_empty() {
                 return;
@@ -558,16 +595,17 @@ impl SheetsApp {
             return;
         };
         let Some((_, v)) = self.doc.as_ref().and_then(|d| d.current()) else { return };
-        let (r0, c0, r1, c1) = v.sel();
+        let areas = v.areas();
         match p.ask {
             Ask::ColWidth => {
                 let w = x.clamp(0.0, 255.0);
-                let list = (c0..=c1).map(|c| (c, Some(w))).collect();
+                let list = areas.iter().flat_map(|a| a.1..=a.3).map(|c| (c, Some(w))).collect();
                 self.run_command(Command::ColWidths(list));
             }
             Ask::RowHeight => {
                 let h = x.clamp(0.0, 409.0);
-                let list = (r0..=r1.min(r0 + 100_000)).map(|r| (r, Some(h))).collect();
+                let list =
+                    areas.iter().flat_map(|a| a.0..=a.2.min(a.0 + 100_000)).map(|r| (r, Some(h))).collect();
                 self.run_command(Command::RowHeights(list));
             }
         }
@@ -657,7 +695,7 @@ impl SheetsApp {
             self.scripted_typing(&t);
         }
         let Some(m) = self.opts.menu.take() else { return };
-        if self.scripted_dialog(&m) {
+        if self.scripted_dialog(&m) || self.scripted_tab_menu(&m) {
             return;
         }
         let g = self.geom();
@@ -696,6 +734,15 @@ impl SheetsApp {
             "formatar" => Drop::Format,
             "limpar" => Drop::Clear,
             "congelar" => Drop::Freeze,
+            "colar" => Drop::Paste,
+            "preencher" => Drop::Fill,
+            "caixa-colar" => return self.ask_paste_special("a\tb".into()),
+            "caixa-substituir" => return self.open_replace(),
+            "caixa-inserir" => return self.ask_cells(true),
+            "caixa-excluir" => return self.ask_cells(false),
+            m if m.starts_with("caixa-formatar") => {
+                return self.ask_format(m.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0));
+            }
             "zoom" => {
                 let r = crate::zoombar::layout(&g).menu_anchor(&g);
                 self.open_drop(Drop::Zoom, r, &g);
@@ -719,8 +766,8 @@ impl SheetsApp {
     /// `--digitar`: abre a edição da célula ativa e digita um texto.
     /// `{barra}` no começo edita na barra de fórmulas. Entre chaves também:
     ///
-    /// - teclas: `{cima}`, `{baixo}`, `{esquerda}`, `{direita}` (com `shift-`
-    ///   ou `ctrl-` antes), `{tab}`, `{enter}`, `{esc}`, `{f2}`, `{f4}`;
+    /// - teclas: `{cima}`, `{baixo}`, `{esquerda}`, `{direita}` (com `shift-`,
+    ///   `ctrl-` ou `alt-` antes), `{tab}`, `{enter}`, `{esc}`, `{f2}`, `{f4}`;
     /// - mouse: `{clique:B2}`, `{shift-clique:B5}`, `{arrastar:B2:B10}`,
     ///   `{coluna:B}`, `{linha:3}` e `{aba:Nome}`.
     fn scripted_typing(&mut self, t: &str) {
@@ -742,6 +789,10 @@ impl SheetsApp {
                     }
                     Some(("ctrl", k)) => {
                         mods.ctrl = true;
+                        k
+                    }
+                    Some(("alt", k)) => {
+                        mods.alt = true;
                         k
                     }
                     _ => cmd,

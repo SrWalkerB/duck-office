@@ -14,6 +14,7 @@ use duck_core::numfmt::serial_to_datetime;
 use duck_core::{CellError, NumFmt};
 
 use crate::eval::{Eval, Res, to_bool, to_text};
+use crate::fns;
 use crate::index::{self, Crit, Wild, has_wildcards, lookup_eq, round15};
 use crate::parse::{self, Node};
 use crate::value::{Arr, Rng, V, compare, parse_number};
@@ -21,6 +22,7 @@ use crate::value::{Arr, Rng, V, compare, parse_number};
 pub type Func = u16;
 pub type Imp = for<'e> fn(&mut Eval<'e>, &[u32]) -> Res<V<'e>>;
 
+#[derive(Clone, Copy)]
 pub struct FnDef {
     /// Nome no arquivo (inglês, sem `_xlfn.`).
     pub name: &'static str,
@@ -38,14 +40,54 @@ pub struct FnDef {
     pub dynamic: bool,
     /// O motor não calcula: o valor guardado fica.
     pub opaque: bool,
+    /// Argumentos que se aplicam item a item quando recebem uma matriz (bit
+    /// `k` = argumento `k`).
+    pub lift: u32,
     pub imp: Imp,
 }
 
 impl FnDef {
+    const fn base(name: &'static str, pt: &'static str, min: u8, max: u8, imp: Imp) -> Self {
+        Self {
+            name,
+            pt,
+            args: "",
+            help: "",
+            min,
+            max,
+            volatile: false,
+            dynamic: false,
+            opaque: false,
+            lift: 0,
+            imp,
+        }
+    }
+
     /// Nomes dos argumentos (os opcionais entre colchetes; `…` = pode haver mais).
     pub fn arg_names(&self) -> Vec<&'static str> {
         self.args.split("; ").filter(|a| !a.is_empty()).collect()
     }
+
+    pub const fn lift(self, mask: u32) -> Self {
+        Self { lift: mask, ..self }
+    }
+
+    pub const fn volatile(self) -> Self {
+        Self { volatile: true, ..self }
+    }
+}
+
+/// Função com a ajuda (as dos módulos de [`crate::fns`]).
+pub(crate) const fn n(
+    name: &'static str,
+    pt: &'static str,
+    min: u8,
+    max: u8,
+    imp: Imp,
+    args: &'static str,
+    help: &'static str,
+) -> FnDef {
+    FnDef { args, help, ..FnDef::base(name, pt, min, max, imp) }
 }
 
 const fn f(
@@ -57,7 +99,7 @@ const fn f(
     args: &'static str,
     help: &'static str,
 ) -> FnDef {
-    FnDef { name, pt, args, help, min, max, volatile: false, dynamic: false, opaque: false, imp }
+    n(name, pt, min, max, imp, args, help)
 }
 
 const fn vol(
@@ -69,7 +111,7 @@ const fn vol(
     args: &'static str,
     help: &'static str,
 ) -> FnDef {
-    FnDef { name, pt, args, help, min, max, volatile: true, dynamic: false, opaque: false, imp }
+    FnDef { volatile: true, ..n(name, pt, min, max, imp, args, help) }
 }
 
 const fn dynf(
@@ -81,27 +123,16 @@ const fn dynf(
     args: &'static str,
     help: &'static str,
 ) -> FnDef {
-    FnDef { name, pt, args, help, min, max, volatile: true, dynamic: true, opaque: false, imp }
+    FnDef { volatile: true, dynamic: true, ..n(name, pt, min, max, imp, args, help) }
 }
 
 const fn opq(name: &'static str, pt: &'static str) -> FnDef {
-    FnDef {
-        name,
-        pt,
-        args: "",
-        help: "",
-        min: 0,
-        max: 255,
-        volatile: false,
-        dynamic: false,
-        opaque: true,
-        imp: opaque,
-    }
+    FnDef { opaque: true, ..FnDef::base(name, pt, 0, 255, opaque) }
 }
 
 // Uma função por linha (nomes, quantidade de argumentos) e a ajuda embaixo.
 #[rustfmt::skip]
-static FUNCS: &[FnDef] = &[
+const BASIC: &[FnDef] = &[
     // Lógicas
     f("IF", "SE", 1, 3, if_,
         "teste_lógico; [valor_se_verdadeiro]; [valor_se_falso]", "Um valor se o teste for verdadeiro, outro se for falso"),
@@ -445,19 +476,246 @@ static FUNCS: &[FnDef] = &[
         "matriz; linhas; [colunas]; [preencher_com]", "O intervalo aumentado até um tamanho"),
     f("TRANSPOSE", "TRANSPOR", 1, 1, crate::dynarr::transpose,
         "matriz", "Troca linhas por colunas"),
-    opq("LAMBDA", "LAMBDA"),
-    opq("CELL", "CÉL"),
-    opq("INFO", "INFORMAÇÃO"),
-    opq("AGGREGATE", "AGREGAR"),
     opq("RTD", "RTD"),
     opq("CUBEVALUE", "VALORCUBO"),
     opq("CUBEMEMBER", "MEMBROCUBO"),
     opq("WEBSERVICE", "SERVIÇOWEB"),
-    opq("YEARFRAC", "FRAÇÃOANO"),
-    opq("PMT", "PGTO"),
-    opq("NPV", "VPL"),
-    opq("IRR", "TIR"),
+    opq("IMAGE", "IMAGEM"),
 ];
+
+/// Todas as listas de funções.
+const PARTS: &[&[FnDef]] = &[
+    BASIC,
+    fns::financial::DEFS,
+    fns::coupon::DEFS,
+    fns::stats::DEFS,
+    fns::regress::DEFS,
+    fns::dist::DEFS,
+    fns::math::DEFS,
+    fns::matrix::DEFS,
+    fns::engineering::DEFS,
+    fns::dates::DEFS,
+    fns::text::DEFS,
+    fns::info::DEFS,
+    fns::lambda::DEFS,
+    fns::group::DEFS,
+    fns::database::DEFS,
+];
+
+const TOTAL: usize = {
+    let mut n = 0;
+    let mut i = 0;
+    while i < PARTS.len() {
+        n += PARTS[i].len();
+        i += 1;
+    }
+    n
+};
+
+static FUNCS: [FnDef; TOTAL] = {
+    let mut all = [BASIC[0]; TOTAL];
+    let (mut k, mut i) = (0, 0);
+    while i < PARTS.len() {
+        let mut j = 0;
+        while j < PARTS[i].len() {
+            all[k] = PARTS[i][j];
+            k += 1;
+            j += 1;
+        }
+        i += 1;
+    }
+    all
+};
+
+/// O que o avaliador lê a cada chamada, junto (o resto da tabela fica fora do
+/// caminho quente).
+#[derive(Clone, Copy)]
+pub(crate) struct Hot {
+    pub imp: Imp,
+    pub min: u8,
+    pub max: u8,
+    pub opaque: bool,
+}
+
+static HOT: [Hot; TOTAL] = {
+    let mut all = [Hot { imp: opaque, min: 0, max: 0, opaque: false }; TOTAL];
+    let (mut k, mut i) = (0, 0);
+    while i < PARTS.len() {
+        let mut j = 0;
+        while j < PARTS[i].len() {
+            let d = &PARTS[i][j];
+            all[k] = Hot { imp: d.imp, min: d.min, max: d.max, opaque: d.opaque };
+            k += 1;
+            j += 1;
+        }
+        i += 1;
+    }
+    all
+};
+
+pub(crate) fn hot(f: Func) -> Hot {
+    HOT[f as usize]
+}
+
+/// Funções de matriz dinâmica ([`crate::parse::flag::DYNARRAY`]).
+pub(crate) const DYNARRAY: &[&str] = &[
+    "FILTER",
+    "UNIQUE",
+    "SORT",
+    "SORTBY",
+    "SEQUENCE",
+    "RANDARRAY",
+    "TAKE",
+    "DROP",
+    "CHOOSECOLS",
+    "CHOOSEROWS",
+    "VSTACK",
+    "HSTACK",
+    "TOCOL",
+    "TOROW",
+    "EXPAND",
+    "WRAPROWS",
+    "WRAPCOLS",
+    "TEXTSPLIT",
+    "MAP",
+    "REDUCE",
+    "SCAN",
+    "BYROW",
+    "BYCOL",
+    "MAKEARRAY",
+    "GROUPBY",
+    "PIVOTBY",
+];
+
+/// Outros nomes em português aceitos ao digitar (na tela aparece o da
+/// tabela): traduções de outras versões do Excel.
+const PT_ALIASES: &[(&str, &str)] = &[
+    ("TEXTODIVIDIR", "TEXTSPLIT"),
+    ("SOMASEQUÊNCIA", "SERIESSUM"),
+    ("PEGAR", "TAKE"),
+    ("MAPA", "MAP"),
+    ("REDUZIR", "REDUCE"),
+    ("VERIFICAR", "SCAN"),
+    ("PORLIN", "BYROW"),
+    ("PORCOL", "BYCOL"),
+    ("CRIARMATRIZ", "MAKEARRAY"),
+    ("ÉOMITIDO", "ISOMITTED"),
+    ("PIVOTARPOR", "PIVOTBY"),
+    ("DISTNORM", "NORMDIST"),
+    ("DISTNORMP", "NORMSDIST"),
+    ("FREQÜÊNCIA", "FREQUENCY"),
+];
+
+/// Argumentos que se aplicam item a item nas funções de [`BASIC`].
+const LIFT: &[(u32, &[&str])] = &[
+    (
+        u32::MAX,
+        &[
+            "NOT",
+            "ISBLANK",
+            "ISERROR",
+            "ISERR",
+            "ISNA",
+            "ISTEXT",
+            "ISNONTEXT",
+            "ISLOGICAL",
+            "ISEVEN",
+            "ISODD",
+            "ERROR.TYPE",
+            "ABS",
+            "SIGN",
+            "ROUND",
+            "ROUNDUP",
+            "ROUNDDOWN",
+            "INT",
+            "TRUNC",
+            "MOD",
+            "QUOTIENT",
+            "POWER",
+            "SQRT",
+            "EXP",
+            "LN",
+            "LOG",
+            "LOG10",
+            "CEILING",
+            "CEILING.MATH",
+            "FLOOR",
+            "FLOOR.MATH",
+            "MROUND",
+            "EVEN",
+            "ODD",
+            "FACT",
+            "LEFT",
+            "RIGHT",
+            "MID",
+            "LEN",
+            "UPPER",
+            "LOWER",
+            "PROPER",
+            "TRIM",
+            "CLEAN",
+            "SUBSTITUTE",
+            "REPLACE",
+            "REPT",
+            "FIND",
+            "SEARCH",
+            "TEXT",
+            "VALUE",
+            "NUMBERVALUE",
+            "EXACT",
+            "CHAR",
+            "CODE",
+            "UNICHAR",
+            "UNICODE",
+            "FIXED",
+            "TEXTBEFORE",
+            "TEXTAFTER",
+            "DATE",
+            "TIME",
+            "YEAR",
+            "MONTH",
+            "DAY",
+            "HOUR",
+            "MINUTE",
+            "SECOND",
+            "WEEKDAY",
+            "WEEKNUM",
+            "ISOWEEKNUM",
+            "EOMONTH",
+            "EDATE",
+            "DATEDIF",
+            "DAYS",
+            "DATEVALUE",
+            "TIMEVALUE",
+            "ADDRESS",
+        ],
+    ),
+    // Só o primeiro argumento.
+    (0b1, &["MATCH", "XMATCH", "XLOOKUP", "LOOKUP", "RANK", "RANK.EQ"]),
+    (0b11, &["NETWORKDAYS", "WORKDAY"]),
+    // Só o segundo.
+    (0b10, &["SUMIF", "COUNTIF", "AVERAGEIF", "LARGE", "SMALL"]),
+    (0b110, &["INDEX"]),
+    (0b1101, &["VLOOKUP", "HLOOKUP"]),
+    // Os critérios (os pares e os ímpares).
+    (0x5555_5554, &["SUMIFS", "AVERAGEIFS", "MINIFS", "MAXIFS"]),
+    (0xAAAA_AAAA, &["COUNTIFS"]),
+];
+
+/// Argumentos da função que se aplicam item a item.
+pub fn lift_mask(f: Func) -> u32 {
+    static MASKS: OnceLock<Vec<u32>> = OnceLock::new();
+    let m = MASKS.get_or_init(|| {
+        FUNCS
+            .iter()
+            .map(|d| {
+                let listed = LIFT.iter().find(|(_, names)| names.contains(&d.name));
+                listed.map_or(d.lift, |(m, _)| *m)
+            })
+            .collect()
+    });
+    m[f as usize]
+}
 
 fn table() -> &'static HashMap<String, Func> {
     static T: OnceLock<HashMap<String, Func>> = OnceLock::new();
@@ -466,7 +724,16 @@ fn table() -> &'static HashMap<String, Func> {
 
 fn table_pt() -> &'static HashMap<String, Func> {
     static T: OnceLock<HashMap<String, Func>> = OnceLock::new();
-    T.get_or_init(|| FUNCS.iter().enumerate().map(|(i, d)| (d.pt.to_uppercase(), i as Func)).collect())
+    T.get_or_init(|| {
+        let mut t: HashMap<String, Func> = HashMap::new();
+        for (alias, name) in PT_ALIASES {
+            if let Some(&f) = table().get(*name) {
+                t.insert(alias.to_string(), f);
+            }
+        }
+        t.extend(FUNCS.iter().enumerate().map(|(i, d)| (d.pt.to_uppercase(), i as Func)));
+        t
+    })
 }
 
 /// Função pelo nome do arquivo (`_xlfn.` e `_xlws.` ignorados).
@@ -497,7 +764,7 @@ pub fn def(f: Func) -> &'static FnDef {
 }
 
 pub fn all() -> &'static [FnDef] {
-    FUNCS
+    &FUNCS
 }
 
 fn opaque<'e>(e: &mut Eval<'e>, _: &[u32]) -> Res<V<'e>> {
@@ -509,14 +776,14 @@ fn opaque<'e>(e: &mut Eval<'e>, _: &[u32]) -> Res<V<'e>> {
 // Ajudantes
 // ---------------------------------------------------------------------------
 
-fn arg_or<'e>(e: &mut Eval<'e>, a: &[u32], i: usize) -> Option<V<'e>> {
+pub(crate) fn arg_or<'e>(e: &mut Eval<'e>, a: &[u32], i: usize) -> Option<V<'e>> {
     let &n = a.get(i)?;
     if e.is_missing(n) { None } else { Some(e.scalar(n)) }
 }
 
 /// Números dos argumentos como SOMA conta: em referências e matrizes só os
 /// números; argumentos diretos convertidos (lógicos, texto numérico).
-fn nums<'e>(e: &mut Eval<'e>, a: &[u32], f: &mut dyn FnMut(f64)) -> Res<()> {
+pub(crate) fn nums<'e>(e: &mut Eval<'e>, a: &[u32], f: &mut dyn FnMut(f64)) -> Res<()> {
     for &n in a {
         match e.eval(n) {
             V::Ref(r) => {
@@ -552,14 +819,14 @@ fn nums<'e>(e: &mut Eval<'e>, a: &[u32], f: &mut dyn FnMut(f64)) -> Res<()> {
     Ok(())
 }
 
-fn num_list<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<Vec<f64>> {
+pub(crate) fn num_list<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<Vec<f64>> {
     let mut v = Vec::new();
     nums(e, a, &mut |x| v.push(x))?;
     Ok(v)
 }
 
 /// Todos os valores não vazios (referências, matrizes e diretos).
-fn each_value<'e>(e: &mut Eval<'e>, a: &[u32], f: &mut dyn FnMut(&V<'e>)) {
+pub(crate) fn each_value<'e>(e: &mut Eval<'e>, a: &[u32], f: &mut dyn FnMut(&V<'e>)) {
     for &n in a {
         match e.eval(n) {
             V::Ref(r) => e.book.each(&r, |_, _, v| {
@@ -600,25 +867,7 @@ fn chars_skip(s: &str, n: usize) -> &str {
 fn if_<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     let c = e.eval(a[0]);
     if e.is_arrayish(&c) {
-        // SE elemento a elemento (dentro de SOMARPRODUTO / fórmula matricial).
-        let arr = e.to_arr(c);
-        let yes = a.get(1).map(|&n| e.eval(n)).unwrap_or(V::Bool(true));
-        let no = a.get(2).map(|&n| e.eval(n)).unwrap_or(V::Bool(false));
-        let (y, n) = (e.to_arr(yes), e.to_arr(no));
-        let v = arr
-            .v
-            .iter()
-            .enumerate()
-            .map(|(i, x)| {
-                let (r, col) = (i as u32 / arr.cols, i as u32 % arr.cols);
-                match to_bool(x) {
-                    Ok(true) => y.get(r, col).clone(),
-                    Ok(false) => n.get(r, col).clone(),
-                    Err(err) => V::Err(err),
-                }
-            })
-            .collect();
-        return Ok(V::Arr(Rc::new(Arr { rows: arr.rows, cols: arr.cols, v })));
+        return Ok(if_items(e, c, a));
     }
     let c = e.to_scalar(c);
     let t = to_bool(&c)?;
@@ -630,7 +879,37 @@ fn if_<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     }
 }
 
+/// SE elemento a elemento (dentro de SOMARPRODUTO / fórmula matricial).
+#[cold]
+#[inline(never)]
+fn if_items<'e>(e: &mut Eval<'e>, c: V<'e>, a: &[u32]) -> V<'e> {
+    let arr = e.to_arr(c);
+    let yes = a.get(1).map(|&n| e.eval(n)).unwrap_or(V::Bool(true));
+    let no = a.get(2).map(|&n| e.eval(n)).unwrap_or(V::Bool(false));
+    let (y, n) = (e.to_arr(yes), e.to_arr(no));
+    // A condição de uma linha (ou coluna) se repete sobre os valores.
+    let rows = if arr.rows == 1 { y.rows.max(n.rows) } else { arr.rows };
+    let cols = if arr.cols == 1 { y.cols.max(n.cols) } else { arr.cols };
+    let mut v = Vec::with_capacity((rows * cols) as usize);
+    for r in 0..rows {
+        for col in 0..cols {
+            v.push(match to_bool(arr.get(r, col)) {
+                Ok(true) => y.get(r, col).clone(),
+                Ok(false) => n.get(r, col).clone(),
+                Err(err) => V::Err(err),
+            });
+        }
+    }
+    V::Arr(Rc::new(Arr { rows, cols, v }))
+}
+
 fn ifs<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
+    if e.array {
+        let first = e.eval(a[0]);
+        if many(e, &first) {
+            return Ok(e.lifted(ifs, u32::MAX, a));
+        }
+    }
     for p in a.chunks(2) {
         if p.len() < 2 {
             return Err(CellError::Value);
@@ -642,8 +921,21 @@ fn ifs<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     Err(CellError::NA)
 }
 
+/// Argumento com vários itens, no modo matricial.
+fn many<'e>(e: &Eval<'e>, v: &V<'e>) -> bool {
+    e.array
+        && match v {
+            V::Arr(a) => a.v.len() > 1,
+            V::Ref(r) => !r.is_cell(),
+            _ => false,
+        }
+}
+
 fn iferror<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     let v = e.eval(a[0]);
+    if many(e, &v) {
+        return Ok(replace_errors(e, v, a[1], |x| x.is_err()));
+    }
     let v = match v {
         V::Ref(r) if r.is_cell() || !e.array => e.deref(r),
         v => v,
@@ -651,8 +943,35 @@ fn iferror<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     if v.is_err() { Ok(e.eval(a[1])) } else { Ok(v) }
 }
 
+/// Matriz com os itens que `bad` acusa trocados pelos de `other` (calculado
+/// só se algum precisa: pode ser uma LAMBDA recursiva).
+#[cold]
+#[inline(never)]
+fn replace_errors<'e>(e: &mut Eval<'e>, v: V<'e>, other: u32, bad: fn(&V) -> bool) -> V<'e> {
+    let arr = e.to_arr(v);
+    if !arr.v.iter().any(bad) {
+        return V::Arr(arr);
+    }
+    let alt = e.eval(other);
+    let alt = e.to_arr(alt);
+    let rows = arr.rows.max(alt.rows);
+    let cols = arr.cols.max(alt.cols);
+    let mut v = Vec::with_capacity((rows * cols) as usize);
+    for r in 0..rows {
+        for c in 0..cols {
+            let x = arr.get(r, c);
+            v.push(if bad(x) { alt.get(r, c).clone() } else { x.clone() });
+        }
+    }
+    V::Arr(Rc::new(Arr { rows, cols, v }))
+}
+
 fn ifna<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
-    let v = e.scalar(a[0]);
+    let v = e.eval(a[0]);
+    if many(e, &v) {
+        return Ok(replace_errors(e, v, a[1], |x| *x == V::Err(CellError::NA)));
+    }
+    let v = e.to_scalar(v);
     if v == V::Err(CellError::NA) { Ok(e.eval(a[1])) } else { Ok(v) }
 }
 
@@ -741,7 +1060,11 @@ fn false_<'e>(_: &mut Eval<'e>, _: &[u32]) -> Res<V<'e>> {
 }
 
 fn switch<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
-    let x = tri(e.scalar(a[0]))?;
+    let x = e.eval(a[0]);
+    if many(e, &x) {
+        return Ok(e.lifted(switch, u32::MAX, a));
+    }
+    let x = tri(e.to_scalar(x))?;
     let rest = &a[1..];
     let pairs = rest.len() / 2;
     for k in 0..pairs {
@@ -754,11 +1077,44 @@ fn switch<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
 }
 
 fn choose<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
-    let k = e.num(a[0])?.trunc() as i64;
+    let sel = e.eval(a[0]);
+    if e.array && matches!(&sel, V::Arr(x) if x.rows * x.cols > 1) {
+        return Ok(choose_items(e, sel, a));
+    }
+    let sel = e.to_scalar(sel);
+    let k = e.to_num(&sel)?.trunc() as i64;
     if k < 1 || k as usize >= a.len() {
         return Err(CellError::Value);
     }
     Ok(e.eval(a[k as usize]))
+}
+
+/// ESCOLHER({1;2};A:A;C:C): cada item da seleção vem da sua matriz.
+#[cold]
+#[inline(never)]
+fn choose_items<'e>(e: &mut Eval<'e>, sel: V<'e>, a: &[u32]) -> V<'e> {
+    let sel = e.to_arr(sel);
+    let parts: Vec<Rc<Arr>> = a[1..]
+        .iter()
+        .map(|&n| {
+            let v = e.eval(n);
+            e.to_arr(v)
+        })
+        .collect();
+    let rows = parts.iter().map(|p| p.rows).fold(sel.rows, u32::max);
+    let cols = parts.iter().map(|p| p.cols).fold(sel.cols, u32::max);
+    let mut v = Vec::with_capacity((rows * cols) as usize);
+    for r in 0..rows {
+        for c in 0..cols {
+            let k = e.to_num(sel.get(r, c)).map(|k| k.trunc() as usize);
+            v.push(match k {
+                Ok(k) if k >= 1 && k <= parts.len() => parts[k - 1].get(r, c).clone(),
+                Ok(_) => V::Err(CellError::Value),
+                Err(x) => V::Err(x),
+            });
+        }
+    }
+    V::Arr(Rc::new(Arr { rows, cols, v }))
 }
 
 // ---------------------------------------------------------------------------
@@ -874,6 +1230,7 @@ fn row<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     match a.first() {
         None => Ok(V::Num(e.row as f64 + 1.0)),
         Some(&n) => match e.eval(n) {
+            V::Ref(r) if e.array && r.rows() > 1 => Ok(row_items(e, r)),
             V::Ref(r) => Ok(V::Num(r.r0 as f64 + 1.0)),
             V::Err(x) => Err(x),
             _ => Err(CellError::Value),
@@ -881,10 +1238,25 @@ fn row<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     }
 }
 
+/// LIN de um intervalo, linha por linha.
+#[cold]
+#[inline(never)]
+fn row_items<'e>(e: &Eval<'e>, r: Rng) -> V<'e> {
+    let r1 = r.r1.min(r.r0.max(e.book.max_rows.saturating_sub(1)));
+    // Um bloco limitado (`LIN(1:100)`) vale inteiro.
+    let r1 = if r.rows() <= 1_000_000 { r.r1 } else { r1 };
+    let v: Vec<V> = (r.r0..=r1).map(|i| V::Num(i as f64 + 1.0)).collect();
+    V::Arr(Rc::new(Arr { rows: v.len() as u32, cols: 1, v }))
+}
+
 fn column<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     match a.first() {
         None => Ok(V::Num(e.col as f64 + 1.0)),
         Some(&n) => match e.eval(n) {
+            V::Ref(r) if e.array && r.cols() > 1 => {
+                let v: Vec<V> = (r.c0..=r.c1).map(|i| V::Num(i as f64 + 1.0)).collect();
+                Ok(V::Arr(Rc::new(Arr { rows: 1, cols: v.len() as u32, v })))
+            }
             V::Ref(r) => Ok(V::Num(r.c0 as f64 + 1.0)),
             V::Err(x) => Err(x),
             _ => Err(CellError::Value),
@@ -916,13 +1288,13 @@ fn columns<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
 
 /// Soma com compensação (Kahan-Neumaier): somas longas ficam iguais às do Excel.
 #[derive(Default)]
-struct Acc {
+pub(crate) struct Acc {
     s: f64,
     c: f64,
 }
 
 impl Acc {
-    fn add(&mut self, x: f64) {
+    pub(crate) fn add(&mut self, x: f64) {
         let t = self.s + x;
         if self.s.abs() >= x.abs() {
             self.c += (self.s - t) + x;
@@ -931,7 +1303,7 @@ impl Acc {
         }
         self.s = t;
     }
-    fn get(&self) -> f64 {
+    pub(crate) fn get(&self) -> f64 {
         self.s + self.c
     }
 }
@@ -1121,7 +1493,7 @@ fn rank<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     Ok(V::Num(n as f64 + 1.0))
 }
 
-fn variance(v: &[f64], sample: bool) -> Res<f64> {
+pub(crate) fn variance(v: &[f64], sample: bool) -> Res<f64> {
     let n = v.len() as f64;
     if v.is_empty() || (sample && v.len() < 2) {
         return Err(CellError::Div0);
@@ -1417,6 +1789,9 @@ fn odd<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
 fn fact<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     let x = e.num(a[0])?.trunc();
     if x < 0.0 {
+        return Err(CellError::Num);
+    }
+    if x > 170.0 {
         return Err(CellError::Num);
     }
     Ok(V::num((1..=x as u64).fold(1.0, |p, k| p * k as f64)))
@@ -2171,7 +2546,7 @@ pub fn date_serial(y: i64, m: i64, d: i64, date1904: bool) -> Res<f64> {
     if s < 0.0 { Err(CellError::Num) } else { Ok(s) }
 }
 
-fn ymd(e: &Eval, x: f64) -> Res<(i64, i64, i64, u32)> {
+pub(crate) fn ymd(e: &Eval, x: f64) -> Res<(i64, i64, i64, u32)> {
     if x < 0.0 {
         return Err(CellError::Num);
     }
@@ -2179,7 +2554,7 @@ fn ymd(e: &Eval, x: f64) -> Res<(i64, i64, i64, u32)> {
     Ok((dt.year as i64, dt.month as i64, dt.day as i64, dt.weekday))
 }
 
-fn date_arg<'e>(e: &mut Eval<'e>, n: u32) -> Res<f64> {
+pub(crate) fn date_arg<'e>(e: &mut Eval<'e>, n: u32) -> Res<f64> {
     let v = e.scalar(n);
     match v {
         V::Str(s) => parse_number(&s, e.book.date1904).ok_or(CellError::Value),
@@ -2187,7 +2562,7 @@ fn date_arg<'e>(e: &mut Eval<'e>, n: u32) -> Res<f64> {
     }
 }
 
-fn days_in_month(y: i64, m: i64) -> i64 {
+pub(crate) fn days_in_month(y: i64, m: i64) -> i64 {
     match m {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -2390,7 +2765,7 @@ fn datevalue_time<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     parse_number(&s, e.book.date1904).map(|x| V::Num(x.fract())).ok_or(CellError::Value)
 }
 
-fn holidays<'e>(e: &mut Eval<'e>, a: &[u32], i: usize) -> Res<Vec<f64>> {
+pub(crate) fn holidays<'e>(e: &mut Eval<'e>, a: &[u32], i: usize) -> Res<Vec<f64>> {
     match a.get(i) {
         Some(&n) if !e.is_missing(n) => {
             let mut v = num_list(e, &[n])?;
@@ -2863,7 +3238,7 @@ fn indirect<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     }
 }
 
-fn col_letters(mut c: u32) -> String {
+pub(crate) fn col_letters(mut c: u32) -> String {
     let mut s = Vec::new();
     c += 1;
     while c > 0 {

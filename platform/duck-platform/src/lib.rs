@@ -83,7 +83,15 @@ pub enum Cursor {
     Text,
     ResizeColumn,
     ResizeRow,
+    /// Cruz (alça de preenchimento).
+    Cross,
+    /// Mover.
+    Move,
 }
+
+mod clock;
+
+pub use clock::{LocalTime, local_time};
 
 /// Esquema de cores do sistema (e da moldura da janela).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,6 +156,8 @@ impl Window {
             Cursor::Text => CursorIcon::Text,
             Cursor::ResizeColumn => CursorIcon::ColResize,
             Cursor::ResizeRow => CursorIcon::RowResize,
+            Cursor::Cross => CursorIcon::Crosshair,
+            Cursor::Move => CursorIcon::Move,
         };
         self.inner.set_cursor(icon);
     }
@@ -462,6 +472,7 @@ pub enum Event {
         button: MouseButton,
         x: f64,
         y: f64,
+        modifiers: Modifiers,
     },
     MouseLeft,
     Wheel {
@@ -707,7 +718,7 @@ impl<A: App> ApplicationHandler<()> for Runner<'_, A> {
                         let clicks = self.click_count(button);
                         Event::MouseDown { button, x, y, modifiers: self.modifiers, clicks }
                     }
-                    ElementState::Released => Event::MouseUp { button, x, y },
+                    ElementState::Released => Event::MouseUp { button, x, y, modifiers: self.modifiers },
                 };
                 self.dispatch(event_loop, ev);
             }

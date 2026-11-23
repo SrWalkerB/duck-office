@@ -26,8 +26,8 @@ crates/              a suíte office
   duck-emf/          imagens EMF (registros GDI) para pixels
   duck-vba/          macros: projeto VBA do arquivo, analisador, interpretador e objetos do Excel
   duck-dax/          Modelo de Dados: definições, medidas DAX e consultas das dinâmicas
-  duck-bench/        medição e conferência: open, sweep, verify, roundtrip, calc, dinamicas, modelo,
-                     objetos, regress, gen, gen-showcase, inflate, preview
+  duck-bench/        medição e conferência: open, sweep, verify, roundtrip, conferir-pacote, calc,
+                     dinamicas, modelo, objetos, regress, gen, gen-showcase, inflate, preview
 scripts/
   check-platform-deps.sh   garante que platform/ não depende da suíte
 ```
@@ -56,11 +56,19 @@ Sem arquivo, abre uma planilha em branco (Ctrl+O abre um arquivo, ou arraste-o p
 
 A faixa de opções em cima tem as abas **Arquivo** (novo, abrir, recentes, salvar, salvar como, "Abrir com" do sistema), **Página Inicial** (área de transferência, fonte, alinhamento, número, células, edição), **Inserir** (linhas, colunas, mesclagem) e **Exibir** (zoom, linhas de grade, cabeçalhos, congelar painéis, tema claro, escuro ou o do sistema). O clique direito na grade ou nos cabeçalhos abre um menu com as ações mais comuns.
 
-Edição: digitar substitui a célula; F2, duplo clique ou clique na barra de fórmulas editam o conteúdo; Enter/Tab confirmam e Esc cancela; Delete apaga a seleção; Ctrl+C, Ctrl+X e Ctrl+V copiam, recortam e colam (de outros programas também); Ctrl+Z e Ctrl+Y desfazem e refazem; Ctrl+S salva e Ctrl+Shift+S salva como. A barra de ferramentas tem negrito, itálico, sublinhado, tachado, cores, alinhamento, formatos de número, bordas e inserir/apagar linhas e colunas (também Ctrl+N/B, Ctrl+I, Ctrl+U, Ctrl+5, Ctrl+Shift+1/3/4/5/7 e Ctrl+Alt+= / Ctrl+Alt+-).
+Edição: digitar substitui a célula; F2, duplo clique ou clique na barra de fórmulas editam o conteúdo; Enter/Tab confirmam e Esc cancela; Delete apaga a seleção; Ctrl+C, Ctrl+X e Ctrl+V copiam, recortam e colam (de outros programas também); Ctrl+Z e Ctrl+Y desfazem e refazem; Ctrl+S salva e Ctrl+Shift+S salva como. Alt+Enter quebra a linha dentro da célula, Ctrl+Enter preenche a seleção toda com o que foi digitado e um clique no texto do editor põe o cursor ali. A barra de ferramentas tem negrito, itálico, sublinhado, tachado, cores, alinhamento, formatos de número, bordas e inserir/apagar linhas e colunas (também Ctrl+N/B, Ctrl+I, Ctrl+U, Ctrl+5, Ctrl+Shift+1/3/4/5/7 e Ctrl+Alt+= / Ctrl+Alt+-).
 
 Ao digitar uma fórmula, na célula ou na barra, aparece a lista de funções, nomes, tabelas e colunas de tabela que começam com o que foi escrito (sem diferenciar maiúsculas nem acentos): ↑ e ↓ escolhem, Tab ou o clique inserem, Esc fecha a lista e Enter confirma a célula. Dentro dos parênteses, a assinatura da função mostra o argumento atual em destaque.
 
 Com a fórmula aberta, clicar numa célula escreve a referência dela onde cabe uma (depois de `=`, operador, `(` ou `;`); em outro lugar, o clique confirma a edição. Arrastar ou Shift+clique faz um intervalo, o cabeçalho dá a coluna ou a linha inteira, e as setas também apontam (F2 alterna com andar no texto). O próximo clique troca a referência; depois de um operador ou `;`, começa outra. F4 alterna `$A$1`, `A$1`, `$A1` e `A1`. Para apontar em outra aba, clique na guia dela: confirmar volta para a aba da célula. Cada referência tem uma cor, no texto e na grade, e o parêntese que falta no fim é fechado ao confirmar.
+
+Abas: o `+` no fim das guias (ou Shift+F11) cria, o duplo clique renomeia, arrastar move (com Ctrl, duplica) e o clique direito tem excluir, duplicar, mover, cor, ocultar e reexibir. As fórmulas, nomes definidos, gráficos, dinâmicas e segmentações acompanham, e tudo se desfaz com Ctrl+Z.
+
+Preencher: arraste a alça no canto da seleção (13 vira 14, 15…; com Ctrl, só copia) ou dê duplo clique nela para ir até o fim da coluna vizinha; Ctrl+D e Ctrl+R preenchem para baixo e para a direita. As séries são as do Excel em português: números, datas, `jan`, `segunda-feira`, `Item 1`. Arrastar a borda da seleção move as células (com Ctrl, copia).
+
+Colar especial (Ctrl+Alt+V): valores, fórmulas, formatos, larguras, sem bordas, transpor e operações; Ctrl+Shift+V cola só os valores. O pincel da Página Inicial copia o formato (duplo clique: várias vezes). Ctrl+H substitui na aba ou na pasta inteira, em fórmulas ou valores; Ctrl+1 abre Formatar células (número, alinhamento, fonte, borda e preenchimento).
+
+Ctrl+clique e Ctrl+arrastar somam áreas à seleção, para formatar, limpar, preencher e copiar (quando as áreas se alinham, como no Excel); a caixa de nome aceita `A1:B2;D4`. A barra de status mostra soma, média, contagem, mínimo e máximo. Alt+= faz a AutoSoma, Ctrl+; e Ctrl+Shift+; escrevem a data e a hora, e inserir ou excluir células pode deslocar só as vizinhas.
 
 No tema escuro a planilha também escurece, só na tela: as cores gravadas no arquivo não mudam. A escolha fica em `preferencias.txt`, na pasta de configuração do usuário (`%APPDATA%\duck-office` ou `~/.config/duck-office`).
 
@@ -70,7 +78,20 @@ Objetos: formas, imagens e controles com link ou macro respondem ao clique; os b
 
 Validação de dados: a célula com lista mostra uma seta (clique ou Alt+↓; na lista, as setas e as letras escolhem), um valor que a regra não aceita é recusado ou pergunta, e a mensagem de entrada aparece ao selecionar; **Dados → Validação de dados** cria, edita e tira regras. Notas: a marca vermelha no canto mostra o texto ao passar o mouse; **Revisão → Nova nota** (Shift+F2) cria e edita, e as conversas do Excel 365 (marca roxa) aparecem só para leitura. Planilha protegida: só as células desbloqueadas e o que a proteção permite mudam; **Revisão** protege e desprotege a planilha e a estrutura da pasta, pedindo a senha que o arquivo guarda.
 
-Opções: `--sheet N` (aba inicial, 1 = primeira), `--cell B12`, `--zoom 80`, `--find texto`, `--novo` (planilha em branco), `--tema claro|escuro|sistema` (só nesta execução; em `--screenshot` e `--bench`, sem isto, vale o claro). Para testar a edição sem a janela: `--edit A1=valor` (também `copiar:A1:B2`, `colar:D5`, `inserir:A5:A6`, `formatar:negrito:A1:B2`, `mesclar-centralizar:A1:C1`, `ocultar-linhas:A3:A4`, `congelar:B2`, `largura=20:C1`...), `--undo N`, `--save-to cópia.xlsx`; e, para screenshots, `--aba exibir`, `--menu bordas` (abre um menu) e `--digitar "=so"` (digita na célula ativa e deixa a edição aberta; `{baixo}`, `{shift-direita}`, `{tab}`, `{enter}`, `{esc}`, `{f2}`, `{f4}`... são teclas, `{clique:B2}`, `{shift-clique:B5}`, `{arrastar:B2:B10}`, `{coluna:B}`, `{linha:3}` e `{aba:Nome}` são cliques, e `{barra}` no começo edita na barra de fórmulas).
+Opções: `--sheet N` (aba inicial, 1 = primeira), `--cell B12`, `--zoom 80`, `--find texto`, `--novo` (planilha em branco), `--tema claro|escuro|sistema` (só nesta execução; em `--screenshot` e `--bench`, sem isto, vale o claro). Para testar a edição sem a janela: `--edit A1=valor` (também `copiar:A1:B2`, `colar:D5`, `inserir:A5:A6`, `formatar:negrito:A1:B2`, `mesclar-centralizar:A1:C1`, `ocultar-linhas:A3:A4`, `congelar:B2`, `largura=20:C1`..., e as da tabela abaixo), `--undo N`, `--save-to cópia.xlsx`; e, para screenshots, `--aba exibir`, `--menu bordas` (abre um menu) e `--digitar "=so"` (digita na célula ativa e deixa a edição aberta; `{baixo}`, `{shift-direita}`, `{tab}`, `{enter}`, `{esc}`, `{f2}`, `{f4}`... são teclas, `{clique:B2}`, `{shift-clique:B5}`, `{arrastar:B2:B10}`, `{coluna:B}`, `{linha:3}` e `{aba:Nome}` são cliques, e `{barra}` no começo edita na barra de fórmulas).
+
+| `--edit` | O que faz |
+|---|---|
+| `A1=um\ndois` | escreve com quebra de linha |
+| `aba-nova[=Nome]`, `aba=N`, `aba-renomear=N:Nome`, `aba-excluir=N`, `aba-duplicar=N[:M]`, `aba-mover=N:M`, `aba-cor=N:RRGGBB`, `aba-ocultar=N`, `aba-reexibir=N` | abas (`aba=N` troca a aba das edições seguintes) |
+| `preencher=A1:A2>A1:A10` (também `preencher-copia=`, `preencher-serie=`), `preencher-baixo:A1:A5`, `preencher-direita:A1:E1`, `preencher-duplo:A1:A2` | alça de preenchimento, Ctrl+D, Ctrl+R e duplo clique |
+| `substituir=achar>trocar` (também com `-pasta`, `-valores`, `-exato`, `-celula` antes do `=`) | Ctrl+H |
+| `colar-valores:D5`, `colar-formulas:`, `colar-formatos:`, `colar-larguras:`, `colar-sem-bordas:`, `colar-transpor:`, `colar-somar:`, `pincel:A1:B2>D1:E5` | colar especial e pincel |
+| `mover=A1:B2>D5`, `copiar-arrastando=A1:B2>D5`, `inserir-celulas-baixo:A1:B2`, `inserir-celulas-direita:`, `excluir-celulas-cima:`, `excluir-celulas-esquerda:` | mover e deslocar células |
+| `selecionar:A1:B2;D1`, `estatisticas:A1:B2;D1`, `preencher-todas=texto:A1:B3;D1`, `autosoma:A5`, `data:A1`, `hora:A2` | várias áreas, estatísticas, Ctrl+Enter, AutoSoma, data e hora |
+| `formatar-celulas=codigo=0,00\|horizontal=centro>A1:B2;D1` | Formatar células: `codigo`, `categoria`, `casas`, `milhar`, `horizontal`, `vertical`, `recuo`, `orientacao`, `empilhado`, `quebrar`, `reduzir`, `mesclar`, `fonte`, `estilo`, `tamanho`, `cor`, `sublinhado`, `tachado`, `fundo`, `linha`, `corborda`, `borda` |
+
+`--menu` também abre `guia`, `guia-cor`, `guia-renomear`, `colar`, `preencher`, `caixa-colar`, `caixa-substituir`, `caixa-inserir`, `caixa-excluir` e `caixa-formatar-0` a `-4`.
 
 Também no `--edit`: `validar:B2:B9=lista|Sim;Não` (`inteiro|1|10`, `decimal`, `data`, `hora`, `texto`, `personalizada|=fórmula`, `nenhuma`), `lista:B2=1` (escolhe o item), `nota:B2=texto` (vazio tira), `nota-visivel:B2`, `proteger=senha`, `desproteger=senha`, `proteger-pasta=senha`, `desproteger-pasta=senha`, `formatar:bloquear:A1:B2`. No `--menu`: `lista`, `validacao`, `nota`, `nota-mouse`, `notas`, `proteger`, `proteger-pasta`; no `--aba`: `revisao`.
 

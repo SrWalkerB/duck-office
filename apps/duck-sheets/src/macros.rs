@@ -166,7 +166,9 @@ impl Ctx<'_> {
     /// Aplica um passo; o aviso da proteção vira o erro da macro. As abas
     /// protegidas com `UserInterfaceOnly` deixam as macros mudarem.
     fn run(&mut self, step: crate::edit::Step, why: &str) -> R<()> {
-        let free = self.doc().is_some_and(|d| step.iter().all(|(i, _)| d.macro_free.contains(i)));
+        let free = self.doc().is_some_and(|d| {
+            step.iter().all(|(i, _)| d.sheets.get(*i).is_some_and(|s| d.macro_free.contains(&s.info.id)))
+        });
         self.app.unchecked = free;
         let ok = self.app.run_step(step);
         self.app.unchecked = false;
@@ -218,11 +220,13 @@ impl Backend for Ctx<'_> {
                 }
                 let new = duck_core::SheetProtection { enabled: true, deny: p.deny, password };
                 self.run(vec![(i, Command::Protect(Some(Box::new(new))))], "Não foi possível proteger")?;
-                if let Some(d) = self.app.doc.as_mut() {
+                if let Some(d) = self.app.doc.as_mut()
+                    && let Some(id) = d.sheets.get(i).map(|s| s.info.id)
+                {
                     if p.ui_only {
-                        d.macro_free.insert(i);
+                        d.macro_free.insert(id);
                     } else {
-                        d.macro_free.remove(&i);
+                        d.macro_free.remove(&id);
                     }
                 }
             }

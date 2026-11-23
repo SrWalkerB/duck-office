@@ -81,7 +81,11 @@ fn refusal(sheet: &Sheet, styles: &Styles, cmd: &Command) -> Option<&'static str
         Command::Layout(l) => (l.pivots != sheet.layout.pivots)
             .then(|| denied(deny::PIVOTS, "A planilha protegida não permite mudar tabelas dinâmicas."))
             .flatten(),
-        Command::Group(list) => list.iter().find_map(|c| refusal(sheet, styles, c)),
+        // O que se quer fazer (inserir células) antes do que isso muda.
+        Command::Group(list) => {
+            let (ops, rest): (Vec<_>, Vec<_>) = list.iter().partition(|c| matches!(c, Command::CellOp(..)));
+            ops.into_iter().chain(rest).find_map(|c| refusal(sheet, styles, c))
+        }
         Command::TabColor(_) => Some("A planilha protegida não permite mudar a cor da guia."),
         Command::CellOp(duck_core::cells::CellOp::Shift { .. }, _) => {
             Some("A planilha protegida não permite inserir ou excluir células.")
@@ -90,7 +94,8 @@ fn refusal(sheet: &Sheet, styles: &Styles, cmd: &Command) -> Option<&'static str
         // O conteúdo das células movidas anda por `Restore` e `SetCells`, já
         // conferidos; a troca de nome de aba nas fórmulas é consequência.
         Command::CellOp(..) | Command::FormulaTexts(_) => None,
-        Command::Pane(_) | Command::Protect(_) | Command::BookProtect(_) => None,
+        // A lista de abas é com a proteção da pasta (ver `allowed`).
+        Command::Pane(_) | Command::Protect(_) | Command::BookProtect(_) | Command::Book(_) => None,
     }
 }
 
@@ -138,8 +143,16 @@ impl SheetsApp {
     ///
     /// Num passo que insere, apaga ou move linhas, colunas ou células, só a
     /// aba que muda conta: os ajustes de fórmulas nas outras são
-    /// consequência, não edição.
+    /// consequência, não edição. O mesmo vale quando a lista de abas muda (a
+    /// proteção que conta é a da pasta).
     pub fn allowed(&mut self, step: &[(usize, &Command)]) -> bool {
+        // Com um valor inválido à espera de resposta, nada mais muda.
+        if self.answering() {
+            return false;
+        }
+        if step.iter().any(|(_, c)| crate::tabs::changes_tabs(c)) {
+            return !self.structure_locked();
+        }
         if self.unchecked {
             return true;
         }
@@ -241,9 +254,8 @@ impl SheetsApp {
         None
     }
 
-    /// Para as ações de abas: a estrutura da pasta está protegida (criar, renomear, mover, ocultar
-    /// e excluir abas)? Se estiver, avisa.
-    #[allow(dead_code)] // as ações de abas ainda não existem no app
+    /// A estrutura da pasta está protegida (criar, renomear, mover, ocultar e
+    /// excluir abas)? Se estiver, avisa.
     pub fn structure_locked(&mut self) -> bool {
         let on = self.doc.as_ref().and_then(|d| d.protection.as_ref()).is_some_and(|p| p.structure);
         if on {

@@ -138,14 +138,18 @@ Critério de pronto: dá para abrir, editar, formatar, filtrar e salvar uma plan
 ## ✅ F4 · Motor de cálculo
 
 - [x] **Leitor de fórmulas** (`duck-calc/src/parse.rs`): texto → fórmula compilada que não depende da célula (cada referência é absoluta ou um deslocamento). Um modelo copiado para um milhão de linhas é compilado uma vez. Abas, referências de tabela (`Tabela[[#This Row],[Coluna]]`, `[@Coluna]`), nomes definidos e arquivos externos (`[1]Aba!A:F`, com os valores que o Excel guardou) são resolvidos na compilação.
-- [x] **Funções** (150 calculadas): lógicas, informação, matemáticas e estatísticas, critérios (SOMASES, CONT.SES, MÉDIASES...), texto (TEXTO com códigos em português), datas (FIMMÊS, NÚMSEMANA, DATADIF...) e busca (PROCV, PROCX, CORRESP, ÍNDICE, DESLOC, INDIRETO). As que ainda não são calculadas (INFODADOSTABELADINÂMICA, FILTRO, ÚNICO...) mantêm o valor guardado.
+- [x] **Funções** (442 calculadas): lógicas, informação, matemáticas, trigonométricas, matrizes, estatísticas, regressão, distribuições e testes, financeiras (parcelas, fluxos de caixa com e sem datas, depreciação, títulos), engenharia (unidades, bases, bits), banco de dados, critérios (SOMASES, CONT.SES, MÉDIASES...), texto (TEXTO com códigos em português, DIVIDIRTEXTO), datas (FIMMÊS, NÚMSEMANA, DATADIF, FRAÇÃOANO, DIATRABALHO.INTL...) e busca (PROCV, PROCX, CORRESP, ÍNDICE, DESLOC, INDIRETO). As listas ficam em `duck-calc/src/funcs.rs` e, por assunto, em `duck-calc/src/fns/`. Cada uma tem teste com valores do Excel (`crates/duck-calc/tests/funcoes.rs`), inclusive erros e vazias.
+- [x] **Funções que não são calculadas** (INFODADOSTABELADINÂMICA, cubos, RTD, SERVIÇOWEB, IMAGEM, as desconhecidas e as de VBA): nos arquivos abertos o valor gravado fica; digitadas, mostram um erro (`#NOME?`, ou `#REF!` se for outro arquivo) e a barra de status diz qual função falta. Nunca ficam vazias.
 - [x] **Buscas com índice**: PROCV, CORRESP, PROCX e os critérios de igualdade montam um índice por coluna uma vez e o compartilham entre as threads.
 - [x] **Grafo de dependências por intervalos**: células seguidas com a mesma fórmula viram um bloco; referências viram retângulos; níveis calculados em paralelo; blocos que dependem de si mesmos (saldo acumulado) de cima para baixo.
 - [x] **Recálculo incremental em segundo plano**: ao abrir (voláteis, como o Excel) e a cada edição, só os dependentes e os voláteis. A janela continua respondendo; uma edição nova cancela o cálculo em andamento. F9 recalcula os voláteis, Shift+F9 tudo.
 - [x] **Fórmulas em português** na barra e ao digitar (`=SOMA(A1;1,5)`); o arquivo guarda como o Excel (`SUM(A1,1.5)`).
 - [x] **Conferência** (`duck-bench calc`): cada fórmula do arquivo é calculada com os valores guardados e comparada com o resultado do Excel.
 - [x] **Matrizes dinâmicas**: FILTRO, ÚNICO, CLASSIFICAR, CLASSIFICARPOR, SEQUÊNCIA, MATRIZALEATÓRIA, TOMAR, DESCARTAR, ESCOLHERCOLS, ESCOLHERLINS, EMPILHARV, EMPILHARH, PARACOL, PARALIN, EXPANDIR, TRANSPOR e LET. O resultado se espalha pelas células vizinhas e acompanha o tamanho (`#DESPEJAR!` se a área estiver ocupada); escrever na área bloqueia, apagar a fórmula limpa. Gravadas como o Excel (`t="array"`, `cm`, `metadata.xml`). Fórmulas comuns de arquivos antigos continuam com a interseção implícita.
-- [ ] LAMBDA e as funções que a usam (MAP, REDUCE, BYROW...).
+- [x] **LAMBDA** (com parâmetros opcionais, guardada em LET ou num nome definido, recursiva) e as funções que a usam: MAP, REDUCE, SCAN, BYROW, BYCOL, MAKEARRAY, AGRUPARPOR e PIVOTAR, que também aceitam o nome de uma função no lugar dela (`BYROW(A1:C9;SOMA)`).
+- [x] **Funções de um valor aplicadas a matrizes** (`SOMA(ABS(A1:A9))`, `SOMARPRODUTO((MÊS(A1:A9)=2)*B1:B9)`, `SOMA(1/CONT.SE(A1:A9;A1:A9))`, `ESCOLHER({1\2};...)`): um resultado por item, como no Excel. As digitadas são gravadas como matriz dinâmica.
+- [x] Constantes de matriz em português (`{1\2;3\4}`).
+- [ ] Números complexos (IMSOMA...), Bessel, PREVISÃO.ETS, títulos com primeiro ou último período irregular, REGEX, e CÉL com cor, formato, prefixo e proteção.
 - [ ] Núcleos SIMD para blocos de fórmulas simples (hoje cada célula é avaliada pela árvore).
 
 Resultado: nas duas planilhas reais de teste, **100% das fórmulas iguais ao Excel** (10,1 milhões e 140 mil). O arquivo de referência inteiro é recalculado em **0,6 s** com 32 threads (grafo montado em 30 ms); só os voláteis (5 milhões de células com HOJE) em 0,2 s.
@@ -172,7 +176,7 @@ Critério de pronto: recalcular o arquivo de referência sem travar a janela. �
 
 ## ✅ Versão 1.0 do duck-sheets
 
-O que entra na primeira versão: tudo das fases F0 a F5. O que fica para depois: edição de gráficos, LAMBDA, formato nativo, impressão/PDF, `duck-docs` e `duck-slides`.
+O que entra na primeira versão: tudo das fases F0 a F5. O que fica para depois: edição de gráficos, formato nativo, impressão/PDF, `duck-docs` e `duck-slides`.
 
 - [x] Versão 1.0.0, "Sobre o duck-sheets" no menu Arquivo e `duck-sheets --version`.
 - [x] Pacotes (`scripts/package.sh`, fluxo `.github/workflows/release.yml` numa etiqueta `v*`): Windows (`.zip`), Linux (`.tar.gz` com `.desktop`) e macOS (`.app` com os tipos de arquivo, sem assinatura).
@@ -198,18 +202,29 @@ Tudo o que as duas planilhas reais de teste usam, com os mesmos resultados do Ex
 - [x] **Autocompletar fórmulas** na célula e na barra: as funções que o motor calcula (a lista sai da tabela do `duck-calc`), nomes definidos, tabelas e colunas, sem diferenciar maiúsculas nem acentos; assinatura com o argumento atual em destaque; teclado e mouse.
 - [x] **Modo escuro**: tema claro, escuro ou o do sistema (aba Exibir), lembrado entre execuções e trocado com a janela aberta. A planilha escurece só na tela; o arquivo salvo é idêntico nos dois temas.
 - [x] **Referências por clique**: clicar, arrastar ou andar com as setas escreve a referência (células, colunas e linhas inteiras, outras abas); F4, cores no texto e na grade, e o parêntese que falta fechado ao confirmar.
+- [x] **Abas**: criar, renomear, excluir, duplicar, mover, cor, ocultar e reexibir, pelo mouse ou pelo menu da guia. Fórmulas, nomes, gráficos, dinâmicas e segmentações ajustados; gravado no `workbook.xml`, nas relações e nos tipos; desfazer e refazer.
+- [x] **Alça de preenchimento**, duplo clique, Ctrl+D e Ctrl+R, com as séries em português.
+- [x] **Substituir** (Ctrl+H) na aba ou na pasta inteira, em fórmulas ou valores.
+- [x] **Várias linhas na célula** (Alt+Enter), com o editor crescendo; o texto rico é mantido no que não mudou.
+- [x] **Colar especial** e **pincel de formatação**.
+- [x] **Seleção múltipla** (Ctrl+clique e Ctrl+arrastar), com formatação, limpar, copiar e estatísticas.
+- [x] **AutoSoma, data e hora, Ctrl+Enter, mover pela borda, inserir e excluir só células**; mínimo e máximo na barra de status.
+- [x] **Formatar células** (Ctrl+1): número, alinhamento, fonte, borda e preenchimento.
+- [ ] Excluir uma aba quando outra tem segmentação ligada a uma tabela dela; deslocar células que cortam uma tabela: hoje são recusados com aviso.
+- [ ] Recortar e colar entre abas como mover (hoje cola uma cópia).
 - [ ] Ctrl+clique para somar outra referência com `;`; arrastar o contorno colorido para mudar a referência; cores para nomes e tabelas.
 - [ ] Recusar (ou perguntar sobre) uma fórmula que não dá para ler, como `=SOMA(`: hoje ela é gravada como foi digitada.
-- [ ] Clicar ou arrastar dentro do texto do editor para mover o cursor e selecionar.
+- [x] Clicar dentro do texto do editor para mover o cursor.
+- [ ] Arrastar dentro do texto do editor para selecionar.
 - [ ] Tema do sistema no Linux onde o compositor não informa (X11): hoje "seguir o sistema" fica no claro.
 
 ## ✅ Depois da F6 · Validação, notas e proteção
 
 O que antes só era preservado no arquivo agora aparece e é respeitado, com desfazer e ajuste ao inserir e apagar linhas e colunas:
 
-- [x] **Validação de dados** (`dataValidations` e `x14:dataValidations`): lista suspensa (itens escritos, intervalo, outra aba, nome definido, fórmula como INDIRETO), recusa, aviso ou informação para valores inválidos, mensagem de entrada; criar, editar e tirar pela aba Dados. `INDIRETO` passou a aceitar nomes definidos.
+- [x] **Validação de dados** (`dataValidations` e `x14:dataValidations`): lista suspensa (itens escritos, intervalo, outra aba, nome definido, fórmula como INDIRETO), recusa, aviso ou informação para valores inválidos (também no Ctrl+Enter, conferidos todos antes de escrever), mensagem de entrada; criar, editar e tirar pela aba Dados. `INDIRETO` passou a aceitar nomes definidos.
 - [x] **Notas** (`comments` + VML): marca no canto, texto ao passar o mouse, notas sempre à vista; criar, editar e excluir. **Conversas** (`threadedComments`) só para leitura.
-- [x] **Proteção** de planilha e de pasta: células bloqueadas, o que a proteção permite (formatar, inserir, classificar, filtrar, dinâmicas, notas), intervalos liberados, fórmulas ocultas e aviso claro. Desproteger confere a senha com o resumo do arquivo (o antigo de 16 bits e SHA-1/256/384/512); sem ela a proteção fica. As macros seguem as mesmas regras (`Protect`, `Unprotect`, `UserInterfaceOnly`).
+- [x] **Proteção** de planilha e de pasta: células bloqueadas, o que a proteção permite (formatar, inserir, classificar, filtrar, dinâmicas, notas), intervalos liberados, fórmulas ocultas e aviso claro; com a estrutura da pasta protegida, as abas não se criam, renomeiam, excluem, duplicam, movem, colorem nem ocultam. Desproteger confere a senha com o resumo do arquivo (o antigo de 16 bits e SHA-1/256/384/512); sem ela a proteção fica. As macros seguem as mesmas regras (`Protect`, `Unprotect`, `UserInterfaceOnly`).
 - [x] Gravação no lugar que o esquema pede, com partes, relacionamentos e tipos de conteúdo novos quando a aba não tinha notas. Round-trip com 0 divergências na vitrine, num arquivo do openpyxl (que relê as mesmas regras, notas e proteção) e nas planilhas reais (que não têm esses recursos: neles, só o que a edição acrescenta); cópias relidas pelo conversor do OnlyOffice.
 - [ ] Responder e resolver conversas.
 - [ ] Colar e preencher levando a validação e as notas da origem; "Circular dados inválidos".

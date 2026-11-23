@@ -36,6 +36,19 @@ pub enum Act {
     Quit,
     /// Abre uma lista ou paleta.
     Drop(Drop),
+    /// Guias das abas.
+    Tab(crate::tabs::TabAct),
+    /// Colar só uma parte (valores, fórmulas, formatos), ou transposto.
+    PasteAs(crate::paste::What, bool),
+    PasteSpecial,
+    Painter,
+    Replace,
+    AutoSum,
+    /// Inserir (`true`) ou excluir só células.
+    Cells(bool),
+    /// Preencher para baixo (`true`) ou para a direita.
+    FillCopy(bool),
+    FormatCells,
     Shift {
         insert: bool,
         cols: bool,
@@ -97,6 +110,8 @@ pub enum Drop {
     Clear,
     Freeze,
     Zoom,
+    Paste,
+    Fill,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,8 +189,15 @@ const HOME: &[Group] = &[
     Group {
         title: "Área de transferência",
         rows: [
-            &[b(Act::Paste, "Colar", "Colar (Ctrl+V)")],
-            &[b(Act::Cut, "Recortar", "Recortar (Ctrl+X)"), b(Act::Copy, "Copiar", "Copiar (Ctrl+C)")],
+            &[
+                b(Act::Paste, "Colar", "Colar (Ctrl+V)"),
+                b(Act::Drop(Drop::Paste), "Especial", "Colar especial (Ctrl+Alt+V)"),
+            ],
+            &[
+                b(Act::Cut, "Recortar", "Recortar (Ctrl+X)"),
+                b(Act::Copy, "Copiar", "Copiar (Ctrl+C)"),
+                b(Act::Painter, "Pincel", "Pincel de formatação (duplo clique: várias vezes)"),
+            ],
         ],
     },
     Group {
@@ -249,7 +271,11 @@ const HOME: &[Group] = &[
                 b(Act::Drop(Drop::Insert), "Inserir", "Inserir linhas ou colunas"),
                 b(Act::Drop(Drop::Delete), "Excluir", "Excluir linhas ou colunas"),
             ],
-            &[b(Act::Drop(Drop::Format), "Formatar", "Largura, altura, ocultar e reexibir")],
+            &[b(
+                Act::Drop(Drop::Format),
+                "Formatar",
+                "Formatar células, largura, altura, ocultar e reexibir",
+            )],
         ],
     },
     Group {
@@ -258,8 +284,17 @@ const HOME: &[Group] = &[
             &[
                 b(Act::Drop(Drop::Clear), "Limpar", "Limpar conteúdo ou formatos"),
                 b(Act::Find, "Localizar", "Localizar (Ctrl+F)"),
+                b(Act::AutoSum, "Σ", "AutoSoma (Alt+=)"),
+                b(
+                    Act::Drop(Drop::Fill),
+                    "Preencher",
+                    "Copiar a primeira linha ou coluna no resto da seleção",
+                ),
             ],
-            &[b(Act::GoTo, "Ir para", "Ir para uma célula (Ctrl+G)")],
+            &[
+                b(Act::GoTo, "Ir para", "Ir para uma célula (Ctrl+G)"),
+                b(Act::Replace, "Substituir", "Localizar e substituir (Ctrl+H)"),
+            ],
         ],
     },
 ];

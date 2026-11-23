@@ -16,16 +16,22 @@
 //! Edição: digitar substitui a célula; F2, duplo clique ou clique na barra
 //! de fórmulas editam o conteúdo; Enter/Tab confirmam, Esc cancela; Delete
 //! apaga a seleção; Ctrl+Z/Ctrl+Y desfazem e refazem; Ctrl+S salva e
-//! Ctrl+Shift+S salva como.
+//! Ctrl+Shift+S salva como. Alt+Enter quebra a linha, Ctrl+Enter preenche a
+//! seleção, Ctrl+D e Ctrl+R preenchem para baixo e para a direita, Ctrl+H
+//! substitui, Ctrl+Alt+V cola especial, Ctrl+1 formata, Alt+= soma, Shift+F11
+//! cria uma aba e Ctrl+clique soma áreas à seleção.
 //!
 //! `--edit`, `--undo` e `--save-to` fazem edições como se digitadas (na aba
 //! inicial, depois de carregar tudo) e salvam numa cópia: para testar a
-//! edição e o salvamento sem mexer na janela.
+//! edição e o salvamento sem mexer na janela (a lista está no README).
 
 mod actions;
 mod app;
 mod axis;
+#[cfg(test)]
+mod blocked;
 mod calc;
+mod cells;
 mod cficon;
 mod chart;
 mod complete;
@@ -34,8 +40,11 @@ mod cube;
 mod dialog;
 mod draw;
 mod edit;
+mod fill;
 mod filter;
+mod fmtcells;
 mod format;
+mod forms;
 mod images;
 mod loader;
 mod look;
@@ -43,13 +52,18 @@ mod macros;
 mod menu;
 mod notes;
 mod outline;
+mod paste;
 mod pivot;
 mod pointing;
 mod protect;
+mod replace;
 mod ribbon;
 mod search;
 mod shape;
 mod tablestyle;
+mod tabs;
+#[cfg(test)]
+mod testing;
 mod theme;
 mod valid;
 mod zoombar;

@@ -392,6 +392,58 @@ mod tests {
         assert_eq!(typed_formula(&book, 0, 0, 1, "B2*2"), Some(CellValue::Number(40.0)));
     }
 
+    /// LET, LAMBDA e as outras funções novas valem nas regras como nas células.
+    #[test]
+    fn new_functions_in_rules() {
+        let (sheets, mut extras) = data();
+        let def =
+            |n: &str, f: &str| DefinedName { name: n.into(), sheet: None, formula: f.into(), hidden: false };
+        extras.names.push(def("Dobro", "_xlfn.LAMBDA(_xlpm.x,_xlpm.x*2)"));
+        extras.names.push(def("Fat", "_xlfn.LAMBDA(_xlpm.n,IF(_xlpm.n<2,1,_xlpm.n*Fat(_xlpm.n-1)))"));
+        let shared = StringTable::new();
+        let book = Book::new(sheets.iter().collect(), &shared, &extras, false);
+        let custom = |pt: &str| DataValidation {
+            ranges: vec![r(0, 1, 99, 1)],
+            kind: DvKind::Custom,
+            f1: crate::locale::from_pt(pt),
+            ..Default::default()
+        };
+        // (regra como se digita, valor aceito, valor recusado), na célula B2.
+        for (pt, yes, no) in [
+            ("LET(x;B1;total;SOMA($B$3:$B$4);x<=total)", 70.0, 71.0),
+            ("LAMBDA(n;E(n>=1,5;n<=2))(B1)", 1.5, 2.5),
+            ("LET(f;LAMBDA(n;n*2);f(B1)=10)", 5.0, 6.0),
+            ("Dobro(B1)=14", 7.0, 8.0),
+            ("Fat(B1)=24", 4.0, 5.0),
+            ("REDUZIR(0;$B$1:$B$4;LAMBDA(a;b;a+b))<=200", 120.0, 121.0),
+            ("ÉNÚM(CORRESPX(B1;$B$3:$B$4))", 40.0, 20.0),
+            ("LINS(ÚNICO($B$1:$B$4))=4", 25.0, 30.0),
+        ] {
+            let d = custom(pt);
+            let ok = |v: f64| check(&book, 0, &d, 1, 1, &CellValue::Number(v));
+            assert_eq!((ok(yes), ok(no)), (Some(true), Some(false)), "{pt} = {}", d.f1);
+            // A tela mostra como foi digitada, e reler dá a mesma.
+            let shown = crate::locale::to_pt(&d.f1);
+            assert_eq!(crate::locale::from_pt(&shown), d.f1);
+        }
+        assert_eq!(custom("LET(x;B1;x>1,5)").f1, "_xlfn.LET(_xlpm.x,B1,_xlpm.x>1.5)");
+        // A variável não é referência: só B1 anda com a célula.
+        assert_eq!(
+            crate::shift("_xlfn.LET(_xlpm.x,B1,_xlpm.x>1.5)", 2, 1),
+            "_xlfn.LET(_xlpm.x,C3,_xlpm.x>1.5)"
+        );
+        // Numa lista: o resultado são os itens.
+        let items = |pt: &str| texts(list_items(&book, 0, &list(&crate::locale::from_pt(pt)), 0, 5));
+        assert_eq!(items("CLASSIFICAR(Frutas;1;-1)"), ["Uva", "Maçã", "Banana"]);
+        assert_eq!(items("FILTRO($B$1:$B$4;$B$1:$B$4>15)"), ["20", "30", "40"]);
+        assert_eq!(items("LET(n;2;SEQUÊNCIA(n;1;7))"), ["7", "8"]);
+        assert_eq!(items("SEERRO(PROCX(\"SP\";$A$1:$A$2;$B$1:$B$2);0)"), ["10"]);
+        // O valor digitado também pode ser uma delas.
+        let typed = |f: &str| typed_formula(&book, 0, 0, 1, &crate::locale::from_pt(f));
+        assert_eq!(typed("LET(x;B2;x*1,5)"), Some(CellValue::Number(30.0)));
+        assert_eq!(typed("Dobro(B2)"), Some(CellValue::Number(40.0)));
+    }
+
     /// Mover, inserir e excluir só células: regras e notas vão junto, e
     /// desfazer volta ao mesmo.
     #[test]

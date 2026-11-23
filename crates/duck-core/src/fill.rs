@@ -1,9 +1,11 @@
 //! Alça de preenchimento: a continuação de uma lista de células, como no
 //! Excel em português.
 //!
-//! - Um número sozinho se repete; dois ou mais seguem a reta (mínimos
-//!   quadrados). Com [`Mode::Series`] (Ctrl ao arrastar), um número sozinho
-//!   soma 1; com [`Mode::Copy`], tudo se repete.
+//! - Dois ou mais números seguem a reta (mínimos quadrados). Um número
+//!   sozinho soma 1 (13, 14, 15; no Excel, só com Ctrl); uma porcentagem
+//!   sozinha se repete (10% não vira 110%).
+//! - Com [`Mode::Copy`] (Ctrl ao arrastar uma série), tudo se repete; com
+//!   [`Mode::Series`], a porcentagem sozinha também soma 1.
 //! - Datas andam em dias, ou em meses e anos quando o passo entre elas é esse;
 //!   horas sozinhas andam de hora em hora.
 //! - Meses e dias da semana (por extenso e abreviados) dão a volta; texto com
@@ -16,12 +18,12 @@ use crate::numfmt::serial_to_datetime;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
-    /// O que o Excel faz ao arrastar.
+    /// O que arrastar a alça faz.
     #[default]
     Auto,
     /// Repete as células.
     Copy,
-    /// Continua até o que seria repetido (números sozinhos somam 1).
+    /// Continua até o que seria repetido (porcentagens sozinhas somam 1).
     Series,
 }
 
@@ -34,6 +36,8 @@ pub enum NumKind {
     Date,
     /// Só hora.
     Time,
+    /// Porcentagem.
+    Percent,
 }
 
 /// Uma célula de origem.
@@ -262,7 +266,7 @@ impl Filler {
         }
         match &it.value {
             CellValue::Number(_) => match it.num {
-                NumKind::Number => Class::Number,
+                NumKind::Number | NumKind::Percent => Class::Number,
                 NumKind::Date => Class::Date,
                 NumKind::Time => Class::Time,
             },
@@ -307,7 +311,9 @@ impl Filler {
         let n = b - a;
         let vals: Vec<f64> = (a..b).map(|i| self.num(i)).collect();
         match c {
-            Class::Number if n == 1 && mode == Mode::Auto => Series::Copy,
+            Class::Number if n == 1 && mode == Mode::Auto && self.items[a].num == NumKind::Percent => {
+                Series::Copy
+            }
             Class::Number if n == 1 => Series::Linear(vals[0], 1.0),
             Class::Number => {
                 let (y, s) = line(&vals);
@@ -449,8 +455,12 @@ mod tests {
 
     #[test]
     fn numbers() {
-        assert_eq!(run(nums(&[5.0]), Mode::Auto, 1..3), ["=0", "=0"]);
-        assert_eq!(run(nums(&[5.0]), Mode::Series, 1..3), ["6", "7"]);
+        assert_eq!(run(nums(&[13.0]), Mode::Auto, 1..3), ["14", "15"]);
+        assert_eq!(run(nums(&[13.0]), Mode::Auto, -2..0), ["11", "12"]);
+        assert_eq!(run(nums(&[13.0]), Mode::Copy, 1..3), ["=0", "=0"]);
+        let percent = vec![Item { num: NumKind::Percent, ..item(CellValue::Number(0.1)) }];
+        assert_eq!(run(percent.clone(), Mode::Auto, 1..3), ["=0", "=0"]);
+        assert_eq!(run(percent, Mode::Series, 1..2), ["1.1"]);
         assert_eq!(run(nums(&[1.0, 3.0]), Mode::Auto, 2..5), ["5", "7", "9"]);
         assert_eq!(run(nums(&[1.0, 3.0]), Mode::Auto, -2..0), ["-3", "-1"]);
         assert_eq!(run(nums(&[1.0, 3.0]), Mode::Copy, 2..5), ["=0", "=1", "=0"]);
@@ -511,7 +521,7 @@ mod tests {
     fn mixed_and_formulas() {
         let mut v = texts(&["Loja"]);
         v.extend(nums(&[1.0]));
-        assert_eq!(run(v, Mode::Auto, 2..6), ["=0", "=1", "=0", "=1"]);
+        assert_eq!(run(v, Mode::Auto, 2..6), ["=0", "2", "=0", "3"]);
         let mut v = nums(&[1.0, 2.0]);
         v.push(Item { value: CellValue::Number(3.0), num: NumKind::Number, formula: true });
         // A fórmula é copiada; os números seguem a reta deles.
