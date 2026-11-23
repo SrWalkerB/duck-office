@@ -8,6 +8,7 @@ use duck_ui::{Align, Painter, Rect, Rgba};
 
 use crate::app::Geom;
 use crate::format::{Active, Fmt};
+use crate::theme::{Mode, Theme};
 
 /// Altura das abas e do corpo da faixa (pixels lógicos).
 pub const TABS_H: f32 = 30.0;
@@ -49,6 +50,8 @@ pub enum Act {
     ZoomTo(u16),
     Grid,
     Headers,
+    /// Tema claro, escuro ou o do sistema.
+    Theme(Mode),
     Freeze(Freeze),
     Hide {
         rows: bool,
@@ -312,6 +315,16 @@ const VIEW: &[Group] = &[
             &[],
         ],
     },
+    Group {
+        title: "Tema",
+        rows: [
+            &[
+                b(Act::Theme(Mode::Light), "Claro", "Tema claro"),
+                b(Act::Theme(Mode::Dark), "Escuro", "Tema escuro (as cores do arquivo não mudam)"),
+            ],
+            &[b(Act::Theme(Mode::System), "Seguir o sistema", "Claro ou escuro, como o sistema")],
+        ],
+    },
 ];
 
 /// Botões de acesso rápido, no fim da linha das abas.
@@ -473,18 +486,6 @@ impl Layout {
     }
 }
 
-/// Cores da faixa.
-pub struct Theme {
-    pub bg: Rgba,
-    pub body: Rgba,
-    pub line: Rgba,
-    pub text: Rgba,
-    pub muted: Rgba,
-    pub hover: Rgba,
-    pub on: Rgba,
-    pub accent: Rgba,
-}
-
 /// Valores mostrados na faixa: célula ativa e a visão.
 pub struct State<'a> {
     pub active: Option<&'a Active>,
@@ -492,6 +493,7 @@ pub struct State<'a> {
     pub headers: bool,
     pub colors: (u32, u32),
     pub num_fmt_name: &'a str,
+    pub mode: Mode,
 }
 
 fn rgba(rgb: u32) -> Rgba {
@@ -536,14 +538,7 @@ pub fn draw(
         let file = t.is_none();
         if file {
             p.fill(rect.inset((3.0 * s).round()), &r, if file_open { th.on } else { th.accent });
-            p.label(
-                name,
-                ui,
-                *rect,
-                Align::Center,
-                0.0,
-                if file_open { th.text } else { [255, 255, 255, 255] },
-            );
+            p.label(name, ui, *rect, Align::Center, 0.0, if file_open { th.text } else { th.on_accent });
             continue;
         }
         p.label(name, ui, *rect, Align::Center, 0.0, if current { th.accent } else { th.text });
@@ -570,6 +565,7 @@ pub fn draw(
             return match a {
                 Act::Grid => st.grid,
                 Act::Headers => st.headers,
+                Act::Theme(m) => m == st.mode,
                 _ => false,
             };
         };
@@ -583,6 +579,7 @@ pub fn draw(
             Act::Fmt(Fmt::Wrap) => f.wrap,
             Act::Grid => st.grid,
             Act::Headers => st.headers,
+            Act::Theme(m) => m == st.mode,
             _ => false,
         }
     };
@@ -590,7 +587,7 @@ pub fn draw(
         let rect = bt.rect;
         match bt.kind {
             Kind::Combo(_) => {
-                p.fill(rect, &r, [255, 255, 255, 255]);
+                p.fill(rect, &r, th.field);
                 p.stroke(rect, &r, px, if hover == Some(bt.act) { th.accent } else { th.line });
                 let text = match bt.act {
                     Act::Drop(Drop::Font) => st.active.map_or(String::new(), |a| a.font.clone()),

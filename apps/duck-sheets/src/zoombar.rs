@@ -5,7 +5,8 @@ use duck_text::TextStyle;
 use duck_ui::{Align, Painter, Rect};
 
 use crate::app::Geom;
-use crate::ribbon::{Act, Drop, Theme};
+use crate::ribbon::{Act, Drop};
+use crate::theme::Theme;
 
 pub const MIN: i32 = 10;
 pub const MAX: i32 = 400;

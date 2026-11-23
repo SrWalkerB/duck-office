@@ -5,31 +5,42 @@ Só biblioteca padrão. Funciona no macOS e no Windows.
 
     python3 scripts/bench/vs_onlyoffice.py                 # gera e mede as planilhas sintéticas
     python3 scripts/bench/vs_onlyoffice.py arquivo.xlsx    # mede um arquivo seu
+    python3 scripts/bench/vs_onlyoffice.py --local         # as planilhas `regress` de bench.local.toml
     python3 scripts/bench/vs_onlyoffice.py --runs 3 --timeout 240
 
 duck-sheets: roda `duck-sheets ARQUIVO --bench` e lê "primeira tela com dados",
 "todas as abas" e o pico de memória.
 
-OnlyOffice: não tem modo de medição. O script abre o arquivo no app, tira uma
-captura da tela a cada ~0,5 s e procura o salto de conteúdo em que a tela
-"Loading spreadsheet" vira a grade com dados (a captura fica bem maior). As
-capturas ficam em target/bench-onlyoffice/ para conferir a olho; confira
-sempre o quadro indicado. Durante a medição, deixe a janela do OnlyOffice na
-frente e não mexa no computador.
+OnlyOffice: não tem modo de medição. O script abre o arquivo no app, captura a
+imagem a cada ~0,5 s e procura o salto de conteúdo em que a tela "Loading
+spreadsheet" vira a grade com dados (a captura fica bem maior). As capturas
+ficam em target/bench-onlyoffice/ para conferir a olho; confira sempre o quadro
+indicado.
+
+No macOS a captura é da tela toda: deixe a janela do OnlyOffice na frente e não
+mexa no computador. No Windows é só da janela do OnlyOffice, mesmo com outra por
+cima; não a minimize.
+
+Com --local, cada planilha é copiada com um nome neutro (planilha-1.xlsm...) e as
+cópias são apagadas no fim; o nome real não aparece em nada. As capturas mostram
+o conteúdo: confira e apague a pasta.
 
 Feche o OnlyOffice antes de começar: entre as rodadas o script pede para ele
 fechar (como o "Sair" do menu) e nunca mata o processo.
 """
 
 import argparse
+import ctypes
 import json
 import os
 import platform
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -43,7 +54,7 @@ OO_EXE_WIN = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "ONLYOF
 
 
 def run(cmd, **kw):
-    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", **kw)
 
 
 # ---------------------------------------------------------------- arquivos
@@ -59,6 +70,18 @@ def ensure_files(files):
             print(f"gerando {p.name} ({rows} linhas)...")
             subprocess.run([str(bench), "gen", str(p), "--rows", str(rows)], check=True)
         out.append(p)
+    return out
+
+
+def local_copies():
+    """Cópias com nome neutro das planilhas `regress = "..."` de bench.local.toml (dados reais)."""
+    cfg = (ROOT / "bench.local.toml").read_text(encoding="utf-8")
+    OUT.mkdir(parents=True, exist_ok=True)
+    out = []
+    for i, src in enumerate(re.findall(r'^regress\s*=\s*"(.*)"', cfg, re.M), 1):
+        dest = OUT / f"planilha-{i}{Path(src).suffix}"
+        shutil.copyfile(src, dest)
+        out.append(dest)
     return out
 
 
@@ -126,22 +149,82 @@ def oo_memory_mb():
     return total // 1024
 
 
-WIN_CAPTURE = r"""
-Add-Type -AssemblyName System.Windows.Forms, System.Drawing
-$b = [System.Windows.Forms.SystemInformation]::VirtualScreen
-$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
-$bmp.Save($args[0], [System.Drawing.Imaging.ImageFormat]::Jpeg)
-"""
+def oo_window():
+    """A maior janela visível dos processos do OnlyOffice (Windows)."""
+    from ctypes import wintypes
+    user, kernel = ctypes.windll.user32, ctypes.windll.kernel32
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    best = (0, None)
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def each(hwnd, _):
+        nonlocal best
+        if not user.IsWindowVisible(hwnd) or user.IsIconic(hwnd):
+            return True
+        pid, name, n = wintypes.DWORD(), ctypes.create_unicode_buffer(1024), wintypes.DWORD(1024)
+        user.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        h = kernel.OpenProcess(0x1000, False, pid.value)  # só consulta
+        if not h:
+            return True
+        kernel.QueryFullProcessImageNameW(wintypes.HANDLE(h), 0, name, ctypes.byref(n))
+        kernel.CloseHandle(wintypes.HANDLE(h))
+        if Path(name.value).name.lower() in ("desktopeditors.exe", "editors.exe"):
+            r = wintypes.RECT()
+            user.GetWindowRect(hwnd, ctypes.byref(r))
+            area = (r.right - r.left) * (r.bottom - r.top)
+            if area > best[0]:
+                best = (area, hwnd)
+        return True
+
+    user.EnumWindows(each, 0)
+    return best[1]
+
+
+def capture_window(dest):
+    """Grava em PNG a imagem de uma janela do OnlyOffice, mesmo coberta por outra (Windows)."""
+    from ctypes import wintypes
+    user, gdi = ctypes.windll.user32, ctypes.windll.gdi32
+    H = ctypes.c_void_p
+    for f in (user.GetDC, gdi.CreateCompatibleDC, gdi.CreateCompatibleBitmap, gdi.SelectObject):
+        f.restype = H
+    hwnd = oo_window()
+    if hwnd is None:
+        return False
+    r = wintypes.RECT()
+    user.GetWindowRect(hwnd, ctypes.byref(r))
+    w, h = r.right - r.left, r.bottom - r.top
+    screen = H(user.GetDC(None))
+    dc = H(gdi.CreateCompatibleDC(screen))
+    bmp = H(gdi.CreateCompatibleBitmap(screen, w, h))
+    old = H(gdi.SelectObject(dc, bmp))
+    ok = user.PrintWindow(hwnd, dc, 2)  # 2 = também o que a GPU desenhou
+    gdi.SelectObject(dc, old)
+    buf = ctypes.create_string_buffer(w * h * 4)
+    info = struct.pack("<IiiHHIIiiII", 40, w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
+    gdi.GetDIBits(dc, bmp, 0, h, buf, info, 0)
+    gdi.DeleteObject(bmp)
+    gdi.DeleteDC(dc)
+    user.ReleaseDC(None, screen)
+    if not ok:
+        return False
+    px = bytearray(buf.raw)
+    px[0::4], px[2::4] = px[2::4], px[0::4]  # BGRA → RGBA
+    px[3::4] = b"\xff" * (w * h)
+    rows = b"".join(b"\0" + px[y * w * 4:(y + 1) * w * 4] for y in range(h))
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    dest.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+                     + chunk(b"IDAT", zlib.compress(rows, 1)) + chunk(b"IEND", b""))
+    return True
 
 
 def capture(dest):
     if SYSTEM == "Darwin":
         run(["screencapture", "-x", "-t", "jpg", str(dest)])
-    else:
-        run(["powershell", "-NoProfile", "-Command", f"& {{{WIN_CAPTURE}}} '{dest}'"])
-    return dest.exists()
+        return dest.exists()
+    return capture_window(dest)
 
 
 def find_data_frame(frames):
@@ -168,7 +251,7 @@ def bench_onlyoffice(path, runs, timeout):
         found_t = found_p = None
         while True:
             el = time.perf_counter() - t0
-            f = folder / f"{int(el * 1000):06d}.jpg"
+            f = folder / f"{int(el * 1000):06d}.{'jpg' if SYSTEM == 'Darwin' else 'png'}"
             if capture(f):
                 frames.append((el, f))
             peak = max(peak, oo_memory_mb())
@@ -199,6 +282,7 @@ def main():
     ap.add_argument("--runs", type=int, default=2, help="rodadas medidas, fora o aquecimento (padrão 2)")
     ap.add_argument("--timeout", type=int, default=240, help="limite por abertura no OnlyOffice, em s")
     ap.add_argument("--skip-onlyoffice", action="store_true")
+    ap.add_argument("--local", action="store_true", help="mede cópias das planilhas `regress` de bench.local.toml")
     a = ap.parse_args()
 
     if SYSTEM not in ("Darwin", "Windows"):
@@ -210,16 +294,21 @@ def main():
 
     report = {"sistema": f"{SYSTEM} {platform.release()}", "cpu": platform.processor() or platform.machine(),
               "data": time.strftime("%Y-%m-%d"), "arquivos": {}}
-    for f in ensure_files(a.files):
-        print(f"\n== {f.name} ({f.stat().st_size / 1e6:.0f} MB)")
-        entry = {"duck_sheets": bench_duck(f, a.runs)}
-        if not a.skip_onlyoffice:
-            entry["onlyoffice"] = bench_onlyoffice(f, a.runs, a.timeout)
-        report["arquivos"][f.name] = entry
+    copies = local_copies() if a.local else []
+    try:
+        for f in copies or ensure_files(a.files):
+            print(f"\n== {f.name} ({f.stat().st_size / 1e6:.0f} MB)")
+            entry = {"duck_sheets": bench_duck(f, a.runs)}
+            if not a.skip_onlyoffice:
+                entry["onlyoffice"] = bench_onlyoffice(f, a.runs, a.timeout)
+            report["arquivos"][f.name] = entry
+    finally:
+        for f in copies:
+            f.unlink(missing_ok=True)
 
     OUT.mkdir(parents=True, exist_ok=True)
     out = OUT / f"resultado-{SYSTEM.lower()}.json"
-    out.write_text(json.dumps(report, indent=2, ensure_ascii=False))
+    out.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\nresultado em {out}")
 
 

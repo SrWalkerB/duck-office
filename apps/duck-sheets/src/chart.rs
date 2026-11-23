@@ -78,6 +78,8 @@ pub struct ObjCtx<'a> {
     pub date1904: bool,
     /// Imagens já na GPU: parte → região no atlas.
     pub images: &'a std::collections::HashMap<String, [f32; 4]>,
+    /// Tema (no escuro, o que o objeto desenha é adaptado).
+    pub th: &'static crate::theme::Theme,
 }
 
 /// Desenha o intervalo de uma câmera num retângulo, recortado; `false` = usar
@@ -89,6 +91,8 @@ pub fn draw_objects(p: &mut Painter, cx: &ObjCtx, objects: &[Object], v: &View, 
     if objects.is_empty() || q.rect.is_empty() {
         return;
     }
+    // Fundos dos objetos já desenhados (tema escuro).
+    let mut behind = Vec::new();
     for o in objects {
         if o.hidden {
             continue;
@@ -107,6 +111,7 @@ pub fn draw_objects(p: &mut Painter, cx: &ObjCtx, objects: &[Object], v: &View, 
             continue;
         }
         let clip = r.intersect(&q.rect);
+        let from = p.out.len();
         match &o.kind {
             ObjectKind::Chart(c) => draw_chart(p, cx, c, r, &clip),
             ObjectKind::Slicer(s) => draw_slicer(p, cx, s, r, &clip),
@@ -114,15 +119,22 @@ pub fn draw_objects(p: &mut Painter, cx: &ObjCtx, objects: &[Object], v: &View, 
             ObjectKind::Control(c) => crate::control::draw(p, cx, c, r, &clip),
             ObjectKind::Shape(s) => crate::shape::draw_shape(p, cx, s, r, &q.rect),
             ObjectKind::Picture { part, crop, line, camera } => {
-                if !camera.as_ref().is_some_and(|c| live(p, c, r, &clip)) {
+                let shown = camera.as_ref().is_some_and(|c| live(p, c, r, &clip));
+                if !shown {
                     crate::shape::draw_picture(p, cx, part, *crop, r, &clip);
                 }
                 if let Some(l) = line {
                     let w = (l.width * 96.0 / 72.0 * cx.g).max(1.0);
-                    p.stroke(r, &clip, w, paint_rgba(l.paint, cx.styles));
+                    let c = paint_rgba(l.paint, cx.styles);
+                    p.stroke(r, &clip, w, if shown { cx.th.line_on(c, None) } else { c });
+                }
+                // As células da câmera já saem com as cores do tema.
+                if shown {
+                    continue;
                 }
             }
         }
+        cx.th.adapt_object(&mut p.out[from..], &mut behind);
     }
 }
 

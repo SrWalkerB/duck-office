@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use duck_core::{CellRange, Sheet, StringTable, Styles, Value};
 use duck_gfx::{FrameStatus, Gfx, Instance};
-use duck_platform::{App, Context, Cursor, Event, Key, Modifiers, MouseButton, WheelDelta, Window};
+use duck_platform::{
+    App, ColorScheme, Context, Cursor, Event, Key, Modifiers, MouseButton, WheelDelta, Window,
+};
 use duck_text::{FontSet, TextStyle, TextSystem};
 use duck_ui::{Rect, TabBar, TextInput};
 use duck_xlsx::SheetInfo;
@@ -19,6 +21,7 @@ use crate::axis::Axis;
 use crate::loader::{Loader, Msg, drain};
 use crate::look::{Looks, edit_text, show};
 use crate::search::{self, SearchJob, SearchResult};
+use crate::theme::{Mode, Theme};
 
 // ---------------------------------------------------------------------------
 // Parâmetros (pixels lógicos)
@@ -384,6 +387,8 @@ pub enum Drag {
     HThumb {
         grab: f32,
     },
+    /// Apontando um intervalo para a fórmula em edição.
+    Point,
     /// Barra deslizante do zoom.
     Zoom,
     /// Arrastando a borda direita da coluna `col` (tamanho inicial e x do mouse).
@@ -517,6 +522,11 @@ pub struct SheetsApp {
     pub new_count: u32,
     /// Imagens das abas no atlas da GPU.
     pub images: crate::images::Images,
+    /// Tema escolhido e o esquema de cores do sistema.
+    pub mode: Mode,
+    pub system: ColorScheme,
+    /// O mouse estava sobre a lista de sugestões.
+    complete_hover: bool,
 }
 
 impl SheetsApp {
@@ -535,6 +545,12 @@ impl SheetsApp {
             report: String::new(),
         });
         let screenshot_pending = opts.screenshot.is_some();
+        // Medições e screenshots não dependem da preferência de quem roda.
+        let mode = match opts.theme {
+            Some(m) => m,
+            None if opts.bench || screenshot_pending => Mode::Light,
+            None => crate::theme::pref_file().map(|f| crate::theme::load(&f)).unwrap_or_default(),
+        };
         Self {
             t0,
             opts,
@@ -587,7 +603,15 @@ impl SheetsApp {
             new_count: 0,
             filter_panel: None,
             images: Default::default(),
+            mode,
+            system: ColorScheme::Light,
+            complete_hover: false,
         }
+    }
+
+    /// Cores em uso.
+    pub fn theme(&self) -> &'static Theme {
+        self.mode.theme(self.system)
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -989,10 +1013,16 @@ impl SheetsApp {
 
     /// Rola para a célula ativa ficar visível (no painel principal).
     pub fn ensure_visible(&mut self) {
+        if let Some((r, c)) = self.doc.as_ref().and_then(|d| d.current()).map(|(_, v)| v.cur) {
+            self.reveal(r, c);
+        }
+    }
+
+    /// Rola para a célula ficar visível (no painel principal).
+    pub(crate) fn reveal(&mut self, r: u32, c: u32) {
         let geom = self.geom();
         let (vw, vh) = geom.main_view();
         let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) else { return };
-        let (r, c) = v.cur;
         let span =
             v.merges.at(r, c).unwrap_or(CellRange { first_row: r, first_col: c, last_row: r, last_col: c });
         if r >= v.frozen_rows {
@@ -1029,36 +1059,8 @@ impl SheetsApp {
         }
         let Some(doc) = &mut self.doc else { return };
         let slot = &mut doc.sheets[doc.active];
-        let (Some(sheet), Some(v)) = (slot.data.clone(), slot.view.as_mut()) else { return };
-        let (mut r, mut c) = v.cur;
-        if jump {
-            if dr != 0 {
-                r = data_edge_row(&sheet, v, r, c, dr > 0);
-            }
-            if dc != 0 {
-                c = data_edge_col(&sheet, v, r, c, dc > 0);
-            }
-        } else {
-            // Sair de uma mesclagem pelo lado dela.
-            if let Some(m) = v.merges.at(r, c) {
-                if dr > 0 {
-                    r = m.last_row;
-                } else if dr < 0 {
-                    r = m.first_row;
-                }
-                if dc > 0 {
-                    c = m.last_col;
-                } else if dc < 0 {
-                    c = m.first_col;
-                }
-            }
-            for _ in 0..dr.unsigned_abs() {
-                r = if dr > 0 { v.rows.next_visible(r) } else { v.rows.prev_visible(r) };
-            }
-            for _ in 0..dc.unsigned_abs() {
-                c = if dc > 0 { v.cols.next_visible(c) } else { v.cols.prev_visible(c) };
-            }
-        }
+        let (Some(sheet), Some(v)) = (slot.data.as_ref(), slot.view.as_mut()) else { return };
+        let (mut r, mut c) = step(sheet, v, v.cur, dr, dc, jump);
         if !extend && let Some(m) = v.merges.at(r, c) {
             (r, c) = (m.first_row, m.first_col);
         }
@@ -1079,7 +1081,7 @@ impl SheetsApp {
     }
 
     /// Aumenta a grade se a célula fica no fim dela ou depois.
-    fn grow_grid(&mut self, r: u32, c: u32) {
+    pub(crate) fn grow_grid(&mut self, r: u32, c: u32) {
         let Some(doc) = &mut self.doc else { return };
         let (mdw, i) = (doc.mdw, doc.active);
         let slot = &mut doc.sheets[i];
@@ -1117,6 +1119,9 @@ impl SheetsApp {
             return;
         }
         doc.active = index;
+        if let Some(ed) = &mut self.editor {
+            ed.away = index != ed.sheet;
+        }
         self.find = self.find.take().map(|mut f| {
             f.result = None;
             f.job = None;
@@ -1128,7 +1133,7 @@ impl SheetsApp {
         self.clamp_scroll();
     }
 
-    fn cycle_sheet(&mut self, forward: bool) {
+    pub(crate) fn cycle_sheet(&mut self, forward: bool) {
         let Some(doc) = &self.doc else { return };
         let n = doc.sheets.len();
         let mut i = doc.active;
@@ -1372,6 +1377,10 @@ impl SheetsApp {
             }
             return;
         }
+        // Lista de sugestões, assinatura ou dica da fórmula.
+        if self.popup.is_none() && self.complete_click(&g, x, y) {
+            return;
+        }
         // Menu aberto: clique nele escolhe; fora, só fecha.
         if let Some(pp) = self.popup.take() {
             if let Some(act) = pp.hit(&g, x, y) {
@@ -1431,8 +1440,21 @@ impl SheetsApp {
             }
             return;
         }
-        // Clique fora do editor confirma o que foi digitado.
-        self.commit_edit();
+        // Com uma fórmula aberta, o clique aponta (onde cabe uma referência).
+        if self.editor_click(&g, x, y, mods) {
+            return;
+        }
+        // Clique fora do editor confirma o que foi digitado (rolar, não, se
+        // for para apontar).
+        let scrolling = g.vscroll.contains(x, y) || g.hscroll.contains(x, y);
+        if !(scrolling && self.can_point()) {
+            let sheet = self.doc.as_ref().map(|d| d.active);
+            self.commit_edit();
+            // Confirmar voltou para a aba da célula: o clique era na outra.
+            if sheet != self.doc.as_ref().map(|d| d.active) && !g.tabs.contains(x, y) {
+                return;
+            }
+        }
         // Barra de fórmulas: caixa de nome.
         if g.namebox.contains(x, y) {
             self.namebox_focus = true;
@@ -1596,12 +1618,26 @@ impl SheetsApp {
         }
     }
 
-    fn mouse_move(&mut self, x: f32, y: f32) -> bool {
+    pub(crate) fn mouse_move(&mut self, x: f32, y: f32) -> bool {
         self.mouse = (x, y);
         let Some(drag) = self.drag else {
             let g = self.geom();
             if self.popup.is_some() || self.prompt.is_some() || self.filter_panel.is_some() {
                 return true;
+            }
+            // Lista de sugestões: o item sob o mouse fica marcado.
+            if self.editor.as_ref().is_some_and(|e| e.complete.list.is_some()) {
+                let over = self.complete_boxes(&g).is_some_and(|b| b.contains(x, y));
+                if over {
+                    if let Some(w) = &self.window {
+                        w.set_cursor(Cursor::Default);
+                    }
+                    self.complete_hover = true;
+                    return true;
+                }
+                if std::mem::take(&mut self.complete_hover) {
+                    self.redraw_later();
+                }
             }
             let tool = if g.toolbar.contains(x, y) {
                 let tab = self.ribbon_tab;
@@ -1680,7 +1716,7 @@ impl SheetsApp {
                 v.scroll_x = min + t * (max - min);
             }
             Drag::Zoom => {}
-            Drag::Select | Drag::Cols | Drag::Rows => {
+            Drag::Select | Drag::Cols | Drag::Rows | Drag::Point => {
                 // Fora da grade: rola na direção do mouse.
                 let main = g.quads[3].rect;
                 let step = 2.0 * v.rows.default_size() as f64;
@@ -1698,6 +1734,7 @@ impl SheetsApp {
                 let cy = y.clamp(g.grid.y0, g.grid.y1 - 1.0);
                 if let Some((r, c)) = g.hit(v, cx, cy) {
                     match drag {
+                        Drag::Point => self.point_drag((r, c)),
                         Drag::Select => v.cur = (r, c),
                         Drag::Cols => v.cur.1 = c,
                         _ => v.cur.0 = r,
@@ -1872,7 +1909,7 @@ impl SheetsApp {
             }
             return true;
         }
-        if let Some(handled) = self.editor_key(cx, &key, mods, text.as_deref()) {
+        if let Some(handled) = self.editor_key(cx.clipboard(), &key, mods, text.as_deref()) {
             return handled;
         }
         // Campo de busca com foco.
@@ -2184,6 +2221,8 @@ impl App for SheetsApp {
         self.mark("janela criada");
         self.scale = window.scale_factor() as f32;
         self.waker = Some(cx.waker());
+        self.system = window.color_scheme().unwrap_or(ColorScheme::Light);
+        window.set_color_scheme(self.mode.frame());
         self.window = Some(window.clone());
         // A leitura começa já: corre junto com a GPU e as fontes.
         match self.opts.path.clone() {
@@ -2251,6 +2290,18 @@ impl App for SheetsApp {
                 }
                 a || b
             }
+            Event::SchemeChanged(s) => {
+                self.system = s;
+                self.mode == Mode::System
+            }
+            // O Windows repinta a moldura com as cores do sistema quando
+            // alguma configuração muda: repõe as do tema escolhido.
+            Event::Focused(true) => {
+                if let (Some(w), Some(f)) = (&self.window, self.mode.frame()) {
+                    w.set_color_scheme(Some(f));
+                }
+                false
+            }
             Event::Resized { width, height } => {
                 if let Some(g) = &mut self.gfx {
                     g.resize(width, height);
@@ -2297,6 +2348,7 @@ impl App for SheetsApp {
                     }
                 } else if let Some(panel) = self.filter_panel.as_mut().filter(|p| p.rect.contains(mx, my)) {
                     panel.scroll_by(if dy > 0.0 { -3 } else { 3 });
+                } else if self.complete_wheel(&g, mx, my, dy > 0.0) {
                 } else if g.tabs.contains(mx, my) {
                     self.tabbar.scroll_by(-(dy as f32) * g.s, g.tabs.w());
                 } else {
@@ -2362,6 +2414,7 @@ impl App for SheetsApp {
         let build_ms = tb.elapsed().as_secs_f64() * 1000.0;
         let has_content = self.doc.as_ref().is_some_and(|d| d.slot().data.is_some());
 
+        let clear = self.theme().paper;
         let (Some(gfx), Some(text)) = (self.gfx.as_mut(), self.text.as_mut()) else { return };
         for u in text.take_uploads() {
             gfx.upload_atlas(u.x, u.y, u.w, u.h, &u.data);
@@ -2375,7 +2428,7 @@ impl App for SheetsApp {
             && self.saving.is_none()
             && text.fonts_complete();
         if self.screenshot_pending && done && !atlas_reset {
-            let (w, h, rgba) = gfx.render_to_rgba(&self.instances, crate::draw::WHITE);
+            let (w, h, rgba) = gfx.render_to_rgba(&self.instances, clear);
             let path = self.opts.screenshot.clone().unwrap();
             match crate::draw::save_png(&path, w, h, &rgba) {
                 Ok(()) => println!("screenshot salvo em {} ({w}×{h})", path.display()),
@@ -2385,7 +2438,7 @@ impl App for SheetsApp {
             cx.exit();
             return;
         }
-        let status = gfx.render(&self.instances, crate::draw::WHITE);
+        let status = gfx.render(&self.instances, clear);
         let cpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
         if self.trace && self.t0.elapsed().as_secs_f64() < 5.0 {
             eprintln!(
@@ -2505,6 +2558,41 @@ pub fn selection_tsv(
         out.push_str("\r\n");
     }
     out
+}
+
+/// A célula a um passo de `from` (pulando escondidas e saindo de mesclagens)
+/// ou, com `jump`, na borda dos dados.
+pub(crate) fn step(sheet: &Sheet, v: &View, from: (u32, u32), dr: i32, dc: i32, jump: bool) -> (u32, u32) {
+    let (mut r, mut c) = from;
+    if jump {
+        if dr != 0 {
+            r = data_edge_row(sheet, v, r, c, dr > 0);
+        }
+        if dc != 0 {
+            c = data_edge_col(sheet, v, r, c, dc > 0);
+        }
+        return (r, c);
+    }
+    // Sair de uma mesclagem pelo lado dela.
+    if let Some(m) = v.merges.at(r, c) {
+        if dr > 0 {
+            r = m.last_row;
+        } else if dr < 0 {
+            r = m.first_row;
+        }
+        if dc > 0 {
+            c = m.last_col;
+        } else if dc < 0 {
+            c = m.first_col;
+        }
+    }
+    for _ in 0..dr.unsigned_abs() {
+        r = if dr > 0 { v.rows.next_visible(r) } else { v.rows.prev_visible(r) };
+    }
+    for _ in 0..dc.unsigned_abs() {
+        c = if dc > 0 { v.cols.next_visible(c) } else { v.cols.prev_visible(c) };
+    }
+    (r, c)
 }
 
 /// Ctrl+↑/↓: até a borda do bloco de dados, como no Excel.
