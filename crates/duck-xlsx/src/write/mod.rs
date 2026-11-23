@@ -14,6 +14,7 @@ mod blank;
 mod cellxml;
 mod deflate;
 mod patch;
+mod pivot;
 mod regen;
 mod styles;
 mod zipw;
@@ -131,6 +132,30 @@ impl Book {
                     && let Ok(xml) = self.pkg.read(&table.part)
                 {
                     small.insert(table.part.clone(), patch::patch_table(&xml, table));
+                }
+            }
+        }
+        // Tabelas dinâmicas e segmentações de dados mudadas.
+        for s in sheets.iter().flatten() {
+            if !s.edits().pivots {
+                continue;
+            }
+            for t in &s.layout.pivots {
+                if !t.part.is_empty()
+                    && let Ok(xml) = self.pkg.read(&t.part)
+                {
+                    small.insert(t.part.clone(), pivot::patch_pivot_table(&xml, t));
+                }
+            }
+            for o in &s.layout.objects {
+                if let duck_core::drawing::ObjectKind::Slicer(sl) = &o.kind
+                    && let Some(link) = &sl.pivot
+                    && !small.contains_key(&link.part)
+                    && let Ok(xml) = self.pkg.read(&link.part)
+                {
+                    let sel: std::collections::HashMap<u32, bool> =
+                        link.item_x.iter().zip(&sl.items).map(|(x, it)| (*x, it.1)).collect();
+                    small.insert(link.part.clone(), pivot::patch_slicer_cache(&xml, &sel));
                 }
             }
         }

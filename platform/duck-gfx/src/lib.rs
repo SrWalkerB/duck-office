@@ -43,6 +43,10 @@ pub const KIND_DASH: u32 = 2;
 pub const KIND_GLYPH_ROT: u32 = 3;
 /// Triângulo: vértices em `rect.xy`, `rect.zw` e `uv.xy` (gráficos).
 pub const KIND_TRI: u32 = 4;
+/// Imagem: `uv` = região (0..1) do atlas de imagens (RGBA).
+pub const KIND_IMAGE: u32 = 5;
+/// Lado do atlas de imagens (pixels).
+pub const IMAGE_ATLAS: u32 = 2048;
 
 impl Instance {
     #[inline]
@@ -69,6 +73,12 @@ impl Instance {
     #[inline]
     pub fn triangle(a: [f32; 2], b: [f32; 2], c: [f32; 2], color: [u8; 4]) -> Self {
         Self { rect: [a[0], a[1], b[0], b[1]], uv: [c[0], c[1], c[0], c[1]], color, kind: KIND_TRI }
+    }
+
+    /// Imagem: `uv` = (u0, v0, u1, v1) no atlas de imagens; `alpha` = opacidade.
+    #[inline]
+    pub fn image(rect: [f32; 4], uv: [f32; 4], alpha: u8) -> Self {
+        Self { rect, uv, color: [255, 255, 255, alpha], kind: KIND_IMAGE }
     }
 
     /// Linha tracejada (bordas pontilhadas, tracejadas...). O padrão segue a
@@ -129,6 +139,8 @@ const SHADER: &str = r#"
 struct Globals { screen: vec2<f32>, _pad: vec2<f32> };
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(0) @binding(1) var atlas: texture_2d<f32>;
+@group(0) @binding(2) var images: texture_2d<f32>;
+@group(0) @binding(3) var smp: sampler;
 
 struct VIn {
     @builtin(vertex_index) vi: u32,
@@ -185,6 +197,11 @@ fn vs(in: VIn) -> VOut {
 
 @fragment
 fn fs(in: VOut) -> @location(0) vec4<f32> {
+    if (in.kind == 5u) {
+        // Nível explícito: amostragem fora de fluxo uniforme.
+        let c = textureSampleLevel(images, smp, in.uv, 0.0);
+        return vec4<f32>(c.rgb, c.a * in.color.a);
+    }
     if (in.kind == 1u) {
         let a = textureLoad(atlas, vec2<i32>(floor(in.uv)), 0).r;
         return vec4<f32>(in.color.rgb, in.color.a * a);
@@ -226,6 +243,7 @@ pub struct Gfx {
     instance_capacity: usize,
     atlas: wgpu::Texture,
     atlas_size: u32,
+    images: wgpu::Texture,
     info: AdapterInfo,
     timings: Vec<(&'static str, Duration)>,
 }
@@ -512,6 +530,23 @@ impl Gfx {
             view_formats: &[],
         });
         let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
+        let images = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("imagens"),
+            size: wgpu::Extent3d { width: IMAGE_ATLAS, height: IMAGE_ATLAS, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let images_view = images.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("imagens"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("duck-gfx bgl"),
@@ -536,6 +571,22 @@ impl Gfx {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -547,6 +598,11 @@ impl Gfx {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&atlas_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&images_view),
+                },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&sampler) },
             ],
         });
 
@@ -611,6 +667,7 @@ impl Gfx {
             instance_capacity,
             atlas,
             atlas_size,
+            images,
             info,
             timings,
         })
@@ -669,6 +726,25 @@ impl Gfx {
             },
             data,
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w), rows_per_image: Some(h) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+    }
+
+    /// Copia pixels RGBA (sRGB, linhas contíguas) para o atlas de imagens.
+    pub fn upload_image(&self, x: u32, y: u32, w: u32, h: u32, rgba: &[u8]) {
+        if w == 0 || h == 0 || x + w > IMAGE_ATLAS || y + h > IMAGE_ATLAS {
+            return;
+        }
+        debug_assert_eq!(rgba.len(), (w * h * 4) as usize);
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.images,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
             wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
         );
     }

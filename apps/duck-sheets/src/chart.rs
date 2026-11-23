@@ -75,6 +75,8 @@ pub struct ObjCtx<'a> {
     pub font: TextStyle,
     pub g: f32,
     pub date1904: bool,
+    /// Imagens já na GPU: parte → região no atlas.
+    pub images: &'a std::collections::HashMap<String, [f32; 4]>,
 }
 
 /// Desenha os objetos da aba que aparecem no painel `q`.
@@ -114,7 +116,19 @@ pub fn draw_objects(p: &mut Painter, cx: &ObjCtx, objects: &[Object], v: &View, 
                     p.label(line, style, r, Align::Center, 4.0 * cx.g, color);
                 }
             }
-            ObjectKind::Picture { .. } => {}
+            ObjectKind::Picture { part } => {
+                if let Some(&[u0, v0, u1, v1]) = cx.images.get(part) {
+                    // Recorta o retângulo e a região do atlas juntos.
+                    let fx = |x: f32| u0 + (x - r.x0) / r.w() * (u1 - u0);
+                    let fy = |y: f32| v0 + (y - r.y0) / r.h() * (v1 - v0);
+                    let c = clip;
+                    p.out.push(duck_gfx::Instance::image(
+                        [c.x0, c.y0, c.w(), c.h()],
+                        [fx(c.x0), fy(c.y0), fx(c.x1), fy(c.y1)],
+                        255,
+                    ));
+                }
+            }
         }
     }
 }
@@ -1127,9 +1141,6 @@ impl crate::app::SheetsApp {
             for (si, sheet) in sheets.iter().enumerate() {
                 for (oi, o) in sheet.layout.objects.iter().enumerate() {
                     let ObjectKind::Chart(c) = &o.kind else { continue };
-                    if c.pivot {
-                        continue;
-                    }
                     for (pi, pl) in c.plots.iter().enumerate() {
                         for (ki, s) in pl.series.iter().enumerate() {
                             let vals = s.val_ref.as_deref().and_then(|f| cells(f, si as u32)).map(|v| {
@@ -1250,10 +1261,11 @@ impl crate::app::SheetsApp {
         let Some(doc) = self.doc.as_ref() else { return };
         let Some((sheet, _)) = doc.current() else { return };
         let Some(ObjectKind::Slicer(s)) = sheet.layout.objects.get(obj).map(|o| &o.kind) else { return };
-        let Some((tid, cid)) = s.table.clone() else {
-            self.message = "Segmentação de tabela dinâmica: filtrar por ela ainda não é possível".into();
+        if s.pivot.is_some() {
+            self.pivot_slicer_click(obj, item, ctrl);
             return;
-        };
+        }
+        let Some((tid, cid)) = s.table.clone() else { return };
         let pat = format!(" id=\"{cid}\"");
         let Some((ti, t)) = sheet.layout.tables.iter().enumerate().find(|(_, t)| t.id.to_string() == tid)
         else {

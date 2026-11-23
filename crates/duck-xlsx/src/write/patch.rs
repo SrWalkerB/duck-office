@@ -29,6 +29,24 @@ enum Phase {
     Tail,
 }
 
+/// O elemento `<f …>…</f>` (ou `<f …/>`) de um `<c>` original.
+fn formula_element(c: &[u8]) -> Option<&[u8]> {
+    let mut from = 0;
+    while let Some(k) = memmem::find(&c[from..], b"<f") {
+        let i = from + k;
+        if c.get(i + 2).is_some_and(|&b| is_name_end(b)) {
+            let tend = tag_end(c, i)?;
+            if c[tend - 2] == b'/' {
+                return Some(&c[i..tend]);
+            }
+            let close = memmem::find(&c[tend..], b"</f>")?;
+            return Some(&c[i..tend + close + 4]);
+        }
+        from = i + 2;
+    }
+    None
+}
+
 pub struct Patcher<'a> {
     sheet: &'a Sheet,
     shared: &'a StringTable,
@@ -257,6 +275,12 @@ impl<'a> Patcher<'a> {
         write_cell(out, self.sheet, self.shared, row, col, extra);
     }
 
+    /// Célula editada que existia no XML original (`orig` = o `<c>…</c>`).
+    fn cell_from(&mut self, row: u32, col: u32, extra: &[u8], orig: &[u8], out: &mut Vec<u8>) {
+        self.cells_written += 1;
+        super::cellxml::write_cell_with(out, self.sheet, self.shared, row, col, extra, formula_element(orig));
+    }
+
     /// Uma linha que existia, escrita inteira a partir do modelo (o `<row>`
     /// original fica, sem `spans`).
     fn row_full(&mut self, r: u32, attrs: &[u8], height: bool, out: &mut Vec<u8>) {
@@ -330,7 +354,7 @@ impl<'a> Patcher<'a> {
             if let Ok(k) = cols.binary_search(&col) {
                 if !written[k] {
                     written[k] = true;
-                    self.cell(r, col, b"", out);
+                    self.cell_from(r, col, b"", &content[i..end], out);
                 }
             } else if self.rewrite_all && !self.is_data_table(r, col) {
                 let mut extra = Vec::new();

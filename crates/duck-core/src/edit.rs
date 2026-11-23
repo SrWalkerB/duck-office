@@ -66,6 +66,9 @@ pub struct Edits {
     pub tables: BTreeSet<u32>,
     /// Faixas de linhas `[a, b]` reescritas inteiras (classificar).
     pub rewrite: Vec<(u32, u32)>,
+    /// Tabelas dinâmicas ou segmentações de dados mudadas (as partes delas
+    /// são remendadas ao salvar).
+    pub pivots: bool,
 }
 
 impl Edits {
@@ -81,6 +84,7 @@ impl Edits {
             && !self.filter
             && self.tables.is_empty()
             && self.rewrite.is_empty()
+            && !self.pivots
     }
 
     fn mark(&mut self, row: u32, col: u32) {
@@ -102,6 +106,11 @@ impl Sheet {
     /// Esquece as mudanças (depois de salvar).
     pub fn clear_edits(&mut self) {
         self.edits = Edits::default();
+    }
+
+    /// Tabelas dinâmicas ou segmentações desta aba mudaram.
+    pub fn mark_pivots(&mut self) {
+        self.edits.pivots = true;
     }
 
     /// Marca a célula como editada sem mudar o conteúdo (ex.: para o

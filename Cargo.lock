@@ -633,6 +633,7 @@ dependencies = [
  "png",
  "rayon",
  "windows-sys 0.61.2",
+ "zune-jpeg",
 ]
 
 [[package]]

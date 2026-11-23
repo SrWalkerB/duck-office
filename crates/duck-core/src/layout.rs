@@ -101,6 +101,8 @@ pub struct Layout {
     pub tables: Vec<Table>,
     /// Gráficos, segmentações e formas sobre a aba.
     pub objects: Vec<crate::drawing::Object>,
+    /// Tabelas dinâmicas da aba.
+    pub pivots: Vec<crate::pivot::PivotTable>,
 }
 
 /// Filtro automático: o intervalo (com a linha de cabeçalho) e os
@@ -231,6 +233,7 @@ impl Layout {
         self.autofilter = self.autofilter.take().or(other.autofilter);
         self.tables.extend(other.tables);
         self.objects.extend(other.objects);
+        self.pivots.extend(other.pivots);
     }
 
     /// Ordena depois de juntar todos os pedaços.

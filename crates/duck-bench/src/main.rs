@@ -77,6 +77,9 @@ fn main() {
         "roundtrip" => roundtrip::cmd(rest),
         "calc" => calc::cmd(rest),
         "objetos" => calc::cmd_objects(rest),
+        "dinamicas" => calc::cmd_pivots(rest),
+        "grupos" => calc::cmd_pivot_groups(rest),
+        "celula" => calc::cmd_cell(rest),
         "gen-showcase" => match rest.first() {
             Some(p) => showcase::write(Path::new(p))
                 .map_err(|e| e.to_string())
@@ -120,6 +123,7 @@ fn positional(args: &[String]) -> Option<String> {
                     | "--estrutura"
                     | "--formas-valor"
                     | "--recalc"
+                    | "--detalhes"
             );
             continue;
         }

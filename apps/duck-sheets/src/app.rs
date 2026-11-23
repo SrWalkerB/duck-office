@@ -168,6 +168,8 @@ pub struct Doc {
     pub dirty: bool,
     /// Recálculo em segundo plano (F4).
     pub calc: crate::calc::Calc,
+    /// Tabelas dinâmicas (registros lidos sob demanda).
+    pub pivots: crate::pivot::PivotState,
 }
 
 impl Doc {
@@ -494,6 +496,8 @@ pub struct SheetsApp {
     pub new_count: u32,
     /// O usuário já aceitou mexer na estrutura de abas com gráficos/tabelas.
     pub objects_ok: bool,
+    /// Imagens das abas no atlas da GPU.
+    pub images: crate::images::Images,
 }
 
 impl SheetsApp {
@@ -562,6 +566,7 @@ impl SheetsApp {
             new_count: 0,
             filter_panel: None,
             objects_ok: false,
+            images: Default::default(),
         }
     }
 
@@ -632,6 +637,7 @@ impl SheetsApp {
         for m in msgs {
             match m {
                 Msg::Opened { sheets, active, styles, strings, date1904, extras, at } => {
+                    self.images = Default::default();
                     self.note("arquivo aberto", at);
                     self.remember_recent(&path);
                     let looks = Arc::new(Looks::new(&styles));
@@ -653,6 +659,7 @@ impl SheetsApp {
                         history: Default::default(),
                         dirty: false,
                         calc: crate::calc::Calc::new(extras),
+                        pivots: Default::default(),
                     });
                     self.font_key = (0, 0);
                 }
@@ -674,6 +681,7 @@ impl SheetsApp {
                     self.message = format!("Pronto em {} ms", at.as_millis());
                     self.refresh_table_slicers();
                     self.refresh_charts();
+                    self.load_images();
                     self.scripted_edits();
                     self.calc_kick();
                 }
@@ -2115,7 +2123,7 @@ impl App for SheetsApp {
                     cx.exit();
                     return;
                 }
-                let b = self.poll_search() | saved.is_some() | self.poll_calc();
+                let b = self.poll_search() | saved.is_some() | self.poll_calc() | self.poll_images();
                 if a && let Some(q) = self.opts.find.take() {
                     // `--find`: busca assim que a aba ativa chegar.
                     if self.doc.as_ref().is_some_and(|d| d.slot().data.is_some() && !d.slot().preview) {

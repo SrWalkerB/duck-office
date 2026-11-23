@@ -21,6 +21,7 @@ pub mod edit;
 pub mod input;
 mod layout;
 pub mod numfmt;
+pub mod pivot;
 pub mod shift;
 mod styles;
 
@@ -1203,6 +1204,20 @@ impl Sheet {
         ))
     }
 
+    /// A célula está num grupo de fórmula compartilhada que continua inteiro
+    /// (a célula-mestre ainda tem a fórmula do grupo)?
+    pub fn shared_intact(&self, row: u32, col: u32) -> bool {
+        let Some(f) = self.formula(row, col) else { return false };
+        let FormulaKind::Shared { si } = f.kind else { return false };
+        let id = self.formula_id(f.anchor_row, f.anchor_col);
+        if id == 0 || id & SHARED_BIT != 0 {
+            return false;
+        }
+        self.formula_defs.get(id as usize - 1).is_some_and(|d| {
+            d.kind == FormulaKind::Shared { si } && (d.row, d.col) == (f.anchor_row, f.anchor_col)
+        })
+    }
+
     /// Id bruto de fórmula da célula (0 = sem fórmula). Células seguidas com o
     /// mesmo id têm a mesma fórmula (modelo relativo ou grupo compartilhado).
     pub fn formula_id(&self, row: u32, col: u32) -> u32 {
@@ -1324,6 +1339,8 @@ pub struct ExternalBook {
 pub struct BookExtras {
     pub names: Vec<DefinedName>,
     pub externals: Vec<ExternalBook>,
+    /// Caches das tabelas dinâmicas (sem os registros, lidos sob demanda).
+    pub pivot_caches: Vec<pivot::PivotCache>,
     /// Data e hora (serial) em que o arquivo foi salvo, se o arquivo disser
     /// (`docProps/core.xml`): é o "hoje" dos valores guardados.
     pub saved_at: Option<f64>,

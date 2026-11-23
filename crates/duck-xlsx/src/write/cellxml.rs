@@ -119,6 +119,22 @@ pub fn escape_attr(s: &str, out: &mut Vec<u8>) {
 /// atributos do `<c>` original a manter (ex.: ` cm="1"`), já formatados.
 /// Uma célula vazia e sem estilo não escreve nada.
 pub fn write_cell(out: &mut Vec<u8>, sheet: &Sheet, shared: &StringTable, row: u32, col: u32, extra: &[u8]) {
+    write_cell_with(out, sheet, shared, row, col, extra, None);
+}
+
+/// Como [`write_cell`]; `orig_f` é o `<f…>` original da célula. Numa fórmula
+/// compartilhada cujo grupo continua inteiro, ele é mantido (a mestre guarda o
+/// intervalo do grupo; escrever uma fórmula comum desfaria o grupo e deixaria
+/// os outros membros sem fórmula).
+pub fn write_cell_with(
+    out: &mut Vec<u8>,
+    sheet: &Sheet,
+    shared: &StringTable,
+    row: u32,
+    col: u32,
+    extra: &[u8],
+    orig_f: Option<&[u8]>,
+) {
     let raw = sheet.raw(row, col);
     if raw.is_blank() {
         return;
@@ -150,7 +166,12 @@ pub fn write_cell(out: &mut Vec<u8>, sheet: &Sheet, shared: &StringTable, row: u
     out.extend_from_slice(extra);
     let body_start = out.len();
     out.push(b'>');
-    if let Some(f) = formula {
+    let keep = orig_f.filter(|_| {
+        matches!(formula.map(|f| f.kind), Some(FormulaKind::Shared { .. })) && sheet.shared_intact(row, col)
+    });
+    if let Some(orig) = keep {
+        out.extend_from_slice(orig);
+    } else if let Some(f) = formula {
         match f.kind {
             FormulaKind::Array(range) if (row, col) == (f.anchor_row, f.anchor_col) => {
                 out.extend_from_slice(b"<f t=\"array\" ref=\"");

@@ -2,7 +2,7 @@
 
 Onde o projeto está, o que já foi feito e o que falta. Os detalhes de cada decisão e as medições completas ficam em [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-**Fase atual: F5** (gráficos e segmentações de dados, que aparecem em quase toda planilha real). O motor de cálculo (F4) está pronto: 100% das fórmulas das planilhas de teste iguais ao Excel, recálculo do arquivo de referência em 0,6 s. Gráficos e segmentações já aparecem na tela; falta a interação (clicar na segmentação, tabelas dinâmicas). Falta o teste manual de teclado e mouse das fases anteriores.
+**Fase atual: F5** (gráficos e segmentações de dados, que aparecem em quase toda planilha real). O motor de cálculo (F4) está pronto: 100% das fórmulas das planilhas de teste iguais ao Excel, recálculo do arquivo de referência em 0,6 s. Gráficos, imagens, tabelas dinâmicas e segmentações de dados já funcionam (clicar na segmentação recalcula as dinâmicas). Falta o teste manual de teclado e mouse das fases anteriores.
 
 | Fase | Entrega | Status |
 |---|---|---|
@@ -12,7 +12,7 @@ Onde o projeto está, o que já foi feito e o que falta. Os detalhes de cada dec
 | **F3** | Edição e salvar com round-trip | ✅ Concluída (teste manual pendente) |
 | **F3.5** | Casca do app: faixa de opções, menu Arquivo, clique direito, novo arquivo, "Abrir com"; filtro e classificação | ✅ Concluída (teste manual pendente) |
 | **F4** | Motor de cálculo | ✅ Concluída (matrizes dinâmicas pendentes) |
-| **F5+** | Gráficos, pivôs, slicers, VBA, formato nativo, docs e slides | 🔶 Em andamento (gráficos e segmentações na tela) |
+| **F5+** | Gráficos, pivôs, slicers, VBA, formato nativo, docs e slides | 🔶 Em andamento (gráficos, imagens, tabelas dinâmicas e segmentações) |
 
 ---
 
@@ -154,9 +154,12 @@ Critério de pronto: recalcular o arquivo de referência sem travar a janela. �
 - [x] **Gráficos na tela**: barras (verticais, horizontais, agrupadas, empilhadas, 100%), linhas (também empilhadas e tracejadas), área, pizza e rosca, combinações com eixo secundário, rótulos de dados (com caixa colorida), legenda, título, linhas de grade, escala fixa do eixo e as cores do tema com os ajustes do arquivo (`lumMod`, padrões, gradientes). Os valores vêm das células: o gráfico muda quando a fórmula de origem é recalculada.
 - [x] **Segmentações de dados na tela**: de tabela dinâmica (itens do cache, com o que está selecionado) e de tabela do Excel (valores da coluna, marcados pelo filtro da tabela), com o estilo do arquivo (`x14:slicerStyles`) ou os estilos prontos.
 - [x] Formas com texto e grupos de formas (as posições dos filhos são compostas até a âncora).
-- [ ] Imagens (hoje lidas, não desenhadas), edição de gráficos, gráficos de dispersão completos.
-- [ ] Clicar na segmentação filtra a tabela (as de tabela do Excel já sabem qual coluna); as de tabela dinâmica dependem do motor de tabelas dinâmicas.
-- [ ] Tabelas dinâmicas interativas e linhas do tempo (timelines).
+- [x] **Imagens** PNG e JPEG (atlas RGBA na GPU, reduzidas se forem grandes). EMF/WMF ainda não.
+- [x] **Motor de tabelas dinâmicas** (`duck-calc/src/pivot.rs`): a partir do cache e dos registros, com itens escondidos, filtros de página, agrupamento de datas (mês, trimestre, ano) e de números, campos calculados, ordem manual/por rótulo/por valor, formas compacta, de tópicos e tabular, subtotais, totais gerais e vários campos de valores. O layout sai no mesmo formato que o Excel grava, o que permite conferir: nas planilhas de teste, 21 de 21 e 37 de 38 tabelas com o layout idêntico e 0 valores diferentes (as do Modelo de Dados/Power Pivot não têm registros no arquivo e não recalculam).
+- [x] **Segmentações interativas**: clicar filtra (Ctrl soma ou tira itens; o ícone limpa). As de tabela do Excel filtram a tabela; as de tabela dinâmica recalculam as dinâmicas ligadas e reescrevem as células, e fórmulas e gráficos que as leem acompanham. Ao salvar, as dinâmicas (itens escondidos, área, linhas e colunas) e a seleção da segmentação são gravadas.
+- [ ] Edição de gráficos, gráficos de dispersão completos.
+- [ ] Linhas do tempo (timelines), filtros de valor/rótulo das dinâmicas ("10 maiores"), mostrar valores como (% do total...).
+- [ ] Desfazer o clique numa segmentação de tabela dinâmica (hoje desfaz as células; a seleção da segmentação fica).
 - [ ] Inserir/apagar linhas e colunas move os objetos (hoje o app avisa e eles ficam onde estavam).
 - [ ] VBA (hoje só preservado).
 - [ ] Formato de arquivo nativo (ADR-013, em discussão).

@@ -241,6 +241,7 @@ impl SheetsApp {
         for (idx, st) in touched {
             self.after_change(idx, st);
         }
+        self.refresh_charts();
         self.calc_kick();
         true
     }
@@ -712,6 +713,30 @@ impl SheetsApp {
                 }
                 continue;
             }
+            // `segmentacao=N:I` (item I da N-ésima segmentação da aba; `limpar`),
+            // `segmentacao=N:I+` soma o item (Ctrl+clique).
+            if let Some(arg) = e.strip_prefix("segmentacao=")
+                && let Some((n, i)) = arg.split_once(':')
+            {
+                let n: usize = n.parse().unwrap_or(0);
+                let obj = self.doc.as_ref().and_then(|d| d.current()).and_then(|(s, _)| {
+                    s.layout
+                        .objects
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, o)| matches!(o.kind, duck_core::drawing::ObjectKind::Slicer(_)))
+                        .nth(n)
+                        .map(|(k, _)| k)
+                });
+                let Some(obj) = obj else {
+                    eprintln!("--edit: segmentação {n} não encontrada");
+                    continue;
+                };
+                let ctrl = i.ends_with('+');
+                let item = if i == "limpar" { None } else { i.trim_end_matches('+').parse().ok() };
+                self.slicer_click(obj, item, ctrl);
+                continue;
+            }
             let Some((cell, text)) = e.split_once('=') else { continue };
             let Some((r, c)) = crate::app::parse_cell(cell.trim()) else {
                 eprintln!("--edit: referência inválida: {cell}");
@@ -883,7 +908,12 @@ impl SheetsApp {
             }
             Err(e) => {
                 self.message = "Erro ao salvar: nada foi alterado no arquivo".into();
-                duck_platform::message_box("Não foi possível salvar", &e);
+                if self.opts.save_to.is_some() {
+                    // Execução de teste: sem caixa de diálogo (ela esperaria um clique).
+                    eprintln!("Não foi possível salvar: {e}");
+                } else {
+                    duck_platform::message_box("Não foi possível salvar", &e);
+                }
                 false
             }
         };

@@ -18,6 +18,7 @@ mod extras;
 pub mod filter;
 mod package;
 mod parts;
+pub mod pivot;
 #[doc(hidden)]
 pub mod sheet;
 pub mod write;
@@ -174,7 +175,22 @@ impl Book {
     /// Nomes definidos, arquivos externos (com os valores guardados) e a
     /// data em que o arquivo foi salvo: o que o motor de cálculo precisa.
     pub fn read_extras(&self) -> duck_core::BookExtras {
-        extras::read_extras(&self.pkg, &self.meta)
+        let mut e = extras::read_extras(&self.pkg, &self.meta);
+        e.pivot_caches = pivot::read_caches(&self.pkg, &self.meta.path);
+        e
+    }
+
+    /// Bytes de uma parte do pacote (imagens, por exemplo).
+    pub fn read_part(&self, name: &str) -> Option<Vec<u8>> {
+        self.pkg.read(name).ok()
+    }
+
+    /// Registros de um cache de tabela dinâmica (lidos só quando precisa).
+    pub fn read_pivot_records(
+        &self,
+        cache: &mut duck_core::pivot::PivotCache,
+    ) -> Option<duck_core::pivot::Records> {
+        pivot::read_records(&self.pkg, cache)
     }
 
     /// Estilos e tema.
@@ -253,6 +269,7 @@ impl Book {
                                 .slicer_caches
                                 .get_or_init(|| drawing::read_slicer_caches(&self.pkg, &self.meta.path));
                             sh.layout.objects = drawing::read_objects(&self.pkg, &m.path, caches);
+                            sh.layout.pivots = pivot::read_pivot_tables(&self.pkg, &m.path);
                             (sh, rep)
                         })
                     }

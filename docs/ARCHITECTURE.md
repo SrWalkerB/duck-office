@@ -843,6 +843,17 @@ As diferenças encontradas pela conferência e corrigidas mostram o tipo de comp
 
 Conferido na planilha de painel de teste (20 gráficos, 26 segmentações, formas e imagens): leitura do arquivo continua em 0,3 s; o desenho fica próximo do que o Excel e o OnlyOffice mostram. A vitrine ganhou dois gráficos (barras + linha no eixo secundário, rosca) que entram no round-trip.
 
+### Status da F5 (22/11/2026): tabelas dinâmicas e imagens
+
+- **Leitura** (`duck-xlsx/src/pivot.rs`): caches (`pivotCacheDefinition`: campos, itens compartilhados, agrupamentos `fieldGroup`) ficam em `BookExtras`; os registros (`pivotCacheRecords`) são lidos só quando precisa (um cache do arquivo de referência tem 593 mil registros). Cada registro vira índices por campo (coluna); campos agrupados por data ou número recebem o índice do grupo a partir do valor bruto (datas em branco vão para o primeiro item, "<início", como no Excel). As definições (`pivotTableDefinition`) ficam em `Layout::pivots`.
+- **Motor** (`duck-calc/src/pivot.rs`): uma passada pelos registros que passam nos filtros (itens escondidos e filtro de página) soma cada registro em todos os prefixos dos caminhos de linha e coluna. As linhas e colunas saem no formato que o Excel grava (`rowItems`/`colItems`: `r` = campos repetidos, `x` = posições, `t` = subtotal/total), o que permite conferir com o arquivo sem olhar dados. Ordenação por valor parte da ordem da última exibição (que está no arquivo) e é estável: é assim que o Excel desempata. Campos calculados (`'A'/('B'+'C')`) são avaliados sobre as somas da célula; erros respeitam `showError`/`errorCaption`.
+- **No app** (`apps/duck-sheets/src/pivot.rs`): clicar numa segmentação de tabela dinâmica muda os itens escondidos do campo nas tabelas ligadas (mesmo cache), recalcula cada uma, reescreve rótulos e valores (`Command::SetCells`, num passo) e limpa o que sobrou; o recálculo leva às fórmulas e aos gráficos.
+- **Gravador** (`write/pivot.rs`): remenda as partes das dinâmicas (área, `h="1"` dos itens, `rowItems`/`colItems`) e dos caches das segmentações (`s="1"`).
+- **Fórmulas compartilhadas**: com o recálculo, a célula-mestre de um grupo pode mudar só de valor; o remendo agora mantém o `<f t="shared" ref=… si=…>` original quando o grupo continua inteiro (escrever uma fórmula comum desfazia o grupo e deixava os outros membros sem fórmula — a conferência ao salvar barrava o arquivo).
+- **Imagens** (`apps/duck-sheets/src/images.rs`): PNG (`png`) e JPEG (`zune-jpeg`) decodificados numa thread, reduzidos a no máximo 1024 px e empacotados em prateleiras num atlas RGBA de 2048² no `duck-gfx` (novo tipo de instância com amostragem linear).
+
+Conferência (`duck-bench dinamicas`): na planilha de painel, 21 de 21 tabelas com o layout idêntico ao do Excel e todos os valores iguais (exceto uma célula com valor antigo do próprio arquivo); no arquivo de referência, das 38 com registros, 37 com o layout idêntico e 91.576 valores iguais, 0 diferentes. Depois de clicar em cada segmentação da planilha de painel e salvar, a cópia confere: dinâmicas coerentes, 100% das fórmulas e 0 divergências no calamine.
+
 ---
 
 ## Questões em aberto

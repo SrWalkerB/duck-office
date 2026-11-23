@@ -555,3 +555,373 @@ pub fn cmd_objects(args: &[String]) -> Res {
     }
     Ok(())
 }
+
+/// `duck-bench dinamicas [ARQUIVO]`: calcula cada tabela dinâmica a partir
+/// do cache e compara o layout (`rowItems`/`colItems`) e os valores com o
+/// que o Excel gravou. Só contagens e posições.
+pub fn cmd_pivots(args: &[String]) -> Res {
+    use duck_calc::pivot;
+    let path = crate::file_arg(args)?;
+    let verbose = args.iter().any(|a| a == "--detalhes");
+    let (wb, _) = duck_xlsx::open(&path, &Options::default()).map_err(|e| e.to_string())?;
+    let book = duck_xlsx::Book::open(&path).map_err(|e| e.to_string())?;
+    let mut caches = wb.extras.pivot_caches.clone();
+    let mut records: HashMap<u32, Option<duck_core::pivot::Records>> = HashMap::new();
+    let (mut total, mut external, mut layout_ok, mut vals_ok, mut vals_bad, mut tables_vals_ok) =
+        (0, 0, 0, 0u64, 0u64, 0);
+    let t0 = Instant::now();
+    for (si, sheet) in wb.sheets.iter().enumerate() {
+        for (ti, t) in sheet.layout.pivots.iter().enumerate() {
+            total += 1;
+            let Some(ci) = caches.iter().position(|c| c.id == t.cache_id) else { continue };
+            if caches[ci].external {
+                external += 1;
+                continue;
+            }
+            if let std::collections::hash_map::Entry::Vacant(e) = records.entry(t.cache_id) {
+                e.insert(book.read_pivot_records(&mut caches[ci]));
+            }
+            let Some(Some(rec)) = records.get(&t.cache_id) else { continue };
+            let res = pivot::compute(t, &caches[ci], rec);
+            let same_layout = res.row_items == t.row_items && res.col_items == t.col_items;
+            if same_layout {
+                layout_ok += 1;
+            } else if verbose {
+                let first = res.row_items.iter().zip(&t.row_items).position(|(a, b)| a != b);
+                println!(
+                    "aba {} tabela {}: linhas {} (Excel {}), colunas {} (Excel {}); 1ª diferença na linha {:?}",
+                    si + 1,
+                    ti + 1,
+                    res.row_items.len(),
+                    t.row_items.len(),
+                    res.col_items.len(),
+                    t.col_items.len(),
+                    first
+                );
+                if let Some(i) = first {
+                    let fmt = |a: &duck_core::pivot::AxisItem| {
+                        format!("t={:?} r={} i={} x={:?}", a.t, a.r, a.i, a.x)
+                    };
+                    println!("    nosso: {}\n    Excel: {}", fmt(&res.row_items[i]), fmt(&t.row_items[i]));
+                    if t.row_fields.len() > 3 {
+                        for (lvl, &f) in t.row_fields.iter().enumerate() {
+                            if f < 0 {
+                                continue;
+                            }
+                            let pf = &t.fields[f as usize];
+                            let cf = &caches[ci].fields[f as usize];
+                            println!(
+                                "    nível {lvl}: campo {f} ordem {:?} dado {:?} outline {} compact {} subtotal {} showAll {} itens {} (cache {} itens, grupo {}, virtual {})",
+                                pf.sort,
+                                pf.sort_by_data,
+                                pf.outline,
+                                pf.compact,
+                                pf.default_subtotal,
+                                pf.show_all,
+                                pf.items.len(),
+                                cf.items.len(),
+                                cf.group.is_some(),
+                                cf.virtual_field
+                            );
+                            if cf.group.is_some() {
+                                let xs: Vec<String> = pf
+                                    .items
+                                    .iter()
+                                    .map(|it| {
+                                        format!(
+                                            "{}{}{}",
+                                            it.x.map_or("t".into(), |x| x.to_string()),
+                                            if it.hidden { "h" } else { "" },
+                                            if it.missing { "m" } else { "" }
+                                        )
+                                    })
+                                    .collect();
+                                println!("        itens (x): {}", xs.join(" "));
+                            }
+                        }
+                    }
+                    // Forma dos itens do campo da linha (sem texto).
+                    let lvl = t.row_items[i].r as usize;
+                    if let Some(&f) = t.row_fields.get(lvl).filter(|f| **f >= 0) {
+                        let pf = &t.fields[f as usize];
+                        let cf = &caches[ci].fields[f as usize];
+                        println!("    campo {} ordem {:?} por dado {:?}", f, pf.sort, pf.sort_by_data);
+                        let shape = |p: u32| -> String {
+                            let it = pf
+                                .items
+                                .get(p as usize)
+                                .and_then(|it| it.x)
+                                .and_then(|x| cf.items.get(x as usize));
+                            match it {
+                                Some(duck_core::pivot::PItem::Str(s)) => value_shape_str(s, 24),
+                                Some(other) => format!("{other:?}").chars().take(12).collect(),
+                                None => "?".into(),
+                            }
+                        };
+                        // Pares vizinhos empatados (mesmo total) na ordem do Excel.
+                        let (mut txt_asc, mut txt_desc, mut pos_asc, mut pos_desc) = (0, 0, 0, 0);
+                        let mut prev: Option<(Vec<u32>, u32)> = None;
+                        let mut path: Vec<u32> = Vec::new();
+                        for it in &t.row_items {
+                            if it.t.is_some() {
+                                continue;
+                            }
+                            path.truncate(it.r as usize);
+                            path.extend(&it.x);
+                            if path.len() != lvl + 1 {
+                                prev = None;
+                                continue;
+                            }
+                            let p = path[lvl];
+                            if let Some((pp, ppos)) = &prev
+                                && pp[..lvl] == path[..lvl]
+                            {
+                                let tot = |q: &[u32]| {
+                                    res.cells.get(&(q.to_vec(), Vec::new())).map(|v| v[0].count).unwrap_or(0)
+                                };
+                                if tot(pp) == tot(&path) {
+                                    let lab = |p: u32| {
+                                        pf.items[p as usize]
+                                            .x
+                                            .and_then(|x| cf.items.get(x as usize))
+                                            .map(|it| duck_calc::pivot::item_text(it, false))
+                                            .unwrap_or_default()
+                                    };
+                                    match duck_calc::value::text_cmp(&lab(*ppos), &lab(p)) {
+                                        std::cmp::Ordering::Less => txt_asc += 1,
+                                        std::cmp::Ordering::Greater => txt_desc += 1,
+                                        _ => {}
+                                    }
+                                    if *ppos < p { pos_asc += 1 } else { pos_desc += 1 }
+                                }
+                            }
+                            prev = Some((path.clone(), p));
+                        }
+                        println!(
+                            "    empates: texto crescente {txt_asc}, decrescente {txt_desc}; posição crescente {pos_asc}, decrescente {pos_desc}"
+                        );
+                        for k in i.saturating_sub(1)..(i + 6).min(t.row_items.len()) {
+                            let ex = t.row_items[k].x.first().copied().unwrap_or(0);
+                            let ou = res.row_items.get(k).and_then(|a| a.x.first()).copied().unwrap_or(0);
+                            println!(
+                                "      {k:>3}: Excel {:>4} {:<26} | nosso {:>4} {}",
+                                ex,
+                                shape(ex),
+                                ou,
+                                shape(ou)
+                            );
+                        }
+                    }
+                }
+            }
+            if !same_layout && verbose && res.row_items == t.row_items {
+                let first = res.col_items.iter().zip(&t.col_items).position(|(a, b)| a != b);
+                if let Some(i) = first {
+                    let fmt = |a: &duck_core::pivot::AxisItem| {
+                        format!("t={:?} r={} i={} x={:?}", a.t, a.r, a.i, a.x)
+                    };
+                    println!(
+                        "    colunas {:?}: 1ª diferença na coluna {i}
+    nosso: {}
+    Excel: {}",
+                        t.col_fields,
+                        fmt(&res.col_items[i]),
+                        fmt(&t.col_items[i])
+                    );
+                }
+            }
+            // Valores: só quando o layout bate (as posições correspondem) e há campo de valores.
+            if same_layout && !t.data_fields.is_empty() {
+                let (mut ok, mut bad) = (0u64, 0u64);
+                let r0 = t.range.first_row + t.first_data_row;
+                let c0 = t.range.first_col + t.first_data_col;
+                for ri in 0..res.row_items.len() {
+                    for cj in 0..res.col_items.len() {
+                        let want = sheet.cell(r0 + ri as u32, c0 + cj as u32, &wb.shared_strings).value;
+                        let got = pivot::data_value(t, &res, ri, cj);
+                        let equal = match (want, &got) {
+                            (Value::Number(a), Some(CellValue::Number(b))) => {
+                                (a - b).abs() <= 1e-9 * a.abs().max(1.0)
+                            }
+                            (Value::Empty, None) => true,
+                            (Value::Text(s), None) => s.is_empty(),
+                            _ => false,
+                        };
+                        if equal { ok += 1 } else { bad += 1 }
+                    }
+                }
+                vals_ok += ok;
+                vals_bad += bad;
+                if bad == 0 {
+                    tables_vals_ok += 1;
+                } else if verbose {
+                    println!(
+                        "aba {} tabela {}: {} valores diferentes de {} (funções {:?}, campos nas linhas {:?}, colunas {:?})",
+                        si + 1,
+                        ti + 1,
+                        bad,
+                        ok + bad,
+                        t.data_fields.iter().map(|d| d.subtotal.as_str()).collect::<Vec<_>>(),
+                        t.row_fields,
+                        t.col_fields
+                    );
+                    println!(
+                        "    registros: {} passaram, {} barrados pelos filtros, {} sem item no eixo, de {}; filtros de página {:?}",
+                        res.records, res.filtered, res.no_item, rec.count, t.page_fields
+                    );
+                    for d in &t.data_fields {
+                        if let Some(f) =
+                            caches[ci].fields.get(d.fld as usize).and_then(|f| f.formula.as_ref())
+                        {
+                            println!("    campo calculado: {}", formula_shape(f));
+                        }
+                    }
+                    for ri in 0..res.row_items.len() {
+                        for cj in 0..res.col_items.len() {
+                            let want =
+                                cached(sheet.cell(r0 + ri as u32, c0 + cj as u32, &wb.shared_strings).value);
+                            let got = pivot::data_value(t, &res, ri, cj).unwrap_or(CellValue::Empty);
+                            if diff_kind(&want, &got).is_some() {
+                                println!(
+                                    "    ({ri},{cj}): Excel {} | nosso {}",
+                                    value_shape(&want),
+                                    value_shape(&got)
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "{total} tabelas dinâmicas: {external} de fonte externa (Modelo de Dados, sem registros); {layout_ok} com o layout igual ao do Excel; {tables_vals_ok} com todos os valores iguais ({vals_ok} células iguais, {vals_bad} diferentes); {:.0} ms",
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
+    Ok(())
+}
+
+/// Depuração: distribuição dos índices de grupo dos campos agrupados de um cache.
+pub fn cmd_pivot_groups(args: &[String]) -> Res {
+    let path = crate::file_arg(args)?;
+    let book = duck_xlsx::Book::open(&path).map_err(|e| e.to_string())?;
+    let mut caches = book.read_extras().pivot_caches;
+    for c in &mut caches {
+        if c.external {
+            continue;
+        }
+        let Some(rec) = book.read_pivot_records(c) else { continue };
+        for (fi, f) in c.fields.iter().enumerate() {
+            let Some((base, g)) = &f.group else { continue };
+            let mut hist: BTreeMap<u32, u32> = BTreeMap::new();
+            for &v in &rec.cols[fi] {
+                *hist.entry(v).or_default() += 1;
+            }
+            let kinds: BTreeMap<String, u32> =
+                rec.cols[*base as usize].iter().fold(BTreeMap::new(), |mut m, &ri| {
+                    let k = match c.fields[*base as usize].raw_items().get(ri as usize) {
+                        Some(duck_core::pivot::PItem::Date(_)) => "data",
+                        Some(duck_core::pivot::PItem::Num(_)) => "número",
+                        Some(duck_core::pivot::PItem::Missing) => "vazio",
+                        Some(duck_core::pivot::PItem::Str(_)) => "texto",
+                        Some(_) => "outro",
+                        None => "fora",
+                    };
+                    *m.entry(k.to_string()).or_default() += 1;
+                    m
+                });
+            let rule = match g {
+                duck_core::pivot::Group::Dates { by, .. } => by.clone(),
+                duck_core::pivot::Group::Numbers { .. } => "números".into(),
+                duck_core::pivot::Group::Discrete(_) => "discreto".into(),
+            };
+            println!(
+                "cache {} campo {fi} ({rule}, base {base}, {} itens): índices {:?}; base {:?}",
+                c.id,
+                f.items.len(),
+                hist,
+                kinds
+            );
+            if let duck_core::pivot::Group::Dates { start, end, .. } = g {
+                let last = f.items.len() as u32 - 1;
+                let base_raw_idx: Vec<u32> = rec
+                    .grouped_raw
+                    .iter()
+                    .find(|g| g.0 == *base)
+                    .map(|g| g.1.clone())
+                    .unwrap_or_else(|| rec.cols[*base as usize].clone());
+                let vals: Vec<f64> = rec.cols[fi]
+                    .iter()
+                    .zip(&base_raw_idx)
+                    .filter(|(g, _)| **g == last)
+                    .filter_map(|(_, &ri)| match c.fields[*base as usize].raw_items().get(ri as usize) {
+                        Some(duck_core::pivot::PItem::Date(d)) => Some(*d),
+                        _ => None,
+                    })
+                    .collect();
+                let mn = vals.iter().copied().fold(f64::INFINITY, f64::min);
+                let mx = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                println!(
+                    "    início {start} fim {end}; no último item: {} valores entre {mn} e {mx}",
+                    vals.len()
+                );
+                let ris: std::collections::BTreeSet<u32> = rec.cols[fi]
+                    .iter()
+                    .zip(&base_raw_idx)
+                    .filter(|(g, _)| **g == last)
+                    .map(|(_, &ri)| ri)
+                    .collect();
+                let raw = c.fields[*base as usize].raw_items();
+                println!(
+                    "    índices brutos {:?} de {} itens brutos; tipos: {:?}",
+                    ris,
+                    raw.len(),
+                    ris.iter()
+                        .map(|&i| raw.get(i as usize).map(|p| match p {
+                            duck_core::pivot::PItem::Date(_) => "data",
+                            duck_core::pivot::PItem::Missing => "vazio",
+                            _ => "outro",
+                        }))
+                        .collect::<Vec<_>>()
+                );
+                let all: std::collections::BTreeSet<u32> = rec.cols[*base as usize].iter().copied().collect();
+                println!("    índices usados: {} distintos, maior {:?}", all.len(), all.iter().max());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Depuração: `duck-bench celula ARQUIVO ABA CÉLULA` — tipo da fórmula,
+/// âncora do grupo e as áreas das tabelas dinâmicas da aba (sem textos).
+pub fn cmd_cell(args: &[String]) -> Res {
+    let path = args.first().ok_or("arquivo")?;
+    let si: usize = args.get(1).and_then(|v| v.parse().ok()).ok_or("aba")?;
+    let cell = args.get(2).ok_or("célula")?;
+    let (wb, _) = duck_xlsx::open(path, &Options::default()).map_err(|e| e.to_string())?;
+    let sh = &wb.sheets[si - 1];
+    let (c, r, _, _) = duck_calc::parse::parse_cell(cell).ok_or("célula inválida")?;
+    match sh.formula(r, c) {
+        Some(f) => println!(
+            "{cell}: fórmula {:?}, âncora {}{}, modelo {}",
+            f.kind,
+            col_name(f.anchor_col),
+            f.anchor_row + 1,
+            f.template
+        ),
+        None => println!("{cell}: sem fórmula"),
+    }
+    for (i, t) in sh.layout.pivots.iter().enumerate() {
+        let rg = t.range;
+        println!(
+            "dinâmica {}: {}{}:{}{} (cache {})",
+            i + 1,
+            col_name(rg.first_col),
+            rg.first_row + 1,
+            col_name(rg.last_col),
+            rg.last_row + 1,
+            t.cache_id
+        );
+    }
+    Ok(())
+}

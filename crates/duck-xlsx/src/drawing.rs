@@ -605,13 +605,26 @@ pub fn read_slicer_caches(pkg: &Package, workbook: &str) -> SlicerCaches {
                 .get(&pid)
                 .and_then(|f| f.iter().find(|(n, _)| n.trim() == source.trim()).map(|f| f.1.as_slice()))
                 .unwrap_or(&[]);
+            let mut link = duck_core::drawing::SlicerPivot {
+                part: target.clone(),
+                source: source.clone(),
+                cache_id: pid.clone(),
+                ..Default::default()
+            };
+            for_each(&x, b"pivotTable", |a, _| {
+                if let (Some(tab), Some(name)) = (num_attr(a, b"tabId"), attr_str(a, b"name")) {
+                    link.tables.push((tab as u32, name));
+                }
+            });
             for_each(inner(&x, &tab, b"tabular"), b"i", |a, _| {
                 let idx = num_attr(a, b"x").unwrap_or(0.0) as usize;
                 let sel = attr(a, b"s").is_some_and(|v| v == b"1");
                 let nd = attr(a, b"nd").is_some_and(|v| v == b"1");
                 let text = names.get(idx).cloned().unwrap_or_default();
                 s.items.push((text, sel, !nd));
+                link.item_x.push(idx as u32);
             });
+            s.pivot = Some(link);
         } else if let Some(t) = find_tag(&x, 0, b"x15:tableSlicerCache") {
             let tid = attr_str(t.attrs, b"tableId").unwrap_or_default();
             let col = attr_str(t.attrs, b"column").unwrap_or_default();
@@ -733,7 +746,7 @@ impl Walk<'_> {
                     } else if let Some(s) = find_tag(el.body, 0, b"sle:slicer") {
                         let name = attr_str(s.attrs, b"name").unwrap_or_default();
                         if let Some(sl) = self.slicers.get(&name) {
-                            self.push(rect, ObjectKind::Slicer(sl.clone()));
+                            self.push(rect, ObjectKind::Slicer(Box::new(sl.clone())));
                         }
                     }
                 }

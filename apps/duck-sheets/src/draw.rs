@@ -287,6 +287,7 @@ impl SheetsApp {
                     font: self.font_styles.first().copied().unwrap_or(ui),
                     g: geom.g,
                     date1904: doc.date1904,
+                    images: &self.images.uv,
                 };
                 for q in geom.quads.iter().rev() {
                     if !q.rect.is_empty() {

@@ -22,6 +22,7 @@ pub mod funcs;
 pub mod index;
 pub mod locale;
 pub mod parse;
+pub mod pivot;
 pub mod recalc;
 pub mod value;
 

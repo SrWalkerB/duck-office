@@ -233,12 +233,29 @@ pub struct Slicer {
     pub items: Vec<(String, bool, bool)>,
     /// Segmentação de tabela do Excel: (tabela, coluna) para filtrar.
     pub table: Option<(String, String)>,
+    /// Segmentação de tabela dinâmica: o que ela filtra.
+    pub pivot: Option<SlicerPivot>,
+}
+
+/// Ligação de uma segmentação com as tabelas dinâmicas.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SlicerPivot {
+    /// Parte do cache da segmentação (`xl/slicerCaches/slicerCacheN.xml`).
+    pub part: String,
+    /// Campo do cache que ela filtra (nome).
+    pub source: String,
+    /// `pivotCacheId` (x14) do cache da tabela dinâmica.
+    pub cache_id: String,
+    /// Tabelas dinâmicas ligadas: (`tabId` da aba, nome).
+    pub tables: Vec<(u32, String)>,
+    /// Índice no cache de cada item (na ordem de `Slicer::items`).
+    pub item_x: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ObjectKind {
     Chart(Box<Chart>),
-    Slicer(Slicer),
+    Slicer(Box<Slicer>),
     /// Forma com texto (caixa de texto, botão).
     Shape {
         text: String,
