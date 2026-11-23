@@ -85,7 +85,42 @@ pub enum Cursor {
     ResizeRow,
 }
 
+/// Esquema de cores do sistema (e da moldura da janela).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorScheme {
+    Light,
+    Dark,
+}
+
+impl ColorScheme {
+    fn from_winit(t: winit::window::Theme) -> Self {
+        match t {
+            winit::window::Theme::Light => Self::Light,
+            winit::window::Theme::Dark => Self::Dark,
+        }
+    }
+
+    fn to_winit(self) -> winit::window::Theme {
+        match self {
+            Self::Light => winit::window::Theme::Light,
+            Self::Dark => winit::window::Theme::Dark,
+        }
+    }
+}
+
 impl Window {
+    /// Cores da moldura da janela (barra de título). `None` = as do sistema:
+    /// só assim chegam eventos [`Event::SchemeChanged`].
+    pub fn set_color_scheme(&self, scheme: Option<ColorScheme>) {
+        self.inner.set_theme(scheme.map(ColorScheme::to_winit));
+    }
+
+    /// Esquema em uso pela moldura: o do sistema, se a janela o segue.
+    /// `None` onde o sistema não informa (X11, alguns Wayland).
+    pub fn color_scheme(&self) -> Option<ColorScheme> {
+        self.inner.theme().map(ColorScheme::from_winit)
+    }
+
     /// Pede um novo frame. Várias chamadas antes do frame viram uma só.
     pub fn request_redraw(&self) {
         self.inner.request_redraw();
@@ -444,6 +479,8 @@ pub enum Event {
         text: Option<String>,
     },
     Focused(bool),
+    /// O sistema trocou entre claro e escuro.
+    SchemeChanged(ColorScheme),
     /// Arquivo arrastado e solto na janela.
     FileDropped(PathBuf),
     /// Pedido de [`Waker::wake`].
@@ -637,6 +674,9 @@ impl<A: App> ApplicationHandler<()> for Runner<'_, A> {
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.dispatch(event_loop, Event::ScaleFactorChanged(scale_factor))
+            }
+            WindowEvent::ThemeChanged(t) => {
+                self.dispatch(event_loop, Event::SchemeChanged(ColorScheme::from_winit(t)))
             }
             WindowEvent::Focused(f) => self.dispatch(event_loop, Event::Focused(f)),
             WindowEvent::DroppedFile(path) => self.dispatch(event_loop, Event::FileDropped(path)),

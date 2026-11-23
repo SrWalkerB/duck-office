@@ -2,7 +2,7 @@
 //! campo (largura da coluna, altura da linha), desenhados pelo próprio app.
 
 use duck_text::TextStyle;
-use duck_ui::{Align, InputColors, Painter, Rect, Rgba, TextInput};
+use duck_ui::{Align, Painter, Rect, Rgba, TextInput};
 
 use crate::app::Geom;
 use crate::format::{Fmt, PALETTE};
@@ -141,20 +141,16 @@ impl Popup {
         g: &Geom,
         ui: TextStyle,
         mouse: (f32, f32),
-        th: &crate::ribbon::Theme,
+        th: &crate::theme::Theme,
     ) {
         let s = g.s;
         let px = s.round().max(1.0);
         let all = Rect::everything();
         let r = self.rect;
         // Sombra simples e borda.
-        p.fill(
-            Rect::new(r.x0 + 2.0 * s, r.y0 + 2.0 * s, r.x1 + 3.0 * s, r.y1 + 3.0 * s),
-            &all,
-            [0, 0, 0, 30],
-        );
+        p.fill(Rect::new(r.x0 + 2.0 * s, r.y0 + 2.0 * s, r.x1 + 3.0 * s, r.y1 + 3.0 * s), &all, th.shadow);
         p.fill(r.inset(-px), &all, th.line);
-        p.fill(r, &all, [255, 255, 255, 255]);
+        p.fill(r, &all, th.menu);
         match &self.kind {
             Kind::List(_) => {
                 for (row, item) in self.rows(s) {
@@ -244,24 +240,24 @@ pub fn prompt_rects(g: &Geom) -> (Rect, Rect, Rect, Rect) {
 }
 
 impl Prompt {
-    pub fn draw(&self, p: &mut Painter, g: &Geom, ui: TextStyle, th: &crate::ribbon::Theme) {
+    pub fn draw(&self, p: &mut Painter, g: &Geom, ui: TextStyle, th: &crate::theme::Theme) {
         let s = g.s;
         let px = s.round().max(1.0);
         let all = Rect::everything();
         let (bx, input, ok, cancel) = prompt_rects(g);
-        p.fill(Rect::new(0.0, 0.0, g.w, g.status.y1), &all, [0, 0, 0, 40]);
+        p.fill(Rect::new(0.0, 0.0, g.w, g.status.y1), &all, th.veil);
         p.fill(bx.inset(-px), &all, th.line);
-        p.fill(bx, &all, [255, 255, 255, 255]);
+        p.fill(bx, &all, th.menu);
         let title = Rect::new(bx.x0, bx.y0 + 8.0 * s, bx.x1, bx.y0 + 36.0 * s);
         let mut bold = ui;
         bold.bold = true;
         p.label(&self.title, bold, title, Align::Left, 16.0 * s, th.text);
-        self.input.draw(p, input, ui, 6.0 * s, true, &InputColors::default(), "");
+        self.input.draw(p, input, ui, 6.0 * s, true, &th.input, "");
         for (r, label, primary) in [(ok, "OK", true), (cancel, "Cancelar", false)] {
-            let bg: Rgba = if primary { th.accent } else { [255, 255, 255, 255] };
+            let bg: Rgba = if primary { th.accent } else { th.menu };
             p.fill(r, &all, bg);
             p.stroke(r, &all, px, if primary { th.accent } else { th.line });
-            p.label(label, ui, r, Align::Center, 0.0, if primary { [255, 255, 255, 255] } else { th.text });
+            p.label(label, ui, r, Align::Center, 0.0, if primary { th.on_accent } else { th.text });
         }
     }
 }

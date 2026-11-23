@@ -12,6 +12,7 @@ use crate::app::{Geom, SheetsApp};
 use crate::format::{Borders, FONTS, Fmt, NUMBER_FORMATS, SIZES};
 use crate::menu::{Ask, Item, Popup, Prompt};
 use crate::ribbon::{Act, Clear, Drop, Freeze, Merge, Tab};
+use crate::theme::Mode;
 
 /// Máximo de arquivos recentes no menu Arquivo.
 const MAX_RECENT: usize = 9;
@@ -107,6 +108,7 @@ impl SheetsApp {
                     v.headers = !v.headers;
                 }
             }
+            Act::Theme(m) => self.set_theme(m),
             Act::Freeze(f) => self.freeze(f),
             Act::Hide { rows, hide } => self.hide(rows, hide),
             Act::ColWidth | Act::RowHeight => self.ask_size(act == Act::ColWidth),
@@ -608,6 +610,9 @@ impl SheetsApp {
                 _ => Tab::Home,
             };
         }
+        if let Some(t) = self.opts.typing.take() {
+            self.scripted_typing(&t);
+        }
         let Some(m) = self.opts.menu.take() else { return };
         let g = self.geom();
         if m == "filtro" {
@@ -665,6 +670,120 @@ impl SheetsApp {
         }
     }
 
+    /// `--digitar`: abre a edição da célula ativa e digita um texto.
+    /// `{barra}` no começo edita na barra de fórmulas. Entre chaves também:
+    ///
+    /// - teclas: `{cima}`, `{baixo}`, `{esquerda}`, `{direita}` (com `shift-`
+    ///   ou `ctrl-` antes), `{tab}`, `{enter}`, `{esc}`, `{f2}`, `{f4}`;
+    /// - mouse: `{clique:B2}`, `{shift-clique:B5}`, `{arrastar:B2:B10}`,
+    ///   `{coluna:B}`, `{linha:3}` e `{aba:Nome}`.
+    fn scripted_typing(&mut self, t: &str) {
+        use duck_platform::{Clipboard, Key, Modifiers};
+        let (t, bar) = match t.strip_prefix("{barra}") {
+            Some(rest) => (rest, true),
+            None => (t, false),
+        };
+        let mut clipboard = Clipboard::default();
+        self.start_edit(Some(""), bar);
+        let mut rest = t;
+        while let Some(c) = rest.chars().next() {
+            if let Some((cmd, after)) = rest.strip_prefix('{').and_then(|r| r.split_once('}')) {
+                let mut mods = Modifiers::default();
+                let name = match cmd.split_once('-') {
+                    Some(("shift", k)) => {
+                        mods.shift = true;
+                        k
+                    }
+                    Some(("ctrl", k)) => {
+                        mods.ctrl = true;
+                        k
+                    }
+                    _ => cmd,
+                };
+                let key = match name {
+                    "cima" => Some(Key::ArrowUp),
+                    "baixo" => Some(Key::ArrowDown),
+                    "esquerda" => Some(Key::ArrowLeft),
+                    "direita" => Some(Key::ArrowRight),
+                    "tab" => Some(Key::Tab),
+                    "enter" => Some(Key::Enter),
+                    "esc" => Some(Key::Escape),
+                    "f2" => Some(Key::F(2)),
+                    "f4" => Some(Key::F(4)),
+                    _ => None,
+                };
+                if let Some(key) = key {
+                    self.editor_key(&mut clipboard, &key, mods, None);
+                    rest = after;
+                    continue;
+                }
+                if let Some((op, arg)) = name.split_once(':') {
+                    if !self.scripted_click(op, arg, mods) {
+                        eprintln!("--digitar: clique inválido ou fora da tela: {cmd}");
+                    }
+                    rest = after;
+                    continue;
+                }
+            }
+            rest = &rest[c.len_utf8()..];
+            let key = Key::Char(c.to_string());
+            self.editor_key(&mut clipboard, &key, Modifiers::default(), Some(c.encode_utf8(&mut [0; 4])));
+        }
+    }
+
+    /// Um clique (ou arraste) de [`SheetsApp::scripted_typing`], pelo mesmo
+    /// caminho do mouse: se não aponta, confirma a edição.
+    fn scripted_click(&mut self, op: &str, arg: &str, mods: duck_platform::Modifiers) -> bool {
+        // A célula precisa estar à vista, como para um clique de verdade.
+        if matches!(op, "clique" | "arrastar")
+            && let Some((a, _)) = crate::app::parse_range(arg)
+        {
+            self.reveal(a.0, a.1);
+        }
+        let g = self.geom();
+        let Some((_, v)) = self.doc.as_ref().and_then(|d| d.current()) else { return false };
+        let alone = |r: u32, c: u32| v.merges.at(r, c).is_none();
+        let center = |r: u32, c: u32| {
+            crate::draw::cell_screen_rect(&g, v, r, c).map(|b| ((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0))
+        };
+        let (from, to) = match op {
+            "clique" | "arrastar" => {
+                let Some((a, b)) = crate::app::parse_range(arg) else { return false };
+                (center(a.0, a.1), (op == "arrastar").then(|| center(b.0, b.1)).flatten())
+            }
+            "coluna" => {
+                let Some((_, c)) = crate::app::parse_cell(&format!("{arg}1")) else { return false };
+                let first = (0..v.rows.len()).filter(|&r| alone(r, c)).find_map(|r| center(r, c));
+                (first.map(|p| (p.0, (g.colhdr.y0 + g.colhdr.y1) / 2.0)), None)
+            }
+            "linha" => {
+                let Some((r, _)) = crate::app::parse_cell(&format!("A{arg}")) else { return false };
+                let first = (0..v.cols.len()).filter(|&c| alone(r, c)).find_map(|c| center(r, c));
+                (first.map(|p| ((g.rowhdr.x0 + g.rowhdr.x1) / 2.0, p.1)), None)
+            }
+            "aba" => {
+                let Some(doc) = &self.doc else { return false };
+                let found = doc.sheets.iter().position(|s| s.info.name.eq_ignore_ascii_case(arg));
+                let Some(i) = found else { return false };
+                if !self.can_point() {
+                    self.commit_edit();
+                }
+                self.switch_sheet(i);
+                return true;
+            }
+            _ => return false,
+        };
+        let Some((x, y)) = from else { return false };
+        if !self.editor_click(&g, x, y, mods) {
+            self.commit_edit();
+        }
+        if let Some((x, y)) = to {
+            self.mouse_move(x, y);
+        }
+        self.drag = None;
+        true
+    }
+
     /// Pergunta sim/não. Nas execuções de teste (`--edit`, `--save-to`,
     /// `--screenshot`), responde sim sem abrir a caixa (ninguém responderia).
     pub fn ask(&self, text: &str) -> bool {
@@ -673,6 +792,20 @@ impl SheetsApp {
             return true;
         }
         self.window.as_ref().is_none_or(|w| w.confirm("duck-sheets", text))
+    }
+
+    /// Troca o tema e lembra a escolha para as próximas vezes.
+    pub fn set_theme(&mut self, mode: Mode) {
+        self.mode = mode;
+        if let Some(w) = &self.window {
+            w.set_color_scheme(mode.frame());
+            if mode == Mode::System {
+                self.system = w.color_scheme().unwrap_or(self.system);
+            }
+        }
+        if let Some(Err(e)) = crate::theme::pref_file().map(|f| crate::theme::save(&f, mode)) {
+            self.message = format!("O tema mudou, mas não foi possível lembrar a escolha: {e}");
+        }
     }
 
     /// Aba ativa da faixa.

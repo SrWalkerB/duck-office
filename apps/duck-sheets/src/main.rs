@@ -5,6 +5,7 @@
 //!             [--bench] [--screenshot SAIDA.png]
 //!             [--edit A1=valor ...] [--undo N] [--save-to SAIDA.xlsx]
 //!             [--aba inicial|inserir|exibir] [--menu NOME] [--novo]
+//!             [--tema claro|escuro|sistema] [--digitar "=so"]
 //! ```
 //!
 //! Sem arquivo, abre uma planilha em branco. Teclas: setas (+Shift seleciona,
@@ -27,6 +28,7 @@ mod axis;
 mod calc;
 mod cficon;
 mod chart;
+mod complete;
 mod control;
 mod cube;
 mod draw;
@@ -40,10 +42,12 @@ mod macros;
 mod menu;
 mod outline;
 mod pivot;
+mod pointing;
 mod ribbon;
 mod search;
 mod shape;
 mod tablestyle;
+mod theme;
 mod zoombar;
 
 use std::path::PathBuf;
@@ -97,6 +101,12 @@ pub struct Opts {
     /// Começa com uma planilha nova em branco mesmo com um arquivo na linha de
     /// comando (`--novo`; sem arquivo já é assim).
     pub new_file: bool,
+    /// Tema desta execução (sem gravar a escolha). Sem isto vale a
+    /// preferência; em `--screenshot` e `--bench`, o claro.
+    pub theme: Option<theme::Mode>,
+    /// Texto digitado na célula ativa, com teclas e cliques entre chaves (ver
+    /// `scripted_typing`).
+    pub typing: Option<String>,
 }
 
 fn parse_args() -> Opts {
@@ -122,6 +132,14 @@ fn parse_args() -> Opts {
             "--aba" => o.ribbon = val(),
             "--menu" => o.menu = val(),
             "--novo" => o.new_file = true,
+            "--digitar" => o.typing = val(),
+            "--tema" => {
+                let v = val().unwrap_or_default();
+                o.theme = theme::Mode::parse(&v);
+                if o.theme.is_none() {
+                    eprintln!("--tema: use claro, escuro ou sistema (veio \"{v}\")");
+                }
+            }
             "--version" | "--versao" => {
                 println!("duck-sheets {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);

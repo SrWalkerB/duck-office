@@ -378,7 +378,34 @@ impl TextInput {
         self.cursor
     }
 
-    fn selection(&self) -> Option<(usize, usize)> {
+    /// Leva o cursor à posição `to` (byte; vai para a fronteira de caractere
+    /// anterior) e desfaz a seleção.
+    pub fn set_cursor(&mut self, to: usize) {
+        let mut to = to.min(self.text.len());
+        while !self.text.is_char_boundary(to) {
+            to -= 1;
+        }
+        self.move_to(to, false);
+    }
+
+    /// Seleciona um trecho (bytes, em fronteiras de caractere), com o cursor
+    /// no fim dele.
+    pub fn select(&mut self, from: usize, to: usize) {
+        self.anchor = Some(from);
+        self.cursor = to;
+    }
+
+    /// Troca um trecho (bytes, em fronteiras de caractere) por `s` e deixa o
+    /// cursor depois dele.
+    pub fn replace(&mut self, range: std::ops::Range<usize>, s: &str) {
+        let start = range.start;
+        self.text.replace_range(range, s);
+        self.cursor = start + s.len();
+        self.anchor = None;
+    }
+
+    /// Trecho selecionado (bytes), se houver.
+    pub fn selection(&self) -> Option<(usize, usize)> {
         let a = self.anchor?;
         (a != self.cursor).then(|| (a.min(self.cursor), a.max(self.cursor)))
     }
@@ -515,6 +542,23 @@ impl TextInput {
         colors: &InputColors,
         placeholder: &str,
     ) {
+        self.draw_spans(p, r, style, pad, focused, colors, placeholder, &[]);
+    }
+
+    /// Como [`TextInput::draw`], com trechos do texto em outras cores
+    /// (`spans`, em ordem e sem se sobrepor).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_spans(
+        &self,
+        p: &mut Painter,
+        r: Rect,
+        style: TextStyle,
+        pad: f32,
+        focused: bool,
+        colors: &InputColors,
+        placeholder: &str,
+        spans: &[(std::ops::Range<usize>, Rgba)],
+    ) {
         p.fill(r, &r, colors.background);
         p.stroke(r, &r, 1.0, if focused { colors.focus } else { colors.border });
         let lh = p.text.line_height_of(style);
@@ -532,8 +576,22 @@ impl TextInput {
         }
         if self.text.is_empty() {
             p.text(placeholder, style, x, y, &inner, colors.placeholder);
-        } else {
+        } else if spans.is_empty() {
             p.text(&self.text, style, x, y, &inner, colors.text);
+        } else {
+            let piece = |p: &mut Painter, a: usize, b: usize, color: Rgba| {
+                if a < b {
+                    let dx = p.text.measure_styled(&self.text[..a], style);
+                    p.text(&self.text[a..b], style, x + dx, y, &inner, color);
+                }
+            };
+            let mut at = 0;
+            for (s, color) in spans {
+                piece(p, at, s.start, colors.text);
+                piece(p, s.start, s.end, *color);
+                at = s.end;
+            }
+            piece(p, at, self.text.len(), colors.text);
         }
         if focused {
             let cx = (x + caret_x).round();
@@ -542,7 +600,7 @@ impl TextInput {
     }
 }
 
-/// Cores de um [`TextInput`].
+/// Cores de um [`TextInput`] (vêm do tema do app).
 #[derive(Clone, Copy, Debug)]
 pub struct InputColors {
     pub background: Rgba,
@@ -551,19 +609,6 @@ pub struct InputColors {
     pub text: Rgba,
     pub placeholder: Rgba,
     pub selection: Rgba,
-}
-
-impl Default for InputColors {
-    fn default() -> Self {
-        Self {
-            background: rgb(0xFFFFFF),
-            border: rgb(0xC4C7C5),
-            focus: rgb(0x1A73E8),
-            text: rgb(0x202124),
-            placeholder: rgb(0x80868B),
-            selection: rgb(0xC2DBFF),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -587,7 +632,7 @@ pub struct TabBar {
     content_w: f32,
 }
 
-/// Cores de uma [`TabBar`].
+/// Cores de uma [`TabBar`] (vêm do tema do app).
 #[derive(Clone, Copy, Debug)]
 pub struct TabColors {
     pub background: Rgba,
@@ -597,20 +642,6 @@ pub struct TabColors {
     pub active_text: Rgba,
     pub line: Rgba,
     pub accent: Rgba,
-}
-
-impl Default for TabColors {
-    fn default() -> Self {
-        Self {
-            background: rgb(0xF8F9FA),
-            tab: rgb(0xF8F9FA),
-            active: rgb(0xFFFFFF),
-            text: rgb(0x5F6368),
-            active_text: rgb(0x188038),
-            line: rgb(0xDADCE0),
-            accent: rgb(0x188038),
-        }
-    }
 }
 
 impl TabBar {
@@ -748,6 +779,14 @@ mod tests {
         assert!(press(&mut t, Key::Enter, None, none).submitted);
         assert!(press(&mut t, Key::Escape, None, none).cancelled);
         assert!(!press(&mut t, Key::Char("s".into()), Some("s"), Modifiers { ctrl: true, ..none }).handled);
+        // Troca de um trecho (autocompletar) e cursor por posição.
+        t.set_text("=mé+1");
+        t.replace(1..4, "MÉDIA(");
+        assert_eq!((t.text.as_str(), t.cursor()), ("=MÉDIA(+1", 8));
+        t.set_cursor(3); // no meio do "É"
+        assert_eq!(t.cursor(), 2);
+        t.select(1, 4);
+        assert_eq!(t.selection(), Some((1, 4)));
     }
 
     #[test]
