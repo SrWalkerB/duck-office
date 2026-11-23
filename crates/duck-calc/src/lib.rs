@@ -20,6 +20,7 @@
 pub mod cellops;
 pub mod chartdata;
 pub mod dynarr;
+pub mod editing;
 pub mod eval;
 pub mod funcs;
 pub mod index;
