@@ -6,7 +6,7 @@
 //! duck-bench verify [ARQUIVO]                                compara cada célula com o calamine
 //! duck-bench gen    SAIDA.xlsx [--rows N] [--cols M]         gera planilha sintética
 //! duck-bench preview [ARQUIVO] [--mb N]                      mede o caminho da primeira tela (F2)
-//! duck-bench roundtrip [ARQUIVO] [--rewrite-all] [--edit N] [--estrutura] [--abas] [--level L] [--keep]  salva numa cópia e confere (F3)
+//! duck-bench roundtrip [ARQUIVO] [--rewrite-all] [--edit N] [--estrutura] [--abas] [--celulas] [--level L] [--keep]  salva numa cópia e confere (F3)
 //! duck-bench gen-showcase SAIDA.xlsx                         planilha de vitrine (formatos, bordas, painéis)
 //! duck-bench calc [ARQUIVO] [--hoje AAAA-MM-DD]              calcula cada fórmula e compara com o Excel (F4)
 //! ```
@@ -137,6 +137,7 @@ fn positional(args: &[String]) -> Option<String> {
                     | "--keep"
                     | "--estrutura"
                     | "--abas"
+                    | "--celulas"
                     | "--formas-valor"
                     | "--recalc"
                     | "--detalhes"

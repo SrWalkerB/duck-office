@@ -43,6 +43,9 @@ pub fn cmd(args: &[String]) -> Res {
         println!("linhas e colunas inseridas/apagadas na aba {} em {ms:.0} ms", sheet + 1);
     }
 
+    if args.iter().any(|a| a == "--celulas") {
+        println!("{}", shift_cells(&mut wb)?);
+    }
     let mut opts = SaveOptions { level, rewrite_all, ..Default::default() };
     if tabs {
         let t = Instant::now();
@@ -156,6 +159,94 @@ fn check(src: &Path, out: &Path, saved: &duck_xlsx::SaveReport, args: &[String])
     }
     println!("round-trip OK");
     Ok(())
+}
+
+/// Move um bloco, insere e exclui células (deslocando) e escreve texto rico,
+/// em cada aba em que dá (as recusas, como cortar uma mesclagem, são
+/// contadas). Confere que desfazer devolve tudo e refaz.
+fn shift_cells(wb: &mut duck_core::Workbook) -> Result<String, String> {
+    use duck_calc::cellops;
+    use duck_core::cells::CellOp;
+    use duck_core::{Axis, CellChange, CellRange, Command, RichRun, RunFont, Shift};
+    let t = Instant::now();
+    let (mut done, mut refused, mut cells) = (0, 0, 0usize);
+    let range =
+        |a: u32, b: u32, c: u32, d: u32| CellRange { first_row: a, first_col: b, last_row: c, last_col: d };
+    for i in 0..wb.sheets.len() {
+        let (rows, cols) = (wb.sheets[i].rows(), wb.sheets[i].cols());
+        if rows < 3 || cols < 1 {
+            continue;
+        }
+        let (r, c) = (rows / 2, cols / 2);
+        // Perto do fim nas abas grandes: deslocar milhões de células é o
+        // trabalho de "inserir linhas".
+        let low = rows.saturating_sub(40);
+        let ops = [
+            CellOp::Move { src: range(r, c, r + 1, c + 1), dr: 3, dc: 2 },
+            CellOp::Move { src: range(0, 0, 1, 0), dr: i64::from(rows) + 2, dc: 0 },
+            CellOp::Shift { shift: Shift { axis: Axis::Rows, at: low, n: 2, insert: true }, lo: c, hi: c },
+            CellOp::Shift { shift: Shift { axis: Axis::Rows, at: low, n: 1, insert: false }, lo: 0, hi: 0 },
+            CellOp::Shift { shift: Shift { axis: Axis::Cols, at: c, n: 1, insert: true }, lo: r, hi: r },
+        ];
+        for op in ops {
+            let refs: Vec<&Sheet> = wb.sheets.iter().collect();
+            let (cmds, _) = match cellops::plan(&refs, &wb.shared_strings, &wb.extras, i, op) {
+                Ok(x) => x,
+                Err(_) => {
+                    refused += 1;
+                    continue;
+                }
+            };
+            let touched: Vec<(usize, u32, u32)> =
+                cmds.iter().flat_map(|(k, c)| c.cells().into_iter().map(move |(r, c)| (*k, r, c))).collect();
+            let snap = |wb: &duck_core::Workbook| -> Vec<String> {
+                touched
+                    .iter()
+                    .map(|&(k, r, c)| {
+                        let s = &wb.sheets[k];
+                        let cell = s.cell(r, c, &wb.shared_strings);
+                        format!("{:?}{:?}", cell, duck_calc::cell_formula(s, r, c))
+                    })
+                    .collect()
+            };
+            let before = snap(wb);
+            let layouts: Vec<_> = wb.sheets.iter().map(|s| s.layout.clone()).collect();
+            let undo: Vec<(usize, Command)> =
+                cmds.into_iter().map(|(k, c)| (k, c.apply(&mut wb.sheets[k]))).collect();
+            let after = snap(wb);
+            let redo: Vec<(usize, Command)> =
+                undo.into_iter().rev().map(|(k, c)| (k, c.apply(&mut wb.sheets[k]))).collect();
+            if snap(wb) != before || wb.sheets.iter().zip(&layouts).any(|(s, l)| s.layout != *l) {
+                return Err(format!("aba {}: desfazer {op:?} não devolveu tudo", i + 1));
+            }
+            for (k, c) in redo.into_iter().rev() {
+                c.apply(&mut wb.sheets[k]);
+            }
+            if snap(wb) != after {
+                return Err(format!("aba {}: refazer {op:?} deu outro resultado", i + 1));
+            }
+            done += 1;
+            cells += touched.len();
+        }
+        // Texto rico novo.
+        let runs = vec![
+            RichRun { start: 0, font: None },
+            RichRun { start: 4, font: Some(RunFont { bold: true, ..Default::default() }) },
+        ];
+        let cell = CellChange {
+            row: rows + 5,
+            col: 0,
+            value: CellValue::Text("aba \nrica <&>".into()),
+            formula: None,
+            style: None,
+        };
+        Command::Group(vec![Command::SetCells(vec![cell]), Command::RichText(vec![(rows + 5, 0, runs)])])
+            .apply(&mut wb.sheets[i]);
+    }
+    Ok(format!(
+        "células: {done} operações ({refused} recusadas), {cells} células, desfazer e refazer conferidos, em {:.0} ms",
+        ms(t.elapsed())
+    ))
 }
 
 /// Mexe nas abas como o app: renomeia a primeira, copia a maior e a primeira
@@ -280,6 +371,13 @@ fn check_tabs(src: &Path, out: &Path, wb: &duck_core::Workbook, args: &[String])
             if duck_calc::cell_formula(a, r, c) != duck_calc::cell_formula(b, r, c) {
                 return Err(format!("aba {}: fórmula diferente na cópia", i + 1));
             }
+        }
+        let rich = |s: &Sheet, sh: &duck_core::StringTable| {
+            let r = s.rows().saturating_sub(1);
+            s.rich_at(r, 0, sh).map(<[_]>::to_vec)
+        };
+        if rich(a, &wb.shared_strings) != rich(b, &back.shared_strings) {
+            return Err(format!("aba {}: texto rico diferente na cópia", i + 1));
         }
         let kinds = |s: &Sheet| {
             let l = &s.layout;

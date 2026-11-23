@@ -11,6 +11,7 @@
 //!   regravadas contra o modelo e só então substitui o destino.
 
 mod blank;
+mod cells;
 mod cellxml;
 mod cube;
 mod deflate;
@@ -212,6 +213,14 @@ impl Book {
             }
             let mut marks: HashMap<u32, bool> = HashMap::new();
             for o in &l.objects {
+                // Célula ligada que mudou de lugar ou de aba.
+                if let duck_core::drawing::ObjectKind::Control(c) = &o.kind
+                    && let Some(link) = &c.link
+                    && let Ok(xml) = work.read(&self.pkg, &small, &c.part)
+                    && let Some(new) = workbook::patch_control_link(&xml, link)
+                {
+                    small.insert(c.part.clone(), new);
+                }
                 if let duck_core::drawing::ObjectKind::Control(c) = &o.kind
                     && matches!(
                         c.kind,
@@ -352,8 +361,12 @@ impl Book {
                 continue;
             }
             if let Some((i, sheet)) = by_path.get(e.name.as_str()) {
-                let fix =
-                    TabFix { map: work.sheet_map(*i, ""), deselect: work.deselect.contains(i), copy: false };
+                let fix = TabFix {
+                    map: work.sheet_map(*i, ""),
+                    deselect: work.deselect.contains(i),
+                    copy: false,
+                    name: self.file_name(&e.name),
+                };
                 if sheet.edits().structure {
                     let name = self.file_name(&e.name);
                     self.write_sheet_regen(
@@ -387,7 +400,8 @@ impl Book {
         for (i, new) in work.new.iter().enumerate() {
             let (Some(new), Some(Some(sheet))) = (new, sheets.get(i)) else { continue };
             let name = opts.tabs.as_ref().map_or("", |p| p.tabs[i].name.as_str());
-            let fix = TabFix { map: work.sheet_map(i, name), deselect: false, copy: true };
+            let fix =
+                TabFix { map: work.sheet_map(i, name), deselect: false, copy: true, name: String::new() };
             let source = new.source.as_ref().and_then(|s| self.pkg.entry(&s.0));
             let from = new.source.as_ref().map_or("", |s| s.1.as_str());
             self.write_sheet_regen(
@@ -526,7 +540,17 @@ impl Book {
             xml_out += b.len() as u64;
             enc.write(zip, b)
         })?;
-        let t = fix.tail(regen::tail(&tail, sheet, name, shifts));
+        // Inserir/apagar linhas e mover células, na ordem em que foram feitos.
+        let mut t = tail;
+        let mut done = 0;
+        for (at, op) in &sheet.edits().cell_ops {
+            if *at > done {
+                t = regen::tail(&t, sheet, name, &shifts[done..*at]);
+                done = *at;
+            }
+            t = cells::tail(&t, op, name);
+        }
+        let t = fix.tail(regen::tail(&t, sheet, name, &shifts[done..]));
         xml_out += t.len() as u64;
         enc.write(zip, &t)?;
         let (crc, size) = enc.finish(zip)?;
@@ -662,6 +686,8 @@ pub(super) struct TabFix {
     deselect: bool,
     /// Aba nova ou copiada.
     copy: bool,
+    /// Nome da aba no arquivo.
+    name: String,
 }
 
 impl TabFix {
@@ -670,6 +696,19 @@ impl TabFix {
             return workbook::patch_head(&h, sheet, self.deselect, self.copy);
         }
         h
+    }
+
+    /// O remendo da aba muda o fim do XML dela?
+    fn changes_tail(&self, sheet: &Sheet) -> bool {
+        self.map.is_some() || !sheet.edits().cell_ops.is_empty()
+    }
+
+    /// O fim do XML no remendo (sem linhas ou colunas inseridas ou apagadas).
+    fn patched_tail(&self, mut t: Vec<u8>, sheet: &Sheet) -> Vec<u8> {
+        for (_, op) in &sheet.edits().cell_ops {
+            t = cells::tail(&t, op, &self.name);
+        }
+        self.tail(t)
     }
 
     fn tail(&self, t: Vec<u8>) -> Vec<u8> {

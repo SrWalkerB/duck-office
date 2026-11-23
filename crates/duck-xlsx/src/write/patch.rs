@@ -218,7 +218,7 @@ impl<'a> Patcher<'a> {
         }
         // Depois de `</sheetData>`: copia o resto (com mesclagens e filtro novos).
         let e = self.sheet.edits();
-        let fix = self.fix.filter(|f| f.map.is_some());
+        let fix = self.fix.filter(|f| f.changes_tail(self.sheet));
         if self.phase == Phase::Tail && (e.merges || e.filter || fix.is_some()) {
             let mut tail = seg[pos..].to_vec();
             if e.merges {
@@ -228,7 +228,7 @@ impl<'a> Patcher<'a> {
                 tail = replace_autofilter(&tail, &autofilter_xml(self.sheet.layout.autofilter.as_ref()));
             }
             if let Some(f) = fix {
-                tail = f.tail(tail);
+                tail = f.patched_tail(tail, self.sheet);
             }
             out.extend_from_slice(&tail);
         } else {

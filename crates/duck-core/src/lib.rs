@@ -15,15 +15,20 @@
 //!   juntadas depois ([`Sheet::merge_part`]) em ordem fixa, então o resultado
 //!   é idêntico com qualquer número de threads (ADR-012).
 
+pub mod cells;
 pub mod cond;
 pub mod cube;
 pub mod drawing;
 pub mod edit;
+pub mod fill;
 pub mod input;
 mod layout;
 pub mod numfmt;
+pub mod numfmt_pt;
 pub mod outline;
 pub mod pivot;
+pub mod replace;
+pub mod rich;
 pub mod shape;
 pub mod shift;
 mod styles;

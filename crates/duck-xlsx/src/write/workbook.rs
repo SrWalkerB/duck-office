@@ -286,6 +286,13 @@ fn local(name: &[u8]) -> &[u8] {
     name.iter().rposition(|&c| c == b':').map_or(name, |k| &name[k + 1..])
 }
 
+/// Controle com a célula ligada do modelo. `None` = já era essa.
+pub(super) fn patch_control_link(xml: &[u8], link: &str) -> Option<Vec<u8>> {
+    map_tags(xml, &|n| n == b"formControlPr", &mut |k, v| {
+        (k == b"fmlaLink" && v != link).then(|| link.to_string())
+    })
+}
+
 /// O fim do XML de uma aba (depois de `</sheetData>`) com os nomes de aba
 /// trocados: formatação condicional, validação, minigráficos, links e
 /// controles. `None` = nada mudou.
