@@ -51,6 +51,7 @@ mod look;
 mod macros;
 mod menu;
 mod notes;
+mod objects;
 mod outline;
 mod paste;
 mod pivot;

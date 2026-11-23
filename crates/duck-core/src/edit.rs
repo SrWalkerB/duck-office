@@ -76,6 +76,8 @@ pub struct Edits {
     /// Tabelas dinâmicas ou segmentações de dados mudadas (as partes delas
     /// são remendadas ao salvar).
     pub pivots: bool,
+    /// Objetos movidos ou redimensionados (só a parte do desenho muda).
+    pub drawings: bool,
     /// Células movidas, inseridas ou excluídas (só células): quantos `shifts`
     /// já tinham sido feitos e a operação, em ordem.
     pub cell_ops: Vec<(usize, crate::cells::CellOp)>,
@@ -88,6 +90,16 @@ pub struct Edits {
 
 impl Edits {
     pub fn is_empty(&self) -> bool {
+        !self.drawings && self.sheet_untouched()
+    }
+
+    /// Só os desenhos mudaram.
+    pub fn is_drawings_only(&self) -> bool {
+        self.drawings && self.sheet_untouched()
+    }
+
+    /// O XML da aba continua valendo (no máximo os desenhos mudaram).
+    pub fn sheet_untouched(&self) -> bool {
         self.cells.is_empty()
             && self.rows.is_empty()
             && self.cols.is_empty()
@@ -126,6 +138,25 @@ impl Sheet {
     /// Esquece as mudanças (depois de salvar).
     pub fn clear_edits(&mut self) {
         self.edits = Edits::default();
+    }
+
+    /// Muda a âncora `slot` e os objetos dela; devolve a de antes.
+    pub fn set_anchor(
+        &mut self,
+        slot: u32,
+        anchor: crate::drawing::Anchor,
+    ) -> Option<crate::drawing::Anchor> {
+        let list = &mut self.layout.drawing_anchors;
+        let a = list.get_mut(slot as usize)?;
+        let before = std::mem::replace(&mut a.anchor, anchor);
+        for f in list[slot as usize + 1..].iter_mut().take_while(|a| a.fallback) {
+            f.anchor = anchor;
+        }
+        for o in self.layout.objects.iter_mut().filter(|o| o.slot == slot) {
+            o.anchor = anchor;
+        }
+        self.edits.drawings = true;
+        Some(before)
     }
 
     /// Tabelas dinâmicas ou segmentações desta aba mudaram.
@@ -686,6 +717,9 @@ pub enum Command {
     CellOp(crate::cells::CellOp, bool),
     /// Cor da guia (`None` = sem cor).
     TabColor(Option<crate::Color>),
+    /// Objetos movidos ou redimensionados: (índice em `drawing_anchors`,
+    /// âncora nova).
+    Anchors(Vec<(u32, crate::drawing::Anchor)>),
     /// Trechos de texto rico de células de texto recém-escritas (depois de um
     /// `SetCells` no mesmo grupo; o inverso dele já desfaz tudo).
     RichText(Vec<(u32, u32, Vec<crate::RichRun>)>),
@@ -827,6 +861,16 @@ impl Command {
                     sheet.edits.notes = true;
                 }
                 Command::SortRows { r0, c0, c1, perm: inv }
+            }
+            Command::Anchors(list) => {
+                let mut old = Vec::with_capacity(list.len());
+                for (slot, anchor) in list {
+                    if let Some(before) = sheet.set_anchor(slot, anchor) {
+                        old.push((slot, before));
+                    }
+                }
+                old.reverse();
+                Command::Anchors(old)
             }
             Command::Outline(o) => {
                 Command::Outline(Box::new(std::mem::replace(&mut sheet.layout.outline, *o)))

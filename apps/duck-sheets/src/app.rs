@@ -450,6 +450,16 @@ pub enum Drag {
     },
     /// Barra deslizante do zoom.
     Zoom,
+    /// Arrastando (ou redimensionando por `grip`) o objeto da âncora `slot`,
+    /// que estava em `from`. `keep`: um eixo só, ou a mesma proporção (Shift).
+    Object {
+        slot: u32,
+        grip: crate::objects::Grip,
+        from: [f64; 4],
+        x: f32,
+        y: f32,
+        keep: bool,
+    },
     /// Arrastando a borda direita da coluna `col` (tamanho inicial e x do mouse).
     ResizeCol {
         col: u32,
@@ -524,6 +534,10 @@ pub struct SheetsApp {
     pub drag: Option<Drag>,
     /// Onde o arraste da alça ou da borda vai parar.
     pub drag_area: Option<CellRange>,
+    /// Objeto selecionado (índice em `layout.objects` da aba ativa) e, no
+    /// arraste, onde ele está.
+    pub object: Option<usize>,
+    pub moving: Option<crate::objects::Moving>,
     pub mouse: (f32, f32),
     pub message: String,
     /// Estilo de texto de cada fonte do arquivo no zoom atual (chave: tamanho base).
@@ -660,6 +674,8 @@ impl SheetsApp {
             last_tab_id: 0,
             drag: None,
             drag_area: None,
+            object: None,
+            moving: None,
             mouse: (0.0, 0.0),
             message: String::new(),
             font_styles: Vec::new(),
@@ -717,6 +733,11 @@ impl SheetsApp {
         self.mode.theme(self.system)
     }
 
+    /// Medição ou teste pela linha de comando: ninguém para responder.
+    fn unattended(&self) -> bool {
+        self.opts.bench || self.opts.screenshot.is_some() || self.opts.save_to.is_some()
+    }
+
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
     }
@@ -761,6 +782,8 @@ impl SheetsApp {
         self.marked = None;
         self.drag = None;
         self.drag_area = None;
+        self.object = None;
+        self.moving = None;
         if let Some(l) = self.loader.take() {
             l.cancel();
         }
@@ -859,7 +882,7 @@ impl SheetsApp {
                     self.start_font_scan();
                     self.message = format!("Erro: {e}");
                     if self.doc.is_none() {
-                        if self.opts.bench || self.opts.screenshot.is_some() {
+                        if self.unattended() {
                             self.error = Some(e);
                         } else {
                             duck_platform::message_box("Não foi possível abrir o arquivo", &e);
@@ -1265,6 +1288,8 @@ impl SheetsApp {
         });
         self.stats = None;
         self.namebox_focus = false;
+        self.object = None;
+        self.moving = None;
         self.clamp_scroll();
     }
 
@@ -1605,8 +1630,13 @@ impl SheetsApp {
             self.open_list();
             return;
         }
-        // Botões, links e macros dos objetos.
-        if g.grid.contains(x, y) && self.object_click(&g, x, y) {
+        // Alças do objeto selecionado.
+        if self.press_grip(&g, x, y, mods) {
+            return;
+        }
+        // Botões, links e macros dos objetos (com Ctrl, só seleciona).
+        let select = mods.ctrl || mods.logo;
+        if !select && g.grid.contains(x, y) && self.object_click(&g, x, y) {
             return;
         }
         // Segmentação de dados.
@@ -1615,6 +1645,10 @@ impl SheetsApp {
         {
             self.commit_edit();
             self.slicer_click(obj, item, mods.ctrl || mods.logo || mods.shift);
+            return;
+        }
+        // Gráfico, imagem ou forma: seleciona e arrasta.
+        if self.press_object(&g, x, y, mods) {
             return;
         }
         // Botão de filtro num cabeçalho.
@@ -1666,7 +1700,9 @@ impl SheetsApp {
         let in_headers = g.corner.contains(x, y) || g.colhdr.contains(x, y) || g.rowhdr.contains(x, y);
         if in_headers && resize_target(g, v, x, y).is_none() {
             v.begin_area(add, mods.shift);
+            self.object = None;
         }
+        let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) else { return true };
         if g.corner.contains(x, y) {
             v.anchor = (0, 0);
             v.cur = (nr - 1, nc - 1);
@@ -1760,6 +1796,7 @@ impl SheetsApp {
     /// Botão numa célula: seleciona (Ctrl soma uma área, Shift estende), segue
     /// o link ou, no duplo clique, edita.
     pub(crate) fn press_cell(&mut self, g: &Geom, x: f32, y: f32, mods: Modifiers, clicks: u8) {
+        self.object = None;
         let add = (mods.ctrl || mods.logo) && !mods.shift;
         let Some(v) = self.doc.as_ref().and_then(|d| d.current()).map(|x| x.1) else { return };
         if let Some((mut r, mut c)) = g.hit(v, x, y) {
@@ -1865,7 +1902,9 @@ impl SheetsApp {
                 }
                 _ => (false, false),
             };
+            let object = self.object_cursor(&g, x, y).filter(|_| !fill && link.is_none());
             let cursor = match (edge, &link) {
+                _ if object.is_some() => object.unwrap_or(Cursor::Default),
                 _ if fill || self.painter.is_some() && g.grid.contains(x, y) => Cursor::Cross,
                 _ if border => Cursor::Move,
                 (Some(Edge::Col(_)), _) => Cursor::ResizeColumn,
@@ -1917,6 +1956,7 @@ impl SheetsApp {
                 v.scroll_x = min + t * (max - min);
             }
             Drag::Zoom | Drag::Tab { .. } => {}
+            Drag::Object { .. } => self.drag_object(drag, &g, x, y),
             Drag::Select
             | Drag::Cols
             | Drag::Rows
@@ -1982,6 +2022,10 @@ impl SheetsApp {
                     let slot = self.tab_drop_slot(&g, self.mouse.0);
                     self.tab_drop(sheet, slot, modifiers.ctrl || modifiers.logo);
                 }
+                true
+            }
+            Some(Drag::Object { .. }) => {
+                self.drop_object();
                 true
             }
             Some(Drag::ResizeCol { col, size, .. }) => {
@@ -2231,6 +2275,9 @@ impl SheetsApp {
                 return true;
             }
         }
+        if self.popup.is_none() && self.object_key(&key, mods) {
+            return true;
+        }
         let shift = mods.shift;
         match key {
             // Alt+=: AutoSoma.
@@ -2263,6 +2310,7 @@ impl SheetsApp {
                 "y" => self.redo(),
                 "s" => self.save(shift),
                 "f" => self.open_find(),
+                "l" if shift => self.toggle_filter(),
                 "g" => {
                     self.namebox_focus = true;
                     self.cell_ref_into_namebox();
@@ -2579,6 +2627,11 @@ impl App for SheetsApp {
                 }
                 let fonts = self.poll_fonts();
                 let a = self.poll_loader() || fonts;
+                // Sem ninguém olhando, o arquivo que não abre encerra.
+                if self.error.is_some() && self.doc.is_none() && self.unattended() {
+                    cx.exit();
+                    return;
+                }
                 let saved = self.poll_save(false);
                 if saved.is_some() && self.opts.save_to.is_some() && self.opts.screenshot.is_none() {
                     if saved == Some(false) {
@@ -2722,6 +2775,16 @@ impl App for SheetsApp {
 
     fn redraw(&mut self, cx: &mut Context) {
         let t0 = Instant::now();
+        // Num arraste, espera a vez do frame antes de montá-lo e trata primeiro
+        // o que chegou nesse tempo: o que se arrasta acompanha o mouse. (Fora
+        // dele não: ao redimensionar a janela, o quadro reservado envelhece.)
+        if self.drag.is_some()
+            && self.gfx.as_mut().is_some_and(|g| g.begin_frame())
+            && t0.elapsed() > Duration::from_millis(2)
+        {
+            self.redraw_later();
+            return;
+        }
         self.bench_before_frame();
         self.clamp_scroll();
         let tb = Instant::now();

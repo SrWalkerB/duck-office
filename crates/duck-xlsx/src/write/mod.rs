@@ -125,7 +125,7 @@ impl Book {
         };
         let tabs_changed = tabs.is_some();
         let mut work = tabs.unwrap_or_else(|| Work::identity(self, sheets.len()));
-        let edited = |s: &&Sheet| opts.rewrite_all || !s.edits().is_empty();
+        let edited = |s: &&Sheet| opts.rewrite_all || !s.edits().sheet_untouched();
         let mut by_path: HashMap<&str, (usize, &Sheet)> = HashMap::new();
         for (i, path) in work.parts.iter().enumerate() {
             if let Some(Some(s)) = sheets.get(i)
@@ -183,7 +183,7 @@ impl Book {
         // dos caches de tabela dinâmica; gráficos com referências mudadas.
         let mut charts_done: std::collections::HashSet<&str> = Default::default();
         for (s, l) in views() {
-            if s.edits().structure || !s.edits().cell_ops.is_empty() {
+            if s.edits().structure || s.edits().drawings || !s.edits().cell_ops.is_empty() {
                 let mut parts: Vec<(&str, Vec<duck_core::drawing::Anchor>)> = Vec::new();
                 for a in &l.drawing_anchors {
                     match parts.iter_mut().find(|p| p.0 == a.part) {
@@ -196,7 +196,7 @@ impl Book {
                         small.insert(part.to_string(), objects::patch_anchors(&xml, &list));
                     }
                 }
-                for (part, r) in &l.pivot_sources {
+                for (part, r) in l.pivot_sources.iter().filter(|_| !s.edits().is_drawings_only()) {
                     if let Ok(xml) = work.read(&self.pkg, &small, part) {
                         small.insert(part.clone(), objects::patch_cache_source(&xml, *r));
                     }

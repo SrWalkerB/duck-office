@@ -311,7 +311,52 @@ fn others(path: &Path, m: &mut Metrics) -> Result<(), String> {
         let (ok, _) = run(args)?;
         m.add(&format!("{name} (1 = certo)"), ok as u32 as f64, Rule::AtLeast);
     }
+    if let Some(ok) = move_objects(path)? {
+        m.add("mover objetos (1 = certo)", ok as u32 as f64, Rule::AtLeast);
+    }
     Ok(())
+}
+
+/// Move e estica todos os objetos de todas as abas, grava e relê: as âncoras
+/// têm de voltar iguais. `None` = não há objetos.
+fn move_objects(path: &Path) -> Result<Option<bool>, String> {
+    use duck_core::drawing::{Anchor, Marker};
+    let (mut wb, _) = duck_xlsx::open(path, &duck_xlsx::Options::default()).map_err(|e| e.to_string())?;
+    let mark = |m: Marker| Marker { col: m.col + 1, col_off: 9525, row: m.row + 2, row_off: 19050 };
+    let mut n = 0;
+    for s in &mut wb.sheets {
+        let list: Vec<(u32, Anchor)> = (s.layout.drawing_anchors.iter().enumerate())
+            .filter(|(_, a)| !a.fallback)
+            .map(|(i, a)| {
+                let new = match a.anchor {
+                    Anchor::Two { from, to } => Anchor::Two { from: mark(from), to: mark(to) },
+                    Anchor::One { from, cx, cy } => Anchor::One { from: mark(from), cx: cx + 9525, cy },
+                    Anchor::Abs { x, y, cx, cy } => Anchor::Abs { x: x + 9525, y, cx, cy: cy + 9525 },
+                };
+                (i as u32, new)
+            })
+            .collect();
+        n += list.len();
+        if !list.is_empty() {
+            duck_core::Command::Anchors(list).apply(s);
+        }
+    }
+    if n == 0 {
+        return Ok(None);
+    }
+    let out = std::env::temp_dir().join(format!("duck-mover-{}.xlsx", std::process::id()));
+    let sheets: Vec<Option<&Sheet>> = wb.sheets.iter().map(Some).collect();
+    let opts = duck_xlsx::SaveOptions::default();
+    let saved = duck_xlsx::save_file(path, &out, &sheets, &wb.shared_strings, &wb.styles, &opts);
+    let same = saved.map_err(|e| e.to_string()).and_then(|_| {
+        let (back, _) = duck_xlsx::open(&out, &duck_xlsx::Options::default()).map_err(|e| e.to_string())?;
+        Ok(wb.sheets.iter().zip(&back.sheets).all(|(a, b)| {
+            let pos = |s: &Sheet| s.layout.objects.iter().map(|o| (o.id, o.anchor)).collect::<Vec<_>>();
+            a.layout.drawing_anchors == b.layout.drawing_anchors && pos(a) == pos(b)
+        }))
+    });
+    let _ = std::fs::remove_file(&out);
+    same.map(Some)
 }
 
 /// Quantos objetos de cada tipo o leitor encontra.

@@ -963,6 +963,7 @@ impl SheetsApp {
             if self.scripted_rules(e)
                 || self.scripted_tabs(e)
                 || self.scripted_fill(e)
+                || self.scripted_object(e)
                 || self.scripted_cells(e)
                 || self.scripted_replace(e)
                 || self.scripted_format(e)

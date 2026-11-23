@@ -78,6 +78,9 @@ fn refusal(sheet: &Sheet, styles: &Styles, cmd: &Command) -> Option<&'static str
         }
         Command::Validations(_) => Some("A planilha protegida não permite mudar a validação de dados."),
         Command::Notes(_) => denied(deny::OBJECTS, "A planilha protegida não permite mudar notas."),
+        Command::Anchors(_) => {
+            denied(deny::OBJECTS, "A planilha protegida não permite mover nem redimensionar objetos.")
+        }
         Command::Layout(l) => (l.pivots != sheet.layout.pivots)
             .then(|| denied(deny::PIVOTS, "A planilha protegida não permite mudar tabelas dinâmicas."))
             .flatten(),
@@ -91,9 +94,15 @@ fn refusal(sheet: &Sheet, styles: &Styles, cmd: &Command) -> Option<&'static str
             Some("A planilha protegida não permite inserir ou excluir células.")
         }
         Command::RichText(v) => v.iter().any(|x| locked(x.0, x.1)).then_some(LOCKED),
-        // O conteúdo das células movidas anda por `Restore` e `SetCells`, já
-        // conferidos; a troca de nome de aba nas fórmulas é consequência.
-        Command::CellOp(..) | Command::FormulaTexts(_) => None,
+        // Mesmo vazias: formatação condicional, validação e links vão junto.
+        Command::CellOp(op @ duck_core::cells::CellOp::Move { src, .. }, _) => {
+            let hit = [Some(*src), op.target()].into_iter().flatten().any(|a| {
+                (a.first_row..=a.last_row).any(|r| (a.first_col..=a.last_col).any(|c| locked(r, c)))
+            });
+            hit.then_some(LOCKED)
+        }
+        // A troca de nome de aba nas fórmulas é consequência.
+        Command::FormulaTexts(_) => None,
         // A lista de abas é com a proteção da pasta (ver `allowed`).
         Command::Pane(_) | Command::Protect(_) | Command::BookProtect(_) | Command::Book(_) => None,
     }
@@ -208,12 +217,16 @@ impl SheetsApp {
     }
 
     pub fn can_change_objects(&mut self) -> bool {
-        let denied =
-            self.doc.as_ref().and_then(|d| d.current()).is_some_and(|(s, _)| s.denies(deny::OBJECTS));
-        if denied {
+        let locked = self.objects_locked();
+        if locked {
             self.refuse("A planilha protegida não permite mudar notas.");
         }
-        !denied
+        !locked
+    }
+
+    /// Os objetos da aba à vista estão protegidos? (Aí o mouse não os pega.)
+    pub fn objects_locked(&self) -> bool {
+        self.doc.as_ref().and_then(|d| d.current()).is_some_and(|(s, _)| s.denies(deny::OBJECTS))
     }
 
     /// A célula pode ser selecionada?
@@ -358,6 +371,7 @@ impl SheetsApp {
         let on = p.is_some();
         let ok = self.run_command(Command::Protect(p.map(Box::new)));
         if ok {
+            (self.object, self.moving) = (None, None);
             self.message = if on { "Planilha protegida" } else { "Planilha desprotegida" }.into();
         }
         ok
@@ -591,6 +605,7 @@ mod tests {
         assert!(no(&s, &Command::SetStyles(vec![(1, 0, 0)])));
         assert!(no(&s, &Command::Merges { add: vec![], remove: vec![] }));
         assert!(no(&s, &Command::Notes(vec![])) && no(&s, &Command::Validations(vec![])));
+        assert!(no(&s, &Command::Anchors(vec![])));
         assert!(!no(&s, &Command::Protect(None)), "desproteger tem a própria conferência");
         let ops = || {
             let shift = Shift { axis: Axis::Rows, at: 1, n: 1, insert: false };
@@ -602,12 +617,14 @@ mod tests {
             !(deny::DELETE_ROWS | deny::FORMAT_CELLS | deny::OBJECTS);
         assert!(!no(&s, &ops()), "a linha 2 só tem células desbloqueadas");
         assert!(!no(&s, &Command::SetStyles(vec![(0, 0, 1)])) && !no(&s, &Command::Notes(vec![])));
-        // Células inseridas não; movidas, sim (o conteúdo é conferido à parte).
-        let one = CellRange::default();
+        // Células inseridas não; movidas, só entre desbloqueadas (mesmo vazias).
+        let at = |r| CellRange { first_row: r, last_row: r, ..Default::default() };
         let shift = Shift { axis: Axis::Rows, at: 0, n: 1, insert: true };
         let insert = duck_core::cells::CellOp::Shift { shift, lo: 0, hi: 0 };
-        let mv = duck_core::cells::CellOp::Move { src: one, dr: 1, dc: 0 };
-        assert!(no(&s, &Command::CellOp(insert, false)) && !no(&s, &Command::CellOp(mv, false)));
+        let mv = duck_core::cells::CellOp::Move { src: at(1), dr: 1, dc: 0 };
+        assert!(no(&s, &Command::CellOp(insert, false)) && no(&s, &Command::CellOp(mv, false)));
+        s.set_cell(2, 0, CellValue::Empty, None, Some(1));
+        assert!(!no(&s, &Command::CellOp(mv, false)));
         assert!(moves_cells(&Command::Group(vec![change(0, 0), Command::CellOp(mv, false)])));
         assert!(no(&s, &Command::TabColor(None)) && !moves_cells(&change(0, 0)));
         // Filtro: só os critérios de um que já existe.

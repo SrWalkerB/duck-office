@@ -63,7 +63,7 @@ type Act = fn(&mut SheetsApp);
 /// desfazer) e vale sem a proteção.
 #[test]
 fn every_command_on_a_protected_sheet() {
-    let acts: [(&str, Act); 40] = [
+    let acts: [(&str, Act); 41] = [
         ("digitar", |a| type_in(a, "E5", "9")),
         ("apagar", |a| {
             select(a, "A1:A2");
@@ -148,6 +148,12 @@ fn every_command_on_a_protected_sheet() {
         ("mover pela borda", |a| {
             let p = mouse::border(a, "A1");
             mouse::drag(a, p, "E4", mouse::NONE);
+        }),
+        ("mover vazias pela borda", |a| {
+            put_rule(a, "F1:F2", whole(DvAlert::Stop));
+            a.dialog = None;
+            let p = mouse::border(a, "F1");
+            mouse::drag(a, p, "G4", mouse::NONE);
         }),
         ("copiar pela borda", |a| {
             let p = mouse::border(a, "A1");
@@ -381,6 +387,138 @@ fn names_follow_inserted_rows() {
     a.shift_cells(true, 2);
     assert!(refused(&mut a));
     assert_eq!(formula(&a), "P!$A$2");
+}
+
+/// Objetos protegidos não se pegam nem mudam; com "Editar objetos", sim.
+#[test]
+fn objects_of_a_protected_sheet() {
+    use duck_core::protect::deny;
+    use duck_platform::Key;
+    let rect = [100.0, 60.0, 200.0, 120.0];
+    let drags: [(&str, (f64, f64)); 3] =
+        [("mover", (180.0, 100.0)), ("aumentar pelo canto", (300.0, 180.0)), ("pelo lado", (100.0, 120.0))];
+    for (what, from) in drags {
+        let mut a = sample();
+        mouse::put(&mut a, vec![(rect, mouse::chart(), true)]);
+        // Selecionado antes, para as alças valerem.
+        mouse::pull_to(&mut a, (180.0, 100.0), (0.0, 0.0), mouse::NONE);
+        assert_eq!(a.object, Some(0));
+        // O botão de proteger.
+        assert!(a.scripted_rules("proteger="));
+        assert_eq!(a.object, None, "{what}: proteger tira a seleção");
+        let undo = a.doc.as_ref().unwrap().history.undo.len();
+        let p = mouse::on_screen(&mut a, from.0, from.1);
+        let g = a.geom();
+        assert!(a.object_cursor(&g, p.0, p.1).is_none(), "{what}: cursor");
+        mouse::pull_to(&mut a, from, (40.0, 20.0), mouse::NONE);
+        // O arraste vai para as células de trás (bloqueadas também).
+        assert!(a.object.is_none() && a.moving.is_none(), "{what}: o mouse não pega");
+        a.dialog = None;
+        // Uma seleção que sobrou (uma macro protegeu): as alças avisam e o
+        // objeto volta.
+        a.object = Some(0);
+        mouse::pull_to(&mut a, from, (40.0, 20.0), mouse::NONE);
+        if what != "mover" {
+            assert!(refused(&mut a), "{what}: avisa");
+        }
+        a.dialog = None;
+        a.object = Some(0);
+        assert!(a.object_key(&Key::ArrowRight, mouse::NONE) && refused(&mut a), "{what}: setas");
+        assert!(a.object_key(&Key::Delete, mouse::NONE));
+        assert!(a.scripted_object("mover-objeto=0:40,20") && refused(&mut a));
+        assert!(a.scripted_object("tamanho-objeto=0:40,20") && refused(&mut a));
+        assert_eq!(mouse::rect_of(&a, 0), rect, "{what}");
+        let doc = a.doc.as_ref().unwrap();
+        assert_eq!(
+            (doc.history.undo.len(), doc.sheets[0].data.as_ref().unwrap().layout.objects.len()),
+            (undo, 1)
+        );
+        assert_eq!(
+            get(&a, 0, "B1"),
+            "texto bem mais largo que a coluna",
+            "Delete não apaga o que está atrás"
+        );
+        // Com a permissão, vale; e sem a proteção também.
+        for p in [Some(deny::EXCEL & !deny::OBJECTS), None] {
+            let mut a = sample();
+            mouse::put(&mut a, vec![(rect, mouse::chart(), true)]);
+            let p = p.map(|deny| Box::new(SheetProtection { deny, ..Default::default() }));
+            assert!(a.run_command(Command::Protect(p)));
+            mouse::pull_to(&mut a, (180.0, 100.0), (0.0, 0.0), mouse::NONE);
+            mouse::pull_to(&mut a, from, (40.0, 20.0), mouse::NONE);
+            assert!(a.dialog.is_none() && mouse::rect_of(&a, 0) != rect, "{what}: permitido");
+            a.undo();
+            assert_eq!(mouse::rect_of(&a, 0), rect);
+        }
+    }
+}
+
+/// Com a planilha protegida, o filtro não se liga nem desliga; com "Usar o
+/// filtro", os critérios do que já existe mudam.
+#[test]
+fn filter_of_a_protected_sheet() {
+    use crate::filter::Target;
+    use duck_core::protect::deny;
+    use duck_core::{AutoFilter, FilterColumn, FilterKind};
+    let sales = || {
+        app(&[("P", &[("A1", "Loja"), ("B1", "Qtd"), ("A2", "x"), ("B2", "2"), ("A3", "y"), ("B3", "1")])])
+    };
+    let on = |a: &SheetsApp| a.doc.as_ref().unwrap().current().unwrap().0.layout.autofilter.is_some();
+    let hidden = |a: &SheetsApp| a.doc.as_ref().unwrap().current().unwrap().0.row_hidden(1);
+    let only_y = || AutoFilter {
+        range: crate::fill::range_of((0, 0, 2, 1)),
+        columns: vec![FilterColumn {
+            col: 0,
+            kind: FilterKind::Values { values: vec!["y".into()], blank: false },
+        }],
+    };
+    let allow = |a: &mut SheetsApp, bits: u32| {
+        let p = SheetProtection { deny: deny::EXCEL & !bits, ..Default::default() };
+        assert!(a.run_command(Command::Protect(Some(Box::new(p)))));
+    };
+    // Ligar: uma célula, a coluna, a linha do cabeçalho.
+    for sel in ["A2", "B1:B3", "A1:B1"] {
+        for bits in [0, deny::AUTO_FILTER] {
+            let mut a = sales();
+            allow(&mut a, bits);
+            select(&mut a, sel);
+            a.toggle_filter();
+            assert!(refused(&mut a) && !on(&a), "{sel}");
+            assert!(!a.message.starts_with("Filtro"), "{}", a.message);
+        }
+        let mut a = sales();
+        select(&mut a, sel);
+        a.toggle_filter();
+        assert!(a.dialog.is_none() && on(&a), "{sel}: sem proteção, vale");
+    }
+    // Desligar, dentro e fora do intervalo.
+    for sel in ["A2", "F9"] {
+        let mut a = sales();
+        select(&mut a, "A2");
+        a.toggle_filter();
+        allow(&mut a, deny::AUTO_FILTER);
+        select(&mut a, sel);
+        a.toggle_filter();
+        assert!(refused(&mut a) && on(&a), "{sel}");
+        assert!(!a.message.starts_with("Filtro"), "{}", a.message);
+    }
+    // Critérios.
+    for (bits, ok) in [(0, false), (deny::AUTO_FILTER, true)] {
+        let mut a = sales();
+        select(&mut a, "A2");
+        a.toggle_filter();
+        allow(&mut a, bits);
+        assert_eq!(a.set_filter(Target::Sheet, Some(only_y()), None), ok);
+        assert_eq!((refused(&mut a), hidden(&a)), (!ok, ok));
+        a.clear_filters();
+        assert_eq!(refused(&mut a), !ok, "limpar");
+        assert!(!hidden(&a) && on(&a));
+        // Classificar pelo filtro depende da outra permissão.
+        let f = crate::filter::filters(a.doc.as_ref().unwrap().current().unwrap().0).remove(0);
+        a.sort_filter(f, 1, false);
+        assert!(refused(&mut a));
+        assert_eq!(get(&a, 0, "B2"), "2");
+    }
 }
 
 /// Com a estrutura da pasta protegida, as abas ficam como estão.

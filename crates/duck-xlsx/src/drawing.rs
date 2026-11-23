@@ -1015,7 +1015,9 @@ pub fn read_objects(
                 }
                 _ => continue,
             };
-            anchors.push(duck_core::drawing::DrawingAnchor { part: drawing.clone(), anchor });
+            let slot = anchors.len() as u32;
+            let part = drawing.clone();
+            anchors.push(duck_core::drawing::DrawingAnchor { part, anchor, fallback: !draw });
             if !draw {
                 continue;
             }
@@ -1031,7 +1033,10 @@ pub fn read_objects(
                 out: Vec::new(),
             };
             w.walk(a.body, &|r| r, 0);
-            out.extend(w.out);
+            for mut o in w.out {
+                o.slot = slot;
+                out.push(o);
+            }
         }
     }
     (out, anchors)
@@ -1129,6 +1134,29 @@ mod tests {
         let ObjectKind::Shape(s) = &l.objects[1].kind else { panic!("{:?}", l.objects[1].kind) };
         assert_eq!((&s.geom, s.text.plain().as_str()), (&Geom::Preset("ellipse".into(), vec![]), "Olá"));
         assert!(matches!(s.fill, Fill::Solid(f) if f.color == ChartColor::Rgb(0x112233)), "{:?}", s.fill);
+
+        // Gráfico arrastado e aumentado: só o desenho muda no arquivo.
+        let (moved, m) = (dir.join("movido.xlsx"), Marker { col: 2, col_off: 9525, row: 3, row_off: 0 });
+        assert_eq!((l.objects[0].slot, l.objects[1].slot), (0, 1));
+        let to = Anchor::One { from: m, cx: 6_000_000, cy: 2_700_000 };
+        let undo = duck_core::Command::Anchors(vec![(0, to)]).apply(&mut wb.sheets[0]);
+        assert!(wb.sheets[0].edits().is_drawings_only());
+        let sheets: Vec<Option<&duck_core::Sheet>> = wb.sheets.iter().map(Some).collect();
+        crate::save_file(&p, &moved, &sheets, &wb.shared_strings, &wb.styles, &crate::SaveOptions::default())
+            .unwrap();
+        let (back, _) = crate::open(&moved, &crate::Options::default()).unwrap();
+        let o = &back.sheets[0].layout.objects;
+        assert_eq!(o[0].anchor, to);
+        assert_eq!(o[1].anchor, Anchor::Two { from: at(0, 9), to: at(2, 12) });
+        let raw = |f: &std::path::Path, part: &str| Package::open(f).unwrap().read(part).unwrap();
+        for part in ["xl/worksheets/sheet1.xml", "xl/charts/chart1.xml"] {
+            assert_eq!(raw(&moved, part), raw(&p, part), "{part}");
+        }
+        undo.apply(&mut wb.sheets[0]);
+        assert_eq!(
+            wb.sheets[0].layout.objects[0].anchor,
+            Anchor::One { from: at(4, 7), cx: 5_400_000, cy: 2_700_000 }
+        );
 
         // Três linhas inseridas acima de tudo.
         struct Moved;

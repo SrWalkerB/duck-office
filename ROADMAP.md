@@ -214,6 +214,13 @@ Tudo o que as duas planilhas reais de teste usam, com os mesmos resultados do Ex
 - [ ] Recortar e colar entre abas como mover (hoje cola uma cópia).
 - [ ] Ctrl+clique para somar outra referência com `;`; arrastar o contorno colorido para mudar a referência; cores para nomes e tabelas.
 - [ ] Recusar (ou perguntar sobre) uma fórmula que não dá para ler, como `=SOMA(`: hoje ela é gravada como foi digitada.
+- [x] **Objetos**: selecionar, arrastar e redimensionar gráficos, imagens, formas, grupos e segmentações; desfaz, e o arquivo salvo só muda o desenho.
+- [x] **Largura e altura pela borda** em abas sem painéis congelados (não funcionava), para todas as colunas ou linhas selecionadas.
+- [x] **Marca do que está copiado** (borda tracejada).
+- [x] **Filtro** só na coluna selecionada, ou pela linha do cabeçalho; botão na Página Inicial e Ctrl+Shift+L.
+- [x] Arquivos `.xlsb`, `.xls` e com senha: um aviso claro (antes o programa fechava).
+- [ ] Excluir objetos; mover controles de formulário.
+- [ ] Ler `.xlsb`.
 - [x] Clicar dentro do texto do editor para mover o cursor.
 - [ ] Arrastar dentro do texto do editor para selecionar.
 - [ ] Tema do sistema no Linux onde o compositor não informa (X11): hoje "seguir o sistema" fica no claro.
@@ -224,11 +231,12 @@ O que antes só era preservado no arquivo agora aparece e é respeitado, com des
 
 - [x] **Validação de dados** (`dataValidations` e `x14:dataValidations`): lista suspensa (itens escritos, intervalo, outra aba, nome definido, fórmula como INDIRETO), recusa, aviso ou informação para valores inválidos (também no Ctrl+Enter, conferidos todos antes de escrever), mensagem de entrada; criar, editar e tirar pela aba Dados. `INDIRETO` passou a aceitar nomes definidos.
 - [x] **Notas** (`comments` + VML): marca no canto, texto ao passar o mouse, notas sempre à vista; criar, editar e excluir. **Conversas** (`threadedComments`) só para leitura.
-- [x] **Proteção** de planilha e de pasta: células bloqueadas, o que a proteção permite (formatar, inserir, classificar, filtrar, dinâmicas, notas), intervalos liberados, fórmulas ocultas e aviso claro; com a estrutura da pasta protegida, as abas não se criam, renomeiam, excluem, duplicam, movem, colorem nem ocultam. Desproteger confere a senha com o resumo do arquivo (o antigo de 16 bits e SHA-1/256/384/512); sem ela a proteção fica. As macros seguem as mesmas regras (`Protect`, `Unprotect`, `UserInterfaceOnly`).
+- [x] **Proteção** de planilha e de pasta: células bloqueadas, o que a proteção permite (formatar, inserir, classificar, filtrar, dinâmicas, notas), intervalos liberados, fórmulas ocultas e aviso claro; com a estrutura da pasta protegida, as abas não se criam, renomeiam, excluem, duplicam, movem, colorem nem ocultam; sem "Editar objetos", gráficos, imagens e formas não se selecionam, movem nem redimensionam. Desproteger confere a senha com o resumo do arquivo (o antigo de 16 bits e SHA-1/256/384/512); sem ela a proteção fica. As macros seguem as mesmas regras (`Protect`, `Unprotect`, `UserInterfaceOnly`).
 - [x] Gravação no lugar que o esquema pede, com partes, relacionamentos e tipos de conteúdo novos quando a aba não tinha notas. Round-trip com 0 divergências na vitrine, num arquivo do openpyxl (que relê as mesmas regras, notas e proteção) e nas planilhas reais (que não têm esses recursos: neles, só o que a edição acrescenta); cópias relidas pelo conversor do OnlyOffice.
 - [ ] Responder e resolver conversas.
 - [ ] Colar e preencher levando a validação e as notas da origem; "Circular dados inválidos".
 - [ ] Pedir a senha de um intervalo protegido por senha própria (hoje ele fica bloqueado).
+- [ ] Objetos desbloqueados um a um (`fLocksWithSheet="0"`): hoje seguem a permissão da planilha, como os outros.
 - [ ] Teste manual de teclado e mouse na janela, e das cópias no Excel.
 
 ## ⏳ F7+ · O resto da suíte

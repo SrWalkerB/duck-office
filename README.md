@@ -74,7 +74,7 @@ No tema escuro a planilha também escurece, só na tela: as cores gravadas no ar
 
 O que se digita é lido como no Excel em português: `1.234,56`, `10%`, `R$ 10`, `22/11/2026`, `14:30`, `VERDADEIRO`, `=A1*2`. As fórmulas digitadas são calculadas na hora (e o que depende delas acompanha); uma função que o motor ainda não tem fica sem valor e o arquivo salvo pede ao Excel para recalcular ao abrir.
 
-Objetos: formas, imagens e controles com link ou macro respondem ao clique; os botões +/− dos grupos abrem e fecham linhas e colunas. As macros VBA do arquivo rodam num interpretador próprio, que pergunta uma vez por arquivo e só enxerga a planilha (sem arquivos, internet ou outros programas); Ctrl+Z desfaz a macro inteira.
+Objetos: clicar num gráfico, imagem, forma ou no cabeçalho de uma segmentação seleciona; arrastar move e as alças mudam o tamanho (Shift: um eixo só, ou a mesma proporção; setas movem; Esc desiste). Formas, imagens e controles com link ou macro respondem ao clique (Ctrl+clique só seleciona); os botões +/− dos grupos abrem e fecham linhas e colunas. As macros VBA do arquivo rodam num interpretador próprio, que pergunta uma vez por arquivo e só enxerga a planilha (sem arquivos, internet ou outros programas); Ctrl+Z desfaz a macro inteira.
 
 Validação de dados: a célula com lista mostra uma seta (clique ou Alt+↓; na lista, as setas e as letras escolhem), um valor que a regra não aceita é recusado ou pergunta, e a mensagem de entrada aparece ao selecionar; **Dados → Validação de dados** cria, edita e tira regras. Notas: a marca vermelha no canto mostra o texto ao passar o mouse; **Revisão → Nova nota** (Shift+F2) cria e edita, e as conversas do Excel 365 (marca roxa) aparecem só para leitura. Planilha protegida: só as células desbloqueadas e o que a proteção permite mudam; **Revisão** protege e desprotege a planilha e a estrutura da pasta, pedindo a senha que o arquivo guarda.
 
@@ -85,6 +85,7 @@ Opções: `--sheet N` (aba inicial, 1 = primeira), `--cell B12`, `--zoom 80`, `-
 | `A1=um\ndois` | escreve com quebra de linha |
 | `aba-nova[=Nome]`, `aba=N`, `aba-renomear=N:Nome`, `aba-excluir=N`, `aba-duplicar=N[:M]`, `aba-mover=N:M`, `aba-cor=N:RRGGBB`, `aba-ocultar=N`, `aba-reexibir=N` | abas (`aba=N` troca a aba das edições seguintes) |
 | `preencher=A1:A2>A1:A10` (também `preencher-copia=`, `preencher-serie=`), `preencher-baixo:A1:A5`, `preencher-direita:A1:E1`, `preencher-duplo:A1:A2` | alça de preenchimento, Ctrl+D, Ctrl+R e duplo clique |
+| `mover-objeto=N:40,20`, `tamanho-objeto=N:40,20` | move ou aumenta o N-ésimo objeto da aba (pixels a 100%) |
 | `substituir=achar>trocar` (também com `-pasta`, `-valores`, `-exato`, `-celula` antes do `=`) | Ctrl+H |
 | `colar-valores:D5`, `colar-formulas:`, `colar-formatos:`, `colar-larguras:`, `colar-sem-bordas:`, `colar-transpor:`, `colar-somar:`, `pincel:A1:B2>D1:E5` | colar especial e pincel |
 | `mover=A1:B2>D5`, `copiar-arrastando=A1:B2>D5`, `inserir-celulas-baixo:A1:B2`, `inserir-celulas-direita:`, `excluir-celulas-cima:`, `excluir-celulas-esquerda:` | mover e deslocar células |

@@ -151,7 +151,7 @@ impl SheetsApp {
             if o.hidden {
                 continue;
             }
-            let [ox, oy, w, h] = object_rect(o, v);
+            let [ox, oy, w, h] = object_rect(o, v, None);
             let r = Rect::new(
                 q.rect.x0 + ((ox - q.ox) * g.g as f64) as f32,
                 q.rect.y0 + ((oy - q.oy) * g.g as f64) as f32,

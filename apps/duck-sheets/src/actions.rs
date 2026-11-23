@@ -370,7 +370,7 @@ impl SheetsApp {
             Item::sep(),
             Item::new("Classificar A→Z", Act::Sort(false)),
             Item::new("Classificar Z→A", Act::Sort(true)),
-            Item::new("Filtro", Act::Filter),
+            Item::new("Filtro", Act::Filter).key("Ctrl+Shift+L"),
             Item::sep(),
             Item::new(if note { "Editar nota…" } else { "Nova nota…" }, Act::Note).key("Shift+F2"),
         ];

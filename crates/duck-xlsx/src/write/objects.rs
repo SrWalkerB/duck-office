@@ -28,6 +28,9 @@ fn marker_xml(prefix: &[u8], m: &Marker) -> String {
 struct Corners<'a> {
     from: Option<(usize, usize, &'a [u8])>,
     to: Option<(usize, usize, &'a [u8])>,
+    /// As tags `pos` e `ext` (filhas diretas): tamanho e posição sem células.
+    pos: Option<(usize, usize, &'a [u8])>,
+    ext: Option<(usize, usize, &'a [u8])>,
 }
 
 /// As âncoras de um desenho, na ordem do arquivo. `None` = XML quebrado.
@@ -47,6 +50,13 @@ fn anchor_corners(xml: &[u8]) -> Option<Vec<Corners<'_>>> {
             continue;
         }
         let cur = out.last_mut()?;
+        if depth == 1 && e.kind != Kind::Close && e.ns == b"xdr" {
+            match e.local {
+                b"pos" => cur.pos = Some((e.start, e.end, e.prefix)),
+                b"ext" => cur.ext = Some((e.start, e.end, e.prefix)),
+                _ => {}
+            }
+        }
         // `from` e `to` são filhos diretos da âncora.
         let corner = match e.local {
             b"from" if e.ns == b"xdr" => Some(&mut cur.from),
@@ -93,6 +103,30 @@ pub fn patch_anchors(xml: &[u8], anchors: &[Anchor]) -> Vec<u8> {
         for (at, m) in [(c.from, from), (c.to, to)] {
             if let (Some((a, b, prefix)), Some(m)) = (at, m) {
                 edits.push((a, b, marker_xml(prefix, m)));
+            }
+        }
+        let (pos, ext) = match *anchor {
+            Anchor::Two { .. } => (None, None),
+            Anchor::One { cx, cy, .. } => (None, Some((cx, cy))),
+            Anchor::Abs { x, y, cx, cy } => (Some((x, y)), Some((cx, cy))),
+        };
+        for (at, name, keys, v) in [(c.pos, "pos", ("x", "y"), pos), (c.ext, "ext", ("cx", "cy"), ext)] {
+            let (Some((a, b, prefix)), Some(v)) = (at, v) else { continue };
+            // Só se mudou: o resto da tag fica como está no arquivo.
+            let tag = String::from_utf8_lossy(&xml[a..b]);
+            let has = |k: &str, n: i64| tag.contains(&format!(" {k}=\"{n}\""));
+            if !has(keys.0, v.0) || !has(keys.1, v.1) {
+                let p = if prefix.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}:", String::from_utf8_lossy(prefix))
+                };
+                let close = if tag.ends_with("/>") { "/>" } else { ">" };
+                edits.push((
+                    a,
+                    b,
+                    format!("<{p}{name} {}=\"{}\" {}=\"{}\"{close}", keys.0, v.0, keys.1, v.1),
+                ));
             }
         }
     }
@@ -249,6 +283,19 @@ mod tests {
         assert!(out.contains("<xdr:sp/></xdr:twoCellAnchor><xdr:absoluteAnchor>"), "{out}");
         // Número diferente de âncoras: fica como está.
         assert_eq!(patch_anchors(xml, &a[..1]), xml.to_vec());
+    }
+
+    /// Tamanho de âncora de um canto só, e posição da absoluta. O `a:ext` de
+    /// dentro da forma não é da âncora.
+    #[test]
+    fn sizes() {
+        let xml = br#"<xdr:wsDr><xdr:oneCellAnchor><xdr:from><xdr:col>1</xdr:col></xdr:from><xdr:ext cx="9" cy="8"/><xdr:sp><a:xfrm><a:ext cx="9" cy="8"/></a:xfrm></xdr:sp></xdr:oneCellAnchor><xdr:absoluteAnchor><xdr:pos x="1" y="2"/><xdr:ext cx="3" cy="4"></xdr:ext></xdr:absoluteAnchor></xdr:wsDr>"#;
+        let from = Marker { col: 2, col_off: 5, row: 0, row_off: 0 };
+        let a = [Anchor::One { from, cx: 90, cy: 8 }, Anchor::Abs { x: 10, y: 2, cx: 3, cy: 44 }];
+        let out = String::from_utf8(patch_anchors(xml, &a)).unwrap();
+        assert!(out.contains(r#"<xdr:ext cx="90" cy="8"/><xdr:sp><a:xfrm><a:ext cx="9" cy="8"/>"#), "{out}");
+        assert!(out.contains(r#"<xdr:pos x="10" y="2"/><xdr:ext cx="3" cy="44"></xdr:ext>"#), "{out}");
+        assert!(out.contains("<xdr:col>2</xdr:col><xdr:colOff>5</xdr:colOff>"), "{out}");
     }
 
     /// O prefixo do arquivo fica: padrão (openpyxl) ou inventado.

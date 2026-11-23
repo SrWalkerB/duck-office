@@ -165,6 +165,9 @@ pub mod mouse {
 
     pub fn press(a: &mut SheetsApp, p: (f32, f32), mods: Modifiers, clicks: u8) {
         let g = a.geom();
+        if a.press_grip(&g, p.0, p.1, mods) || a.press_object(&g, p.0, p.1, mods) {
+            return;
+        }
         if !a.press_headers(&g, p.0, p.1, mods, clicks) && !a.press_handle(&g, p.0, p.1, mods, clicks) {
             a.press_cell(&g, p.0, p.1, mods, clicks);
         }
@@ -369,6 +372,177 @@ pub mod mouse {
         pull(&mut a, p, 0.0, 12.0);
         let all: Vec<u32> = (0..5).map(|r| row_px(&a, r)).collect();
         assert_eq!(all, [before, before + 12, before + 12, before + 12, before]);
+    }
+
+    const SHIFT: Modifiers = Modifiers { ctrl: false, shift: true, alt: false, logo: false };
+
+    /// Põe objetos na aba ativa, cada um com a sua âncora, em pixels a 100%.
+    pub fn put(a: &mut SheetsApp, list: Vec<([f64; 4], duck_core::drawing::ObjectKind, bool)>) {
+        use duck_core::drawing::{Anchor, DrawingAnchor, Object};
+        let slot = &mut a.doc.as_mut().unwrap().sheets[0];
+        let v = slot.view.as_ref().unwrap();
+        let sheet = Arc::get_mut(slot.data.as_mut().unwrap()).unwrap();
+        sheet.clear_edits();
+        let l = &mut sheet.layout;
+        for (i, (rect, kind, two)) in list.into_iter().enumerate() {
+            let base = match two {
+                true => Anchor::Two { from: Default::default(), to: Default::default() },
+                false => Anchor::One { from: Default::default(), cx: 0, cy: 0 },
+            };
+            let anchor = crate::objects::anchor_at(rect, &base, v);
+            let mut o = Object::new(anchor, kind);
+            o.slot = i as u32;
+            l.objects.push(o);
+            l.drawing_anchors.push(DrawingAnchor { part: "d.xml".into(), anchor, fallback: false });
+        }
+    }
+
+    pub fn chart() -> duck_core::drawing::ObjectKind {
+        duck_core::drawing::ObjectKind::Chart(Box::default())
+    }
+
+    pub fn rect_of(a: &SheetsApp, i: usize) -> [f64; 4] {
+        let (s, v) = a.doc.as_ref().unwrap().current().unwrap();
+        crate::chart::anchor_rect(&s.layout.objects[i].anchor, v)
+    }
+
+    /// O ponto da aba (pixels a 100%) na tela.
+    pub fn on_screen(a: &mut SheetsApp, x: f64, y: f64) -> (f32, f32) {
+        let g = a.geom();
+        let q = &g.quads[3];
+        (q.rect.x0 + ((x - q.ox) * g.g as f64) as f32, q.rect.y0 + ((y - q.oy) * g.g as f64) as f32)
+    }
+
+    pub fn pull_to(a: &mut SheetsApp, from: (f64, f64), d: (f64, f64), mods: Modifiers) {
+        let p = on_screen(a, from.0, from.1);
+        let g = a.geom().g as f64;
+        press(a, p, mods, 1);
+        for k in [0.5, 1.0] {
+            a.mouse_move(p.0 + (d.0 * g * k) as f32, p.1 + (d.1 * g * k) as f32);
+        }
+        a.mouse_up(mods);
+    }
+
+    #[test]
+    fn drag_and_resize_a_chart() {
+        for (scale, zoom, two) in [(1.0, 100, true), (1.0, 100, false), (1.5, 80, true), (2.0, 60, false)] {
+            let mut a = app(&[("P", &[("A1", "1")])]);
+            a.scale = scale;
+            a.set_zoom(zoom);
+            put(&mut a, vec![([100.0, 60.0, 200.0, 120.0], chart(), two)]);
+            let start = rect_of(&a, 0);
+            assert_eq!(start, [100.0, 60.0, 200.0, 120.0]);
+            let sel = a.doc.as_ref().unwrap().current().unwrap().1.sel();
+            // Só um clique: seleciona o gráfico, e não a célula de trás.
+            pull_to(&mut a, (180.0, 100.0), (0.0, 0.0), NONE);
+            assert_eq!(a.object, Some(0));
+            assert_eq!(a.doc.as_ref().unwrap().current().unwrap().1.sel(), sel);
+            assert!(a.doc.as_ref().unwrap().history.undo.is_empty());
+            // Arrastar pelo meio.
+            pull_to(&mut a, (180.0, 100.0), (50.0, 30.0), NONE);
+            assert_eq!(rect_of(&a, 0), [150.0, 90.0, 200.0, 120.0], "{scale} {zoom} {two}");
+            assert!(a.moving.is_none());
+            // Aumentar pelo canto de baixo e diminuir pelo lado esquerdo.
+            pull_to(&mut a, (350.0, 210.0), (40.0, 20.0), NONE);
+            assert_eq!(rect_of(&a, 0), [150.0, 90.0, 240.0, 140.0]);
+            pull_to(&mut a, (150.0, 160.0), (30.0, 0.0), NONE);
+            assert_eq!(rect_of(&a, 0), [180.0, 90.0, 210.0, 140.0]);
+            // Com Shift: um eixo só, ou a mesma proporção.
+            pull_to(&mut a, (250.0, 150.0), (10.0, 40.0), SHIFT);
+            assert_eq!(rect_of(&a, 0), [180.0, 130.0, 210.0, 140.0]);
+            let e = a.doc.as_ref().unwrap().current().unwrap().0.edits();
+            assert!(e.is_drawings_only());
+            for _ in 0..4 {
+                a.undo();
+            }
+            assert_eq!(rect_of(&a, 0), start);
+            a.redo();
+            assert_eq!(rect_of(&a, 0), [150.0, 90.0, 200.0, 120.0]);
+        }
+    }
+
+    #[test]
+    fn keys_and_clicks_around_a_chart() {
+        use duck_platform::Key;
+        let mut a = app(&[("P", &[("A1", "1"), ("B5", "2")])]);
+        put(&mut a, vec![([100.0, 60.0, 200.0, 120.0], chart(), true)]);
+        pull_to(&mut a, (180.0, 100.0), (0.0, 0.0), NONE);
+        assert!(a.object_key(&Key::ArrowRight, NONE) && a.object_key(&Key::ArrowDown, CTRL));
+        assert_eq!(rect_of(&a, 0), [108.0, 61.0, 200.0, 120.0]);
+        // Delete não apaga as células de trás.
+        assert!(a.object_key(&Key::Delete, NONE));
+        assert_eq!(get(&a, 0, "B5"), "2");
+        // Esc no meio do arraste desiste dele; de novo, tira a seleção.
+        let p = on_screen(&mut a, 180.0, 100.0);
+        press(&mut a, p, NONE, 1);
+        a.mouse_move(p.0 + 60.0, p.1);
+        assert!(a.moving.is_some());
+        assert!(a.object_key(&Key::Escape, NONE));
+        a.mouse_up(NONE);
+        assert_eq!(rect_of(&a, 0), [108.0, 61.0, 200.0, 120.0]);
+        assert!(a.object_key(&Key::Escape, NONE) && a.object.is_none());
+        assert!(!a.object_key(&Key::ArrowRight, NONE));
+        // Clicar numa célula tira a seleção do objeto.
+        pull_to(&mut a, (180.0, 100.0), (0.0, 0.0), NONE);
+        assert!(a.object.is_some());
+        let p = at(&mut a, "A1");
+        press(&mut a, p, NONE, 1);
+        a.mouse_up(NONE);
+        assert!(a.object.is_none());
+        assert_eq!(a.doc.as_ref().unwrap().current().unwrap().1.sel(), (0, 0, 0, 0));
+    }
+
+    /// O objeto de cima ganha; uma forma vazada só pega na borda.
+    #[test]
+    fn what_is_on_top() {
+        use duck_core::drawing::ObjectKind;
+        let mut a = app(&[("P", &[("A1", "1")])]);
+        let hollow = ObjectKind::Shape(Box::new(duck_core::shape::Shape {
+            geom: duck_core::shape::Geom::Preset("rect".into(), vec![]),
+            fill: duck_core::shape::Fill::None,
+            line: None,
+            shadow: None,
+            text: Default::default(),
+            rot: 0.0,
+            flip_h: false,
+            flip_v: false,
+        }));
+        put(
+            &mut a,
+            vec![
+                ([100.0, 60.0, 200.0, 120.0], chart(), true),
+                ([150.0, 80.0, 200.0, 120.0], chart(), true),
+                ([20.0, 20.0, 400.0, 260.0], hollow, true),
+            ],
+        );
+        for (p, want) in [
+            ((160.0, 100.0), Some(1)),
+            ((110.0, 70.0), Some(0)),
+            ((21.0, 150.0), Some(2)),
+            ((60.0, 250.0), None),
+        ] {
+            a.object = None;
+            pull_to(&mut a, p, (0.0, 0.0), NONE);
+            assert_eq!(a.object, want, "{p:?}");
+        }
+    }
+
+    /// Os objetos de um grupo andam juntos.
+    #[test]
+    fn groups_move_together() {
+        let mut a = app(&[("P", &[("A1", "1")])]);
+        put(&mut a, vec![([100.0, 60.0, 200.0, 120.0], chart(), true)]);
+        let l = &mut Arc::get_mut(a.doc.as_mut().unwrap().sheets[0].data.as_mut().unwrap()).unwrap().layout;
+        let mut other = l.objects[0].clone();
+        l.objects[0].frac = [0.0, 0.0, 0.5, 1.0];
+        other.frac = [0.5, 0.0, 0.5, 1.0];
+        l.objects.push(other);
+        pull_to(&mut a, (280.0, 100.0), (40.0, 0.0), NONE);
+        assert_eq!(a.object, Some(1));
+        assert_eq!(
+            (rect_of(&a, 0), rect_of(&a, 1)),
+            ([140.0, 60.0, 200.0, 120.0], [140.0, 60.0, 200.0, 120.0])
+        );
     }
 
     #[test]
