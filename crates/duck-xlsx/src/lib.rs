@@ -13,6 +13,7 @@
 
 mod cond;
 pub mod csv;
+pub mod cube;
 pub mod drawing;
 mod extras;
 pub mod filter;
@@ -20,6 +21,7 @@ mod package;
 mod parts;
 pub mod pivot;
 #[doc(hidden)]
+mod shape;
 pub mod sheet;
 pub mod write;
 pub mod xml;
@@ -185,6 +187,15 @@ impl Book {
         self.pkg.read(name).ok()
     }
 
+    /// Modelo de Dados (lido só quando precisa).
+    pub fn read_model(&self) -> Option<duck_core::cube::ModelDef> {
+        cube::read_model(&self.pkg, &self.meta.path)
+    }
+
+    pub fn read_cube_cache(&self, part: &str) -> Option<duck_core::cube::CubeCache> {
+        cube::read_cube_cache(&self.pkg, part)
+    }
+
     /// Registros de um cache de tabela dinâmica (lidos só quando precisa).
     pub fn read_pivot_records(
         &self,
@@ -229,6 +240,7 @@ impl Book {
         let _ = sheet::parse_rows(&buf[..cut], &mut part, &mut state, &mut scratch);
         let mut s = Sheet::new(m.name.clone());
         s.hidden = m.hidden;
+        s.tab_id = m.id;
         s.merge_part(part);
         s.finish();
         Ok(s)
@@ -263,6 +275,7 @@ impl Book {
                     Some(e) => {
                         sheet::load_sheet(&self.pkg, e, &m.name, chunk, limiter, opts).map(|(mut sh, rep)| {
                             sh.hidden = m.hidden;
+                            sh.tab_id = m.id;
                             parts::resolve_links(&self.pkg, &m.path, &mut sh.layout.links);
                             filter::read_tables(&self.pkg, &m.path, &mut sh.layout.tables);
                             let caches = self
@@ -270,6 +283,7 @@ impl Book {
                                 .get_or_init(|| drawing::read_slicer_caches(&self.pkg, &self.meta.path));
                             (sh.layout.objects, sh.layout.drawing_anchors) =
                                 drawing::read_objects(&self.pkg, &m.path, caches);
+                            drawing::attach_controls(&self.pkg, &m.path, &mut sh.layout);
                             sh.layout.pivots = pivot::read_pivot_tables(&self.pkg, &m.path);
                             (sh, rep)
                         })

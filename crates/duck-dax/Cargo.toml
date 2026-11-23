@@ -1,0 +1,13 @@
+[package]
+name = "duck-dax"
+description = "Modelo de Dados do Excel em memória e avaliador de medidas DAX"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+duck-calc = { path = "../duck-calc", version = "1.0.0" }
+duck-core = { path = "../duck-core", version = "1.0.0" }
+rayon = "1.12.0"

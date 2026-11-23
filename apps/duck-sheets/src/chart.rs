@@ -80,12 +80,19 @@ pub struct ObjCtx<'a> {
     pub images: &'a std::collections::HashMap<String, [f32; 4]>,
 }
 
+/// Desenha o intervalo de uma câmera num retângulo, recortado; `false` = usar
+/// a imagem guardada.
+pub type Camera<'a> = &'a mut dyn FnMut(&mut Painter, &str, Rect, &Rect) -> bool;
+
 /// Desenha os objetos da aba que aparecem no painel `q`.
-pub fn draw_objects(p: &mut Painter, cx: &ObjCtx, objects: &[Object], v: &View, q: &Quad) {
+pub fn draw_objects(p: &mut Painter, cx: &ObjCtx, objects: &[Object], v: &View, q: &Quad, live: Camera<'_>) {
     if objects.is_empty() || q.rect.is_empty() {
         return;
     }
     for o in objects {
+        if o.hidden {
+            continue;
+        }
         let [x, y, w, h] = object_rect(o, v);
         let r = Rect::new(
             q.rect.x0 + ((x - q.ox) * cx.g as f64) as f32,
@@ -93,7 +100,10 @@ pub fn draw_objects(p: &mut Painter, cx: &ObjCtx, objects: &[Object], v: &View, 
             q.rect.x0 + ((x + w - q.ox) * cx.g as f64) as f32,
             q.rect.y0 + ((y + h - q.oy) * cx.g as f64) as f32,
         );
-        if r.w() < 2.0 || r.h() < 2.0 || r.intersect(&q.rect).is_empty() {
+        // Conectores podem ter altura ou largura zero.
+        let line = matches!(&o.kind, ObjectKind::Shape(s) if s.is_line());
+        let small = !line && (r.w() < 2.0 || r.h() < 2.0);
+        if small || r.inset(-2.0).intersect(&q.rect).is_empty() {
             continue;
         }
         let clip = r.intersect(&q.rect);
@@ -101,38 +111,25 @@ pub fn draw_objects(p: &mut Painter, cx: &ObjCtx, objects: &[Object], v: &View, 
             ObjectKind::Chart(c) => draw_chart(p, cx, c, r, &clip),
             ObjectKind::Slicer(s) => draw_slicer(p, cx, s, r, &clip),
             ObjectKind::Timeline(t) => draw_timeline(p, cx, t, r, &clip),
-            ObjectKind::Shape { text, fill, line } => {
-                if let Some(f) = fill {
-                    p.fill(r, &clip, rgba(resolve(*f, cx.styles)));
+            ObjectKind::Control(c) => crate::control::draw(p, cx, c, r, &clip),
+            ObjectKind::Shape(s) => crate::shape::draw_shape(p, cx, s, r, &q.rect),
+            ObjectKind::Picture { part, crop, line, camera } => {
+                if !camera.as_ref().is_some_and(|c| live(p, c, r, &clip)) {
+                    crate::shape::draw_picture(p, cx, part, *crop, r, &clip);
                 }
                 if let Some(l) = line {
-                    p.stroke(r, &clip, 1.0_f32.max(cx.g), rgba(resolve(*l, cx.styles)));
-                }
-                if !text.trim().is_empty() {
-                    let style = cx.font.with_px((11.0 * cx.g).round().max(6.0));
-                    let color = match fill {
-                        Some(f) if luminance(resolve(*f, cx.styles)) < 0.5 => rgb(0xFFFFFF),
-                        _ => rgb(0x262626),
-                    };
-                    let line = text.split('\n').next().unwrap_or("");
-                    p.label(line, style, r, Align::Center, 4.0 * cx.g, color);
-                }
-            }
-            ObjectKind::Picture { part } => {
-                if let Some(&[u0, v0, u1, v1]) = cx.images.get(part) {
-                    // Recorta o retângulo e a região do atlas juntos.
-                    let fx = |x: f32| u0 + (x - r.x0) / r.w() * (u1 - u0);
-                    let fy = |y: f32| v0 + (y - r.y0) / r.h() * (v1 - v0);
-                    let c = clip;
-                    p.out.push(duck_gfx::Instance::image(
-                        [c.x0, c.y0, c.w(), c.h()],
-                        [fx(c.x0), fy(c.y0), fx(c.x1), fy(c.y1)],
-                        255,
-                    ));
+                    let w = (l.width * 96.0 / 72.0 * cx.g).max(1.0);
+                    p.stroke(r, &clip, w, paint_rgba(l.paint, cx.styles));
                 }
             }
         }
     }
+}
+
+pub fn paint_rgba(p: duck_core::shape::Paint, st: &Styles) -> Rgba {
+    let mut c = rgba(resolve(p.color, st));
+    c[3] = (p.alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+    c
 }
 
 fn luminance(v: u32) -> f64 {
@@ -217,6 +214,17 @@ fn series_color(s: &duck_core::drawing::Series, k: usize, line: bool, st: &Style
 }
 
 fn draw_chart(p: &mut Painter, cx: &ObjCtx, c: &Chart, r: Rect, clip: &Rect) {
+    // Séries com todas as células escondidas ficam de fora.
+    let shown;
+    let c = if c.plots.iter().any(|p| p.series.iter().any(|s| s.hidden)) {
+        let mut v = c.clone();
+        v.plots.iter_mut().for_each(|p| p.series.retain(|s| !s.hidden));
+        v.plots.retain(|p| !p.series.is_empty());
+        shown = v;
+        &shown
+    } else {
+        c
+    };
     let g = cx.g;
     let st = cx.styles;
     if !c.no_background {
@@ -1092,7 +1100,6 @@ impl crate::app::SheetsApp {
     /// intervalos do arquivo (`'Aba'!$B$2:$B$13`): depois de editar e de
     /// recalcular, os gráficos mostram os valores novos.
     pub fn refresh_charts(&mut self) {
-        use duck_calc::parse::{self, Node, SheetSel};
         let Some(doc) = &mut self.doc else { return };
         if !doc.sheets.iter().any(|s| {
             s.data
@@ -1108,88 +1115,19 @@ impl crate::app::SheetsApp {
         }
         let strings = doc.strings.clone();
         let extras = doc.calc.extras.clone();
-        // (aba, objeto, plot, série, categorias, valores)
-        type Upd =
-            (usize, usize, usize, usize, Option<Vec<String>>, Option<Vec<Option<f64>>>, Option<String>);
-        let mut updates: Vec<Upd> = Vec::new();
+        // (aba, objeto, plot, série, mudança)
+        let mut updates: Vec<(usize, usize, usize, usize, duck_calc::chartdata::Update)> = Vec::new();
         {
             let refs: Vec<&duck_core::Sheet> = sheets.iter().map(|s| &**s).collect();
             let book = duck_calc::Book::new(refs, &strings, &extras, doc.date1904);
-            // Células do intervalo da fórmula, em ordem (linha ou coluna).
-            let cells = |f: &str, host: u32| -> Option<Vec<duck_core::Value<'_>>> {
-                let fm = parse::compile(f, host, 0, 0, &book);
-                let Node::Area(a) = fm.node(fm.root) else { return None };
-                let s = match a.sheet {
-                    SheetSel::Local(s) if s != u32::MAX => s,
-                    SheetSel::This => host,
-                    _ => return None,
-                };
-                if !(a.r0.abs && a.r1.abs && a.c0.abs && a.c1.abs) {
-                    return None;
-                }
-                let sh = book.sheets.get(s as usize)?;
-                let (r0, r1, c0, c1) = (a.r0.v as u32, a.r1.v as u32, a.c0.v as u32, a.c1.v as u32);
-                if (r1 - r0 + 1) as u64 * (c1 - c0 + 1) as u64 > 10_000 {
-                    return None;
-                }
-                let mut out = Vec::new();
-                for r in r0..=r1 {
-                    for c in c0..=c1 {
-                        out.push(sh.cell(r, c, &strings).value);
-                    }
-                }
-                Some(out)
-            };
             for (si, sheet) in sheets.iter().enumerate() {
                 for (oi, o) in sheet.layout.objects.iter().enumerate() {
                     let ObjectKind::Chart(c) = &o.kind else { continue };
                     for (pi, pl) in c.plots.iter().enumerate() {
                         for (ki, s) in pl.series.iter().enumerate() {
-                            let vals = s.val_ref.as_deref().and_then(|f| cells(f, si as u32)).map(|v| {
-                                v.into_iter()
-                                    .map(|x| match x {
-                                        duck_core::Value::Number(n) => Some(n),
-                                        _ => None,
-                                    })
-                                    .collect::<Vec<_>>()
-                            });
-                            let cats = s.cat_ref.as_deref().and_then(|f| cells(f, si as u32)).map(|v| {
-                                v.into_iter()
-                                    .map(|x| {
-                                        let mut t = String::new();
-                                        match x {
-                                            duck_core::Value::Text(s) => t.push_str(s),
-                                            duck_core::Value::Number(n) => {
-                                                duck_core::numfmt::format_general(n, 11, &mut t)
-                                            }
-                                            duck_core::Value::Bool(b) => {
-                                                t.push_str(if b { "VERDADEIRO" } else { "FALSO" })
-                                            }
-                                            _ => {}
-                                        }
-                                        t
-                                    })
-                                    .collect::<Vec<_>>()
-                            });
-                            let name = s
-                                .name_ref
-                                .as_deref()
-                                .and_then(|f| cells(f, si as u32))
-                                .and_then(|v| v.into_iter().next())
-                                .map(|x| match x {
-                                    duck_core::Value::Text(t) => t.to_string(),
-                                    duck_core::Value::Number(n) => {
-                                        let mut t = String::new();
-                                        duck_core::numfmt::format_general(n, 11, &mut t);
-                                        t
-                                    }
-                                    _ => String::new(),
-                                })
-                                .filter(|n| *n != s.name);
-                            let vals = vals.filter(|v| *v != s.vals);
-                            let cats = cats.filter(|v| *v != s.cats);
-                            if vals.is_some() || cats.is_some() || name.is_some() {
-                                updates.push((si, oi, pi, ki, cats, vals, name));
+                            if let Some(u) = duck_calc::chartdata::update(&book, s, si as u32, c.plot_hidden)
+                            {
+                                updates.push((si, oi, pi, ki, u));
                             }
                         }
                     }
@@ -1197,18 +1135,19 @@ impl crate::app::SheetsApp {
             }
         }
         drop(sheets);
-        for (si, oi, pi, ki, cats, vals, name) in updates {
+        for (si, oi, pi, ki, u) in updates {
             let Some(sheet) = doc.sheets.get_mut(si).and_then(crate::edit::sheet_mut) else { continue };
             if let Some(ObjectKind::Chart(c)) = sheet.layout.objects.get_mut(oi).map(|o| &mut o.kind)
                 && let Some(s) = c.plots.get_mut(pi).and_then(|p| p.series.get_mut(ki))
             {
-                if let Some(v) = vals {
+                s.hidden = u.hidden;
+                if let Some(v) = u.vals {
                     s.vals = v;
                 }
-                if let Some(cs) = cats {
+                if let Some(cs) = u.cats {
                     s.cats = cs;
                 }
-                if let Some(n) = name {
+                if let Some(n) = u.name {
                     s.name = n;
                 }
             }

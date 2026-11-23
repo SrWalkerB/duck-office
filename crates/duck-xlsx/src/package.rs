@@ -132,6 +132,47 @@ impl Package {
         Ok(out)
     }
 
+    /// Lê uma parte em pedaços, na ordem, descomprimindo em paralelo se ela
+    /// for grande.
+    pub fn read_pieces(&self, name: &str, mut sink: impl FnMut(&[u8]) + Send) -> Result<(), Error> {
+        /// Menor que isso, uma thread basta.
+        const PARALLEL: u64 = 4 << 20;
+        let e = self.entries.get(name).ok_or_else(|| Error::Missing(name.to_string()))?;
+        if !e.readable() {
+            return Err(Error::Zip(format!("parte {name} usa compressão ou criptografia não suportada")));
+        }
+        if e.is_deflated() && e.size >= PARALLEL && rayon::current_num_threads() >= 4 {
+            // Um erro no meio não pode repetir o que já foi entregue.
+            let mut sent = 0usize;
+            let r = duck_deflate::inflate_parallel(
+                self.compressed(e),
+                Some(e.crc32),
+                // Partes pequenas: estes XML comprimem ~25 vezes.
+                duck_deflate::Options { part_bytes: 128 << 10, lookahead: 32, stream_bytes: 1 << 20 },
+                |b| {
+                    sent += b.bytes().len();
+                    sink(b.bytes());
+                    Ok(())
+                },
+            );
+            match r {
+                Ok(_) => return Ok(()),
+                Err(_) if sent == 0 => {}
+                Err(_) => return Err(Error::Zip(format!("parte {name} corrompida"))),
+            }
+        }
+        let mut inf = self.inflater(e);
+        let mut buf = Vec::with_capacity(4 << 20);
+        loop {
+            buf.clear();
+            let eof = inf.read_into(&mut buf, 4 << 20)?;
+            sink(&buf);
+            if eof {
+                return Ok(());
+            }
+        }
+    }
+
     /// Bytes comprimidos da parte, direto do arquivo mapeado.
     pub fn compressed(&self, e: &Entry) -> &[u8] {
         &self.mmap[e.data_offset..e.data_offset + e.compressed]

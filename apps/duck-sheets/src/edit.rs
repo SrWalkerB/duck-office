@@ -383,11 +383,7 @@ impl SheetsApp {
 
     pub fn update_title(&self) {
         let (Some(w), Some(doc)) = (&self.window, &self.doc) else { return };
-        let name = if self.untitled_path.as_deref() == Some(doc.path.as_path()) {
-            "Sem título".to_string()
-        } else {
-            doc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
-        };
+        let name = self.file_label(&doc.path);
         let dot = if doc.dirty { "• " } else { "" };
         w.set_title(&format!("{dot}{name} — duck-sheets"));
     }
@@ -730,6 +726,61 @@ impl SheetsApp {
                 }
                 continue;
             }
+            // `objeto=N` clica no N-ésimo objeto clicável da aba (link, controle
+            // ou macro); `macro=Nome` executa uma macro.
+            if let Some(n) = e.strip_prefix("macro=") {
+                self.run_macro(n);
+                eprintln!("--macro: {}", if self.message.starts_with("Erro") { "erro" } else { "ok" });
+                continue;
+            }
+            if let Some(n) = e.strip_prefix("objeto=") {
+                let n: usize = n.parse().unwrap_or(0);
+                let obj = self.doc.as_ref().and_then(|d| d.current()).and_then(|(s, _)| {
+                    let hit = |o: &duck_core::drawing::Object| {
+                        o.link.is_some()
+                            || o.macro_name.is_some()
+                            || matches!(o.kind, duck_core::drawing::ObjectKind::Control(_))
+                    };
+                    s.layout.objects.iter().enumerate().filter(|(_, o)| hit(o)).nth(n).map(|(k, _)| k)
+                });
+                match obj {
+                    Some(k) => {
+                        self.object_run(k);
+                        let cells: usize = self
+                            .doc
+                            .as_ref()
+                            .and_then(|d| d.history.undo.last())
+                            .map_or(0, |s| s.iter().map(|(_, c)| c.cells().len()).sum());
+                        let state = if self.message.starts_with("Erro") { "erro" } else { "ok" };
+                        eprintln!("--objeto: {state} ({cells} células)");
+                    }
+                    None => eprintln!("--edit: objeto {n} não encontrado"),
+                }
+                continue;
+            }
+            // `grupo=linhas:N` / `grupo=colunas:N` abre ou fecha o N-ésimo grupo;
+            // `nivel=linhas:N` mostra até o nível N.
+            if let Some((op, arg)) = e.split_once('=')
+                && matches!(op, "grupo" | "nivel")
+                && let Some((axis, n)) = arg.split_once(':')
+            {
+                let rows = axis == "linhas";
+                let n: usize = n.parse().unwrap_or(0);
+                let cmd = self.doc.as_ref().and_then(|d| d.current()).and_then(|(s, v)| {
+                    if op == "nivel" {
+                        return crate::outline::show_level(s, rows, n as u8);
+                    }
+                    let groups = if rows { &v.row_groups } else { &v.col_groups };
+                    crate::outline::toggle(s, rows, *groups.get(n)?)
+                });
+                match cmd {
+                    Some(c) => {
+                        self.run_command(c);
+                    }
+                    None => eprintln!("--edit: grupo {n} não encontrado"),
+                }
+                continue;
+            }
             // `segmentacao=N:I` (item I da N-ésima segmentação da aba; `limpar`),
             // `segmentacao=N:I+` soma o item (Ctrl+clique). `linhadotempo=N:I`
             // escolhe o período I (`I+` estende; `limpar`).
@@ -761,7 +812,18 @@ impl SheetsApp {
                 };
                 let ctrl = i.ends_with('+');
                 let item = if i == "limpar" { None } else { i.trim_end_matches('+').parse().ok() };
+                let cube = self.doc.as_ref().and_then(|d| d.current()).is_some_and(|(s, _)| {
+                    matches!(&s.layout.objects[obj].kind,
+                        ObjectKind::Slicer(x) if x.pivot.as_ref().is_some_and(|p| p.is_cube()))
+                });
+                let t0 = std::time::Instant::now();
                 self.slicer_click(obj, item, ctrl);
+                if slicer {
+                    let what = if cube { "modelo" } else { "comum" };
+                    let ms = t0.elapsed().as_millis();
+                    let m = if self.message.starts_with("Filtro") { "filtro" } else { &self.message };
+                    eprintln!("--segmentacao: {what}, {ms} ms: {m}");
+                }
                 continue;
             }
             let Some((cell, text)) = e.split_once('=') else { continue };
@@ -959,12 +1021,7 @@ impl SheetsApp {
             return true;
         }
         let Some(w) = &self.window else { return true };
-        let name = self
-            .doc
-            .as_ref()
-            .and_then(|d| d.path.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = self.doc.as_ref().map(|d| self.file_label(&d.path)).unwrap_or_default();
         match w.ask_save("duck-sheets", &format!("Salvar as alterações em {name}?")) {
             SaveChoice::Discard => true,
             SaveChoice::Cancel => false,

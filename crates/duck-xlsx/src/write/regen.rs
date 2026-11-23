@@ -64,6 +64,8 @@ pub fn sheet_data(
 /// Uma linha (atributos do layout + células). Devolve quantas células escreveu.
 fn write_row(sheet: &Sheet, shared: &StringTable, r: u32, out: &mut Vec<u8>) -> u64 {
     let spec = sheet.layout.row(r);
+    let outline = &sheet.layout.outline;
+    let (level, closed) = (outline.rows.level(r), outline.closed_rows.contains(&r));
     let start = out.len();
     out.extend_from_slice(b"<row r=\"");
     push_u32(out, r + 1);
@@ -83,6 +85,14 @@ fn write_row(sheet: &Sheet, shared: &StringTable, r: u32, out: &mut Vec<u8>) -> 
             out.extend_from_slice(b" hidden=\"1\"");
         }
     }
+    if level > 0 {
+        out.extend_from_slice(b" outlineLevel=\"");
+        push_u32(out, level as u32);
+        out.push(b'"');
+    }
+    if closed {
+        out.extend_from_slice(b" collapsed=\"1\"");
+    }
     out.push(b'>');
     let body = out.len();
     let mut n = 0;
@@ -91,7 +101,7 @@ fn write_row(sheet: &Sheet, shared: &StringTable, r: u32, out: &mut Vec<u8>) -> 
         write_cell(out, sheet, shared, r, c, b"");
         n += (out.len() > before) as u64;
     }
-    if out.len() == body && spec.is_none() {
+    if out.len() == body && spec.is_none() && level == 0 && !closed {
         out.truncate(start);
         return 0;
     }
@@ -177,6 +187,15 @@ fn cols(sheet: &Sheet, out: &mut Vec<u8>) {
         }
         if c.hidden {
             out.extend_from_slice(b" hidden=\"1\"");
+        }
+        let level = sheet.layout.outline.cols.level(c.first);
+        if level > 0 {
+            out.extend_from_slice(b" outlineLevel=\"");
+            push_u32(out, level as u32);
+            out.push(b'"');
+        }
+        if sheet.layout.outline.closed_cols.contains(&c.first) {
+            out.extend_from_slice(b" collapsed=\"1\"");
         }
         out.extend_from_slice(b"/>");
     }

@@ -86,6 +86,8 @@ pub struct Alignment {
     pub horizontal: HAlign,
     pub vertical: VAlign,
     pub wrap: bool,
+    /// Reduzir a fonte para o texto caber na largura.
+    pub shrink: bool,
     pub indent: u8,
     /// `textRotation`: 0–90 = graus no sentido anti-horário, 91–180 = 1–90
     /// graus no sentido horário, 255 = letras empilhadas na vertical.

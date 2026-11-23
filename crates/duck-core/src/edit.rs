@@ -618,6 +618,8 @@ pub enum Command {
     /// Linhas ocultas (`true`) ou reexibidas.
     RowsHidden(Vec<(u32, bool)>),
     ColsHidden(Vec<(u32, bool)>),
+    /// Agrupamento de linhas e colunas (os grupos fechados).
+    Outline(Box<crate::outline::Outline>),
     /// Painéis congelados (`None` = sem).
     Pane(Option<crate::Pane>),
     /// Filtro da aba (`table = None`) ou de uma tabela.
@@ -687,6 +689,12 @@ impl Command {
                 if old.pivots != sheet.layout.pivots || old.objects != sheet.layout.objects {
                     sheet.mark_pivots();
                 }
+                // Tabelas que cresceram (linha acrescentada).
+                for (i, t) in sheet.layout.tables.iter().enumerate() {
+                    if old.tables.get(i).is_some_and(|o| o.range != t.range || o.filter != t.filter) {
+                        sheet.edits.tables.insert(i as u32);
+                    }
+                }
                 Command::Layout(Box::new(old))
             }
             Command::Group(list) => {
@@ -734,6 +742,9 @@ impl Command {
                     inv[p as usize] = i as u32;
                 }
                 Command::SortRows { r0, c0, c1, perm: inv }
+            }
+            Command::Outline(o) => {
+                Command::Outline(Box::new(std::mem::replace(&mut sheet.layout.outline, *o)))
             }
             Command::ColsHidden(list) => {
                 let mut old = Vec::with_capacity(list.len());

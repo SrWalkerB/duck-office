@@ -570,6 +570,7 @@ fn shift_column_rows(old: Column, c: u32, s: Shift, lost: &mut Vec<(u32, u32, Ra
 
 /// Larguras/alturas, mesclagens, formatação condicional, links e dimensão.
 pub fn shift_layout(l: &mut Layout, s: Shift) {
+    l.outline.shift(s);
     match s.axis {
         Axis::Rows => {
             l.rows = l

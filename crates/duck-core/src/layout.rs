@@ -87,6 +87,8 @@ pub struct Layout {
     pub cols: Vec<ColSpec>,
     /// Ordenadas por `row`; só linhas com altura própria ou escondidas.
     pub rows: Vec<RowSpec>,
+    /// Agrupamento de linhas e colunas.
+    pub outline: crate::outline::Outline,
     pub merges: Vec<CellRange>,
     pub pane: Option<Pane>,
     /// Área usada declarada no arquivo (`<dimension>`).
@@ -99,6 +101,8 @@ pub struct Layout {
     pub autofilter: Option<AutoFilter>,
     /// Tabelas do Excel (`xl/tables/tableN.xml`) desta aba.
     pub tables: Vec<Table>,
+    /// Controles de formulário (`<control>`) até a leitura ligar aos objetos.
+    pub controls: Vec<ControlRef>,
     /// Gráficos, segmentações e formas sobre a aba.
     pub objects: Vec<crate::drawing::Object>,
     /// Tabelas dinâmicas da aba.
@@ -110,6 +114,37 @@ pub struct Layout {
     /// Caches de tabela dinâmica com os dados nesta aba: (parte do cache,
     /// intervalo da fonte).
     pub pivot_sources: Vec<(String, CellRange)>,
+}
+
+impl Layout {
+    /// Linhas com altura própria ou escondidas no intervalo (inclusivo).
+    pub fn rows_in(&self, r0: u32, r1: u32) -> &[RowSpec] {
+        let a = self.rows.partition_point(|r| r.row < r0);
+        let b = self.rows.partition_point(|r| r.row <= r1);
+        &self.rows[a..b.max(a)]
+    }
+
+    /// As linhas visíveis do intervalo (inclusivo), em ordem.
+    pub fn visible_rows(&self, r0: u32, r1: u32) -> impl Iterator<Item = u32> + '_ {
+        let mut specs = self.rows_in(r0, r1).iter().filter(|r| r.hidden).peekable();
+        (r0..=r1).filter(move |&r| {
+            while specs.next_if(|s| s.row < r).is_some() {}
+            specs.peek().is_none_or(|s| s.row != r)
+        })
+    }
+
+    pub fn col_hidden(&self, c: u32) -> bool {
+        self.cols.iter().any(|s| s.hidden && (s.first..=s.last).contains(&c))
+    }
+}
+
+/// Um `<control>` da aba: o id da forma no desenho, o `r:id` das
+/// propriedades e a macro.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ControlRef {
+    pub shape_id: u32,
+    pub rid: String,
+    pub macro_name: Option<String>,
 }
 
 /// Filtro automático: o intervalo (com a linha de cabeçalho) e os
@@ -234,11 +269,19 @@ impl Layout {
         self.dimension = self.dimension.or(other.dimension);
         self.cols.extend(other.cols);
         self.rows.extend(other.rows);
+        let o = &mut self.outline;
+        o.rows.0.extend(other.outline.rows.0);
+        o.cols.0.extend(other.outline.cols.0);
+        o.below &= other.outline.below;
+        o.right &= other.outline.right;
+        o.closed_rows.extend(other.outline.closed_rows);
+        o.closed_cols.extend(other.outline.closed_cols);
         self.merges.extend(other.merges);
         self.cond.extend(other.cond);
         self.links.extend(other.links);
         self.autofilter = self.autofilter.take().or(other.autofilter);
         self.tables.extend(other.tables);
+        self.controls.extend(other.controls);
         self.objects.extend(other.objects);
         self.pivots.extend(other.pivots);
     }
@@ -253,6 +296,8 @@ impl Layout {
         }
         self.cols.sort_by_key(|c| c.first);
         self.rows.sort_by_key(|r| r.row);
+        self.outline.rows.finish();
+        self.outline.cols.finish();
         self.merges.sort_by_key(|m| (m.first_row, m.first_col));
         self.cond.sort_by_key(|r| r.priority);
         self.links.sort_by_key(|l| (l.range.first_row, l.range.first_col));

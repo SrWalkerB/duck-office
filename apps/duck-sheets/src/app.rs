@@ -82,6 +82,10 @@ pub struct View {
     pub cur: (u32, u32),
     pub anchor: (u32, u32),
     pub zoom: u16,
+    /// Agrupamento de linhas e colunas.
+    pub row_groups: Vec<duck_core::outline::Group>,
+    pub col_groups: Vec<duck_core::outline::Group>,
+    pub outline: duck_core::outline::Outline,
     pub merges: Merges,
     pub grid: bool,
     pub headers: bool,
@@ -97,6 +101,9 @@ pub struct View {
     /// quando a aba é remontada (prévia → aba inteira, fontes novas).
     pub resized_cols: Vec<(u32, u32)>,
     pub resized_rows: Vec<(u32, u32)>,
+    /// Linhas e colunas que a grade mostra no mínimo (cresce quando o cursor
+    /// passa do fim).
+    pub min: (u32, u32),
 }
 
 impl View {
@@ -170,6 +177,9 @@ pub struct Doc {
     pub calc: crate::calc::Calc,
     /// Tabelas dinâmicas (registros lidos sob demanda).
     pub pivots: crate::pivot::PivotState,
+    /// Módulos VBA (lidos na primeira macro) e se o usuário deixou executar.
+    pub macros: Option<Vec<duck_vba::Module>>,
+    pub macros_ok: bool,
 }
 
 impl Doc {
@@ -207,8 +217,10 @@ pub(crate) fn build_view(sheet: &Sheet, mdw: f32, prev: Option<View>, opts_zoom:
     let dim = l.dimension;
     let used_rows = sheet.rows().max(dim.map_or(0, |d| d.last_row + 1));
     let used_cols = sheet.cols().max(dim.map_or(0, |d| d.last_col + 1));
-    let nrows = (used_rows + 200).clamp(1000, MAX_ROWS);
-    let ncols = (used_cols + 12).clamp(26, MAX_COLS);
+    let min = prev.as_ref().map_or((1000, 100), |p| p.min);
+    let nrows = (used_rows + 200).clamp(min.0.min(MAX_ROWS), MAX_ROWS);
+    // Colunas bastantes para encher a janela também com o zoom reduzido.
+    let ncols = (used_cols + 12).clamp(min.1.min(MAX_COLS), MAX_COLS);
 
     let default_row = row_px(l.default_row_height.unwrap_or(15.0)).max(1);
     let rows = Axis::new(
@@ -249,6 +261,9 @@ pub(crate) fn build_view(sheet: &Sheet, mdw: f32, prev: Option<View>, opts_zoom:
         anchor: (0, 0),
         zoom: opts_zoom.unwrap_or(sv.zoom).clamp(10, 400),
         merges,
+        row_groups: l.outline.rows.groups(),
+        col_groups: l.outline.cols.groups(),
+        outline: l.outline.clone(),
         grid: sv.show_grid_lines,
         headers: sv.show_headers,
         col_styles,
@@ -256,6 +271,7 @@ pub(crate) fn build_view(sheet: &Sheet, mdw: f32, prev: Option<View>, opts_zoom:
         cf: l.cond.iter().map(|_| duck_core::CfState::default()).collect(),
         resized_cols: Vec::new(),
         resized_rows: Vec::new(),
+        min,
         rows,
         cols,
     };
@@ -368,6 +384,8 @@ pub enum Drag {
     HThumb {
         grab: f32,
     },
+    /// Barra deslizante do zoom.
+    Zoom,
     /// Arrastando a borda direita da coluna `col` (tamanho inicial e x do mouse).
     ResizeCol {
         col: u32,
@@ -460,6 +478,9 @@ pub struct SheetsApp {
     pub timeline: Vec<(&'static str, Duration)>,
     pub first_content: Option<Duration>,
     pub recent_cpu: Vec<f64>,
+    /// Restos da roda e da pinça que ainda não viraram um passo de zoom.
+    wheel_zoom: f64,
+    pinch: f64,
     pub bench: Option<Bench>,
     pub screenshot_pending: bool,
     error: Option<String>,
@@ -543,6 +564,8 @@ impl SheetsApp {
             timeline: Vec::new(),
             first_content: None,
             recent_cpu: Vec::with_capacity(120),
+            wheel_zoom: 0.0,
+            pinch: 0.0,
             bench,
             screenshot_pending,
             error: None,
@@ -607,7 +630,7 @@ impl SheetsApp {
         if let Some(l) = self.loader.take() {
             l.cancel();
         }
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = self.file_label(&path);
         if let Some(w) = &self.window {
             w.set_title(&format!("{name} — duck-sheets"));
         }
@@ -657,6 +680,8 @@ impl SheetsApp {
                         dirty: false,
                         calc: crate::calc::Calc::new(extras),
                         pivots: Default::default(),
+                        macros: None,
+                        macros_ok: false,
                     });
                     self.font_key = (0, 0);
                 }
@@ -691,6 +716,11 @@ impl SheetsApp {
                             self.error = Some(e);
                         } else {
                             duck_platform::message_box("Não foi possível abrir o arquivo", &e);
+                            // Nada aberto: volta para uma planilha em branco.
+                            if self.untitled_path.as_deref() != Some(path.as_path()) {
+                                self.new_file();
+                                return true;
+                            }
                         }
                     }
                 }
@@ -812,27 +842,35 @@ impl SheetsApp {
         let show_headers = self.doc.as_ref().and_then(|d| d.current()).is_none_or(|(_, v)| v.headers);
         let hh = if show_headers { (HEADER_H * g).round().max((12.0 * s).round()) } else { 0.0 };
         // Largura do cabeçalho de linhas: o maior número de linha da aba.
-        let rw = if show_headers {
-            let nrows = self.doc.as_ref().and_then(|d| d.current()).map_or(1000, |(_, v)| v.rows.len());
-            let style = self.header_style(g);
-            let text = self.text.as_mut().expect("texto");
-            let digits = nrows.to_string().len().max(3);
-            let w = text.measure_styled(&"0".repeat(digits), style);
-            (w + 12.0 * g).ceil()
-        } else {
-            0.0
-        };
+        // Faixas dos grupos, antes dos cabeçalhos.
+        let (gut_x, gut_y) = self
+            .doc
+            .as_ref()
+            .and_then(|d| d.current())
+            .filter(|(_, v)| v.headers)
+            .map_or((0.0, 0.0), |(_, v)| crate::outline::gutters(&v.outline, s));
+        let rw = gut_x
+            + if show_headers {
+                let nrows = self.doc.as_ref().and_then(|d| d.current()).map_or(1000, |(_, v)| v.rows.len());
+                let style = self.header_style(g);
+                let text = self.text.as_mut().expect("texto");
+                let digits = nrows.to_string().len().max(3);
+                let w = text.measure_styled(&"0".repeat(digits), style);
+                (w + 12.0 * g).ceil()
+            } else {
+                0.0
+            };
         let toolbar = Rect::new(0.0, 0.0, w, tb_h);
         let fbar = Rect::new(0.0, tb_h, w, tb_h + fbar_h);
         let namebox = Rect::new(0.0, fbar.y0, (NAMEBOX_W * s).round(), fbar.y1);
         let formula = Rect::new(namebox.x1 + (34.0 * s).round(), fbar.y0, w, fbar.y1);
-        let gy0 = fbar.y1 + hh;
+        let gy0 = fbar.y1 + gut_y + hh;
         let status = Rect::new(0.0, h - status_h, w, h);
         let tabs_y0 = status.y0 - tabs_h;
         let grid = Rect::new(rw, gy0, (w - sb).max(rw + 1.0), tabs_y0.max(gy0 + 1.0));
-        let colhdr = Rect::new(rw, fbar.y1, grid.x1, gy0);
-        let rowhdr = Rect::new(0.0, gy0, rw, grid.y1);
-        let corner = Rect::new(0.0, fbar.y1, rw, gy0);
+        let colhdr = Rect::new(rw, fbar.y1 + gut_y, grid.x1, gy0);
+        let rowhdr = Rect::new(gut_x, gy0, rw, grid.y1);
+        let corner = Rect::new(gut_x, fbar.y1 + gut_y, rw, gy0);
         let vscroll = Rect::new(grid.x1, gy0, w, grid.y1);
         let tabs_w = (w * 0.6).round();
         let tabs = Rect::new(0.0, tabs_y0, tabs_w, status.y0);
@@ -981,6 +1019,14 @@ impl SheetsApp {
     // --- seleção e navegação -------------------------------------------------
 
     pub(crate) fn move_cur(&mut self, dr: i32, dc: i32, extend: bool, jump: bool) {
+        // Seleções (de linhas e colunas inteiras, por exemplo) não mudam a grade.
+        if !extend
+            && !jump
+            && (dr > 0 || dc > 0)
+            && let Some((r, c)) = self.doc.as_ref().and_then(|d| d.current()).map(|(_, v)| v.cur)
+        {
+            self.grow_grid(r + dr.max(0) as u32, c + dc.max(0) as u32);
+        }
         let Some(doc) = &mut self.doc else { return };
         let slot = &mut doc.sheets[doc.active];
         let (Some(sheet), Some(v)) = (slot.data.clone(), slot.view.as_mut()) else { return };
@@ -1032,7 +1078,29 @@ impl SheetsApp {
         }
     }
 
+    /// Aumenta a grade se a célula fica no fim dela ou depois.
+    fn grow_grid(&mut self, r: u32, c: u32) {
+        let Some(doc) = &mut self.doc else { return };
+        let (mdw, i) = (doc.mdw, doc.active);
+        let slot = &mut doc.sheets[i];
+        let (Some(sheet), Some(v)) = (slot.data.as_ref(), slot.view.as_ref()) else { return };
+        let (r, c) = (r.min(MAX_ROWS - 1), c.min(MAX_COLS - 1));
+        let (more_rows, more_cols) = (r + 1 >= v.rows.len(), c + 1 >= v.cols.len());
+        if (!more_rows || v.rows.len() == MAX_ROWS) && (!more_cols || v.cols.len() == MAX_COLS) {
+            return;
+        }
+        let Some(mut v) = slot.view.take() else { return };
+        if more_rows {
+            v.min.0 = r + 500;
+        }
+        if more_cols {
+            v.min.1 = c + 50;
+        }
+        slot.view = Some(build_view(sheet, mdw, Some(v), None));
+    }
+
     pub fn go_to(&mut self, r: u32, c: u32) {
+        self.grow_grid(r, c);
         self.set_cur(r, c, false);
         self.ensure_visible();
     }
@@ -1075,9 +1143,15 @@ impl SheetsApp {
 
     pub fn set_zoom(&mut self, zoom: i32) {
         if let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) {
-            v.zoom = zoom.clamp(10, 400) as u16;
+            v.zoom = zoom.clamp(crate::zoombar::MIN, crate::zoombar::MAX) as u16;
         }
         self.clamp_scroll();
+    }
+
+    /// Próximo múltiplo de 10 para cima ou para baixo.
+    pub(crate) fn zoom_step(&mut self, up: bool) {
+        let z = self.zoom();
+        self.set_zoom(if up { (z / 10 + 1) * 10 } else { ((z + 9) / 10 - 1) * 10 });
     }
 
     pub(crate) fn zoom(&self) -> i32 {
@@ -1328,6 +1402,24 @@ impl SheetsApp {
             }
             return;
         }
+        // Zoom na barra de status.
+        if g.status.contains(x, y) {
+            if self.doc.as_ref().and_then(|d| d.current()).is_none() {
+                return;
+            }
+            self.commit_edit();
+            let bar = crate::zoombar::layout(&g);
+            match bar.hit(x, y) {
+                Some((crate::ribbon::Act::Drop(d), _)) => self.open_drop(d, bar.menu_anchor(&g), &g),
+                Some((act, _)) => self.run_act(cx, act),
+                None if bar.track.contains(x, y) => {
+                    self.drag = Some(Drag::Zoom);
+                    self.set_zoom(bar.zoom_at(x));
+                }
+                None => {}
+            }
+            return;
+        }
         // Barra de fórmulas: edita a célula ativa ali.
         if g.formula.contains(x, y) && self.doc.as_ref().and_then(|d| d.current()).is_some() {
             match &mut self.editor {
@@ -1372,6 +1464,10 @@ impl SheetsApp {
             }
             return;
         }
+        // Botões, links e macros dos objetos.
+        if g.grid.contains(x, y) && self.object_click(&g, x, y) {
+            return;
+        }
         // Segmentação de dados.
         if g.grid.contains(x, y)
             && let Some((obj, item)) = self.slicer_hit(&g, x, y)
@@ -1410,6 +1506,11 @@ impl SheetsApp {
         let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) else { return };
         let (nr, nc) = (v.rows.len(), v.cols.len());
         // Canto: seleciona tudo.
+        if x < g.rowhdr.x0 || (y >= g.fbar.y1 && y < g.colhdr.y0) {
+            self.commit_edit();
+            self.outline_click(&g, x, y);
+            return;
+        }
         if g.corner.contains(x, y) {
             v.anchor = (0, 0);
             v.cur = (nr - 1, nc - 1);
@@ -1511,6 +1612,8 @@ impl SheetsApp {
                         _ => None,
                     }
                 })
+            } else if g.status.contains(x, y) && self.doc.as_ref().and_then(|d| d.current()).is_some() {
+                crate::zoombar::layout(&g).hit(x, y)
             } else {
                 None
             };
@@ -1529,6 +1632,9 @@ impl SheetsApp {
                     .map(|l| l.target.clone().or_else(|| l.location.clone()).unwrap_or_default()),
                 _ => None,
             };
+            // Link, macro ou controle de um objeto sob o mouse.
+            let action = g.grid.contains(x, y).then(|| self.object_action(&g, x, y)).flatten();
+            let link = link.or_else(|| action.map(|a| a.1));
             let cursor = match (edge, &link) {
                 (Some(Edge::Col(_)), _) => Cursor::ResizeColumn,
                 (Some(Edge::Row(_)), _) => Cursor::ResizeRow,
@@ -1544,6 +1650,10 @@ impl SheetsApp {
             return changed;
         };
         let g = self.geom();
+        if matches!(drag, Drag::Zoom) {
+            self.set_zoom(crate::zoombar::layout(&g).zoom_at(x));
+            return true;
+        }
         let (thumb_v, thumb_h) = (self.vthumb(&g), self.hthumb(&g));
         let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) else { return false };
         match drag {
@@ -1569,6 +1679,7 @@ impl SheetsApp {
                 let t = ((x - grab - g.hscroll.x0) / track.max(1.0)).clamp(0.0, 1.0) as f64;
                 v.scroll_x = min + t * (max - min);
             }
+            Drag::Zoom => {}
             Drag::Select | Drag::Cols | Drag::Rows => {
                 // Fora da grade: rola na direção do mouse.
                 let main = g.quads[3].rect;
@@ -1629,7 +1740,7 @@ impl SheetsApp {
 
     /// Segue um hiperlink: lugar dentro do arquivo (`Aba!A1`) ou endereço
     /// externo (só `http`, `https` e `mailto`, no programa padrão).
-    fn follow_link(&mut self, link: &duck_core::Hyperlink) {
+    pub(crate) fn follow_link(&mut self, link: &duck_core::Hyperlink) {
         if let Some(loc) = link.location.as_deref().filter(|l| !l.is_empty()) {
             let loc = loc.trim_start_matches('#');
             let (sheet, cell) = match loc.rfind('!') {
@@ -1793,6 +1904,7 @@ impl SheetsApp {
                 match parse_range(self.namebox.text.trim()) {
                     Some((a, b)) => {
                         // Célula ativa no primeiro canto; seleção até o outro.
+                        self.grow_grid(b.0, b.1);
                         self.go_to(a.0, a.1);
                         if let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) {
                             v.anchor = (b.0.min(v.rows.len() - 1), b.1.min(v.cols.len() - 1));
@@ -1833,8 +1945,10 @@ impl SheetsApp {
                         v.cur = (v.rows.len() - 1, v.cols.len() - 1);
                     }
                 }
-                "+" | "=" if !shift => self.set_zoom(self.zoom() + 10),
-                "-" if !shift => self.set_zoom(self.zoom() - 10),
+                // O "+" do teclado principal precisa de Shift.
+                "+" => self.zoom_step(true),
+                "=" if !shift => self.zoom_step(true),
+                "-" if !shift => self.zoom_step(false),
                 "0" if !shift => self.set_zoom(100),
                 other => {
                     let other = other.to_string();
@@ -2072,14 +2186,15 @@ impl App for SheetsApp {
         self.waker = Some(cx.waker());
         self.window = Some(window.clone());
         // A leitura começa já: corre junto com a GPU e as fontes.
-        if self.opts.new_file {
-            self.new_file();
-        } else if let Some(p) = self.opts.path.clone() {
-            self.open(p, cx.waker());
-        } else if self.opts.bench || self.opts.screenshot.is_some() {
-            self.error = Some("informe o arquivo".into());
-            cx.exit();
-            return;
+        match self.opts.path.clone() {
+            Some(p) if !self.opts.new_file => self.open(p, cx.waker()),
+            None if self.opts.bench && !self.opts.new_file => {
+                self.error = Some("informe o arquivo".into());
+                cx.exit();
+                return;
+            }
+            // Sem arquivo: planilha em branco, como no Excel.
+            _ => self.new_file(),
         }
         let (w, h) = window.inner_size();
         let vsync = !self.opts.bench;
@@ -2149,6 +2264,14 @@ impl App for SheetsApp {
                 }
                 true
             }
+            Event::Pinch(d) => {
+                // Pinça no touchpad (macOS): zoom contínuo.
+                self.pinch += d * self.zoom() as f64;
+                let step = self.pinch.trunc();
+                self.pinch -= step;
+                self.set_zoom(self.zoom() + step as i32);
+                true
+            }
             Event::FileDropped(p) => {
                 self.open(p, cx.waker());
                 true
@@ -2161,8 +2284,17 @@ impl App for SheetsApp {
                     WheelDelta::Pixels { x, y } => (x / g.g as f64, y / g.g as f64),
                 };
                 if modifiers.ctrl {
-                    let step = if dy > 0.0 { 10 } else { -10 };
-                    self.set_zoom(self.zoom() + step);
+                    // Roda de precisão e touchpad mandam pedaços: um passo por
+                    // entalhe (60) acumulado.
+                    if self.wheel_zoom * dy < 0.0 {
+                        self.wheel_zoom = 0.0;
+                    }
+                    self.wheel_zoom += dy;
+                    while self.wheel_zoom.abs() >= 59.0 {
+                        let up = self.wheel_zoom > 0.0;
+                        self.wheel_zoom -= if up { 60.0 } else { -60.0 };
+                        self.zoom_step(up);
+                    }
                 } else if let Some(panel) = self.filter_panel.as_mut().filter(|p| p.rect.contains(mx, my)) {
                     panel.scroll_by(if dy > 0.0 { -3 } else { 3 });
                 } else if g.tabs.contains(mx, my) {
@@ -2283,12 +2415,6 @@ impl App for SheetsApp {
             self.redraw_later();
         } else if atlas_reset || status == FrameStatus::Skipped || self.screenshot_pending {
             self.redraw_later();
-        }
-        if self.opts.path.is_none() && self.doc.is_none() && self.loader.is_none() && self.timeline.len() == 3
-        {
-            // Sem arquivo na linha de comando: o diálogo abre depois da primeira tela.
-            self.mark("diálogo de abrir");
-            self.pick_and_open(cx);
         }
     }
 }
@@ -2595,6 +2721,20 @@ mod tests {
         assert_eq!(data_edge_col(&sheet, &v, 0, 0, true), 1);
         assert_eq!(data_edge_col(&sheet, &v, 0, 1, true), 3);
         assert_eq!(data_edge_col(&sheet, &v, 0, 3, false), 1);
+    }
+
+    #[test]
+    fn grid_grows() {
+        let (sheet, _, _) = small_sheet();
+        let mut v = build_view(&sheet, 7.0, None, None);
+        assert_eq!((v.rows.len(), v.cols.len()), (1000, 100));
+        v.min = (5000, 400);
+        let v = build_view(&sheet, 7.0, Some(v), None);
+        assert_eq!((v.rows.len(), v.cols.len()), (5000, 400));
+        let mut v = build_view(&sheet, 7.0, Some(v), None);
+        v.min = (u32::MAX, u32::MAX);
+        let v = build_view(&sheet, 7.0, Some(v), None);
+        assert_eq!((v.rows.len(), v.cols.len()), (MAX_ROWS, MAX_COLS));
     }
 
     #[test]

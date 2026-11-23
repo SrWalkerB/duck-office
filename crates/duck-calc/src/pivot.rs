@@ -82,6 +82,10 @@ impl Acc {
 }
 
 /// Resultado do cálculo.
+/// Valores prontos por (linha, coluna, campo de dados).
+pub type CubeValues = HashMap<(Vec<u32>, Vec<u32>, u32), CellValue>;
+
+#[derive(Default)]
 pub struct PivotResult {
     pub row_items: Vec<AxisItem>,
     pub col_items: Vec<AxisItem>,
@@ -103,6 +107,8 @@ pub struct PivotResult {
     pub aux: Vec<u32>,
     /// Ordem de exibição dos itens por (eixo: 0 linhas, 1 colunas; caminho do pai).
     pub order: HashMap<(u8, Vec<u32>), Vec<u32>>,
+    /// Modelo de Dados: valores prontos por (linha, coluna, campo de dados).
+    pub cube: Option<CubeValues>,
 }
 
 /// Fórmula de campo calculado: aritmética sobre nomes de campos (que valem
@@ -299,6 +305,65 @@ struct Level {
 }
 
 /// Calcula a tabela dinâmica.
+/// Ordem dos itens de um campo novo num eixo: números, textos (sem diferenciar
+/// maiúsculas), lógicos, erros e vazio.
+fn item_order(a: &PItem, b: &PItem) -> std::cmp::Ordering {
+    let rank = |x: &PItem| match x {
+        PItem::Num(_) | PItem::Date(_) => 0,
+        PItem::Str(_) => 1,
+        PItem::Bool(_) => 2,
+        PItem::Err(_) => 3,
+        PItem::Missing => 4,
+    };
+    match (a, b) {
+        (PItem::Num(x) | PItem::Date(x), PItem::Num(y) | PItem::Date(y)) => x.total_cmp(y),
+        (PItem::Str(x), PItem::Str(y)) => x.to_lowercase().cmp(&y.to_lowercase()),
+        (PItem::Bool(x), PItem::Bool(y)) => x.cmp(y),
+        _ => rank(a).cmp(&rank(b)),
+    }
+}
+
+/// Muda o eixo de um campo (`Axis::None` = tira da tabela). Um campo que
+/// nunca esteve num eixo ganha os itens do cache, em ordem, e o subtotal.
+pub fn set_axis(t: &mut PivotTable, cache: &PivotCache, field: usize, axis: duck_core::pivot::Axis) {
+    use duck_core::pivot::{Axis, FieldItem};
+    let id = field as i32;
+    t.row_fields.retain(|&f| f != id);
+    t.col_fields.retain(|&f| f != id);
+    t.page_fields.retain(|p| p.0 != field as u32);
+    let Some(f) = t.fields.get_mut(field) else { return };
+    f.axis = axis;
+    if axis != Axis::None
+        && f.items.is_empty()
+        && let Some(cf) = cache.fields.get(field)
+    {
+        let mut order: Vec<u32> = (0..cf.items.len() as u32).collect();
+        order.sort_by(|&a, &b| item_order(&cf.items[a as usize], &cf.items[b as usize]));
+        f.items = order.into_iter().map(|x| FieldItem { x: Some(x), ..Default::default() }).collect();
+        if f.default_subtotal {
+            f.items.push(FieldItem { t: Some("default".into()), ..Default::default() });
+        }
+    }
+    match axis {
+        Axis::Row => t.row_fields.push(id),
+        Axis::Col => t.col_fields.push(id),
+        Axis::Page => t.page_fields.push((field as u32, None)),
+        _ => {}
+    }
+}
+
+/// Colunas de rótulos de linha: uma só na forma compacta; nas outras, uma por
+/// campo que não é compacto.
+pub fn label_cols(t: &PivotTable) -> u32 {
+    let n = t.row_fields.len();
+    let extra = t
+        .row_fields
+        .iter()
+        .take(n.saturating_sub(1))
+        .filter(|&&f| f >= 0 && t.fields.get(f as usize).is_some_and(|f| !(f.compact && f.outline)));
+    1 + extra.count() as u32
+}
+
 pub fn compute(t: &PivotTable, cache: &PivotCache, rec: &Records) -> PivotResult {
     let nf = t.fields.len();
     let n_data = t.data_fields.len().max(1);
@@ -471,6 +536,7 @@ pub fn compute(t: &PivotTable, cache: &PivotCache, rec: &Records) -> PivotResult
     // Sem campo de valores e sem campos nos eixos: o Excel não mostra nada.
     if t.data_fields.is_empty() && t.row_fields.is_empty() && t.col_fields.is_empty() {
         return PivotResult {
+            cube: None,
             row_items: Vec::new(),
             col_items: Vec::new(),
             row_paths: Vec::new(),
@@ -502,6 +568,7 @@ pub fn compute(t: &PivotTable, cache: &PivotCache, rec: &Records) -> PivotResult
         }
     }
     PivotResult {
+        cube: None,
         row_items,
         col_items,
         row_paths,
@@ -973,6 +1040,15 @@ pub fn data_value(t: &PivotTable, r: &PivotResult, ri: usize, ci: usize) -> Opti
     let citem = r.col_items.get(ci)?;
     let k = if t.row_fields.contains(&-2) { ritem.i } else { citem.i } as usize;
     let (rp, cp) = (r.row_paths.get(ri)?, r.col_paths.get(ci)?);
+    if let Some(cube) = &r.cube {
+        // Célula vazia com legenda: o Excel guarda "-" como zero.
+        return cube.get(&(rp.clone(), cp.clone(), k as u32)).cloned().or_else(|| {
+            t.missing_caption.as_ref().map(|m| match m.trim() {
+                "-" => CellValue::Number(0.0),
+                m => CellValue::Text(m.to_string()),
+            })
+        });
+    }
     let raw = |p: &[u32], q: &[u32]| -> Option<Result<f64, ()>> {
         let accs = r.cells.get(&(p.to_vec(), q.to_vec()))?;
         acc_value(t, &r.calc, accs, k)
@@ -1170,6 +1246,8 @@ mod tests {
             show_error: false,
             error_caption: String::new(),
             filters: Vec::new(),
+            missing_caption: None,
+            cube: None,
         };
         (t, cache, rec)
     }

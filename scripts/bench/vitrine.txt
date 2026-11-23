@@ -1,0 +1,15 @@
+vitrine.dinâmicas = 0
+vitrine.dinâmicas: células iguais = 0
+vitrine.dinâmicas: mesmo layout = 0
+vitrine.fórmulas = 2
+vitrine.fórmulas iguais ao Excel = 1
+vitrine.gráficos: séries = 3
+vitrine.gráficos: séries iguais ao Excel = 0
+vitrine.links internos = 1
+vitrine.links internos que resolvem = 1
+vitrine.objetos: formas = 9
+vitrine.objetos: gráficos = 2
+vitrine.objetos: imagens = 3
+vitrine.salvar com edições (1 = certo) = 1
+vitrine.salvar com linhas inseridas (1 = certo) = 1
+vitrine.salvar sem mudar (1 = certo) = 1

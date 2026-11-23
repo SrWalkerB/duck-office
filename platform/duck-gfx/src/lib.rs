@@ -43,6 +43,9 @@ pub const KIND_DASH: u32 = 2;
 pub const KIND_GLYPH_ROT: u32 = 3;
 /// Triângulo: vértices em `rect.xy`, `rect.zw` e `uv.xy` (gráficos).
 pub const KIND_TRI: u32 = 4;
+/// Segmento de reta suavizado: `rect` = as duas pontas, `uv[0]` = meia
+/// espessura.
+pub const KIND_LINE: u32 = 6;
 /// Imagem: `uv` = região (0..1) do atlas de imagens (RGBA).
 pub const KIND_IMAGE: u32 = 5;
 /// Lado do atlas de imagens (pixels).
@@ -73,6 +76,12 @@ impl Instance {
     #[inline]
     pub fn triangle(a: [f32; 2], b: [f32; 2], c: [f32; 2], color: [u8; 4]) -> Self {
         Self { rect: [a[0], a[1], b[0], b[1]], uv: [c[0], c[1], c[0], c[1]], color, kind: KIND_TRI }
+    }
+
+    /// Segmento de reta suavizado, com pontas redondas (sem recorte na GPU).
+    #[inline]
+    pub fn line(a: [f32; 2], b: [f32; 2], w: f32, color: [u8; 4]) -> Self {
+        Self { rect: [a[0], a[1], b[0], b[1]], uv: [w / 2.0, 0.0, 0.0, 0.0], color, kind: KIND_LINE }
     }
 
     /// Imagem: `uv` = (u0, v0, u1, v1) no atlas de imagens; `alpha` = opacidade.
@@ -180,6 +189,16 @@ fn vs(in: VIn) -> VOut {
             p = in.uv.xy;
         }
     }
+    if (in.kind == 6u) {
+        // Retângulo em volta do segmento, com folga para a borda suave.
+        let d = in.rect.zw - in.rect.xy;
+        let len = max(length(d), 0.001);
+        let u = d / len;
+        let n = vec2<f32>(-u.y, u.x);
+        let e = in.uv.x + 1.0;
+        let s = corner * 2.0 - vec2<f32>(1.0);
+        p = mix(in.rect.xy, in.rect.zw, corner.x) + u * s.x * e + n * s.y * e;
+    }
     if ((in.kind & 0xFFu) == 3u) {
         // Anti-horário na tela (y para baixo).
         let a = radians(f32(in.kind >> 8u) / 100.0 - 360.0);
@@ -192,6 +211,10 @@ fn vs(in: VIn) -> VOut {
     out.color = in.color;
     out.kind = in.kind;
     out.bounds = in.uv;
+    if (in.kind == 6u) {
+        out.bounds = in.rect;
+        out.uv = in.uv.xy;
+    }
     return out;
 }
 
@@ -201,6 +224,13 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         // Nível explícito: amostragem fora de fluxo uniforme.
         let c = textureSampleLevel(images, smp, in.uv, 0.0);
         return vec4<f32>(c.rgb, c.a * in.color.a);
+    }
+    if (in.kind == 6u) {
+        let a = in.bounds.xy;
+        let d = in.bounds.zw - a;
+        let t = clamp(dot(in.pos.xy - a, d) / max(dot(d, d), 0.000001), 0.0, 1.0);
+        let dist = length(in.pos.xy - a - d * t);
+        return vec4<f32>(in.color.rgb, in.color.a * clamp(in.uv.x + 0.5 - dist, 0.0, 1.0));
     }
     if (in.kind == 1u) {
         let a = textureLoad(atlas, vec2<i32>(floor(in.uv)), 0).r;

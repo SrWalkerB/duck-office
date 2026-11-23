@@ -127,6 +127,80 @@ pub fn patch_cache_source(xml: &[u8], r: CellRange) -> Vec<u8> {
     [&xml[..t.start + v0], &val[..], &xml[t.start + v1..]].concat()
 }
 
+/// Propriedades de um controle com a marca nova. `None` = já estava assim.
+pub fn patch_control(xml: &[u8], checked: bool) -> Option<Vec<u8>> {
+    let t = find_tag(xml, 0, b"formControlPr")?;
+    let had = crate::xml::attr(t.attrs, b"checked") == Some(b"Checked");
+    if had == checked {
+        return None;
+    }
+    let tag = &xml[t.start..t.end];
+    let new = match memmem::find(tag, b" checked=\"") {
+        Some(i) => {
+            let end = i + 10 + memchr::memchr(b'"', &tag[i + 10..])? + 1;
+            let mark: &[u8] = if checked { b" checked=\"Checked\"" } else { b"" };
+            [&tag[..i], mark, &tag[end..]].concat()
+        }
+        None => {
+            let at = memmem::find(tag, b"objectType=")? - 1;
+            [&tag[..at], b" checked=\"Checked\"", &tag[at..]].concat()
+        }
+    };
+    Some([&xml[..t.start], &new[..], &xml[t.end..]].concat())
+}
+
+/// Marcas dos controles no desenho VML (id da forma → marcado). `None` =
+/// nada mudou.
+pub fn patch_vml_checked(xml: &[u8], marks: &std::collections::HashMap<u32, bool>) -> Option<Vec<u8>> {
+    const MARK: &[u8] = b"<x:Checked>1</x:Checked>";
+    let mut out = Vec::with_capacity(xml.len() + 64);
+    let mut pos = 0;
+    let mut changed = false;
+    while let Some(i) = memmem::find(&xml[pos..], b"_x0000_s").map(|i| pos + i) {
+        let digits = xml[i + 8..].iter().take_while(|b| b.is_ascii_digit()).count();
+        let id: u32 = std::str::from_utf8(&xml[i + 8..i + 8 + digits]).ok()?.parse().unwrap_or(0);
+        out.extend_from_slice(&xml[pos..i + 8 + digits]);
+        pos = i + 8 + digits;
+        let Some(&want) = marks.get(&id) else { continue };
+        // O `<x:ClientData>` desta forma (antes da próxima).
+        let Some(end) = memmem::find(&xml[pos..], b"</x:ClientData>").map(|k| pos + k) else { break };
+        if memmem::find(&xml[pos..end], b"</v:shape>").is_some() {
+            continue;
+        }
+        let body = &xml[pos..end];
+        let a = memmem::find(body, b"<x:Checked>");
+        let had = a.is_some_and(|a| body[a + 11..].first() == Some(&b'1'));
+        if had == want {
+            continue;
+        }
+        changed = true;
+        match a {
+            Some(a) => {
+                let z = a + memmem::find(&body[a..], b"</x:Checked>")? + 12;
+                out.extend_from_slice(&body[..a]);
+                if want {
+                    out.extend_from_slice(MARK);
+                }
+                out.extend_from_slice(&body[z..]);
+            }
+            None => {
+                // Na ordem do Excel: antes do que vem depois de `Checked`.
+                let at = [&b"<x:FmlaLink>"[..], b"<x:NoThreeD", b"<x:FirstButton"]
+                    .iter()
+                    .filter_map(|t| memmem::find(body, t))
+                    .min()
+                    .unwrap_or(body.len());
+                out.extend_from_slice(&body[..at]);
+                out.extend_from_slice(MARK);
+                out.extend_from_slice(&body[at..]);
+            }
+        }
+        pos = end;
+    }
+    out.extend_from_slice(&xml[pos..]);
+    changed.then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,6 +218,23 @@ mod tests {
         assert!(out.contains("<xdr:sp/></xdr:twoCellAnchor><xdr:absoluteAnchor>"), "{out}");
         // Número diferente de âncoras: fica como está.
         assert_eq!(patch_anchors(xml, &a[..1]), xml.to_vec());
+    }
+
+    #[test]
+    fn control_marks() {
+        let on = br#"<?xml version="1.0"?><formControlPr xmlns="m" objectType="Radio" checked="Checked" firstButton="1"/>"#;
+        let off = patch_control(on, false).unwrap();
+        assert!(String::from_utf8_lossy(&off).contains(r#"objectType="Radio" firstButton="1"/>"#));
+        assert_eq!(patch_control(on, true), None);
+        let back = patch_control(&off, true).unwrap();
+        assert!(String::from_utf8_lossy(&back).contains(r#"xmlns="m" checked="Checked" objectType"#));
+
+        let vml = b"<v:shape id=\"_x0000_s10\" o:spid=\"x\"><x:ClientData ObjectType=\"Radio\"><x:TextVAlign>Center</x:TextVAlign><x:Checked>1</x:Checked><x:FmlaLink>$A$1</x:FmlaLink></x:ClientData></v:shape><v:shape id=\"_x0000_s11\"><x:ClientData ObjectType=\"Radio\"><x:NoThreeD/></x:ClientData></v:shape>";
+        let marks = [(10, false), (11, true)].into_iter().collect();
+        let out = String::from_utf8(patch_vml_checked(vml, &marks).unwrap()).unwrap();
+        assert!(out.contains("</x:TextVAlign><x:FmlaLink>"), "{out}");
+        assert!(out.contains("<x:Checked>1</x:Checked><x:NoThreeD/>"), "{out}");
+        assert_eq!(patch_vml_checked(out.as_bytes(), &marks), None);
     }
 
     #[test]

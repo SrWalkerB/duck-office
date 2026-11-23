@@ -14,6 +14,8 @@ use duck_core::{CellChange, CellRange, CellValue, Command, Sheet, StringTable};
 #[derive(Default)]
 pub struct PivotState {
     pub loaded: HashMap<u32, (PivotCache, Records)>,
+    /// Modelo de Dados.
+    pub cube: crate::cube::CubeState,
 }
 
 /// Valor de célula de um item (rótulo).
@@ -109,6 +111,17 @@ pub fn render(
             out.push((row, dc + j as u32, v));
         }
     }
+    // Cabeçalho dos campos de linha (formas tabular e de tópicos).
+    if dr > r0 {
+        for (lvl, &f) in t.row_fields.iter().enumerate().take(label_cols as usize) {
+            let Some(pf) = usize::try_from(f).ok().and_then(|f| t.fields.get(f)) else { continue };
+            if pf.compact && pf.outline {
+                continue;
+            }
+            let name = pf.name.clone().or_else(|| cache.fields.get(f as usize).map(|c| c.name.clone()));
+            out.push((dr - 1, c0 + lvl as u32, CellValue::Text(name.unwrap_or_default())));
+        }
+    }
     // Cabeçalho das colunas (quando há campos nas colunas).
     if t.col_fields.iter().any(|&f| f >= 0) && dr > r0 {
         let hr = dr - 1;
@@ -202,6 +215,13 @@ impl crate::app::SheetsApp {
         }
         if chosen.iter().all(|c| !*c) {
             chosen = vec![true; s.items.len()];
+        }
+        if link.is_cube() {
+            self.message = match self.cube_slicer(obj, &chosen) {
+                Ok(n) => format!("Tabelas dinâmicas atualizadas ({n} células)"),
+                Err(e) => e,
+            };
+            return;
         }
         let visible: HashSet<u32> =
             link.item_x.iter().zip(&chosen).filter(|(_, c)| **c).map(|(x, _)| *x).collect();
@@ -326,21 +346,12 @@ impl crate::app::SheetsApp {
             return;
         }
         let cache_id = meta.id;
-        let path = doc.path.clone();
-        if !doc.pivots.loaded.contains_key(&cache_id) {
-            let mut c = meta.clone();
-            let Some(rec) = duck_xlsx::Book::open(&path).ok().and_then(|b| b.read_pivot_records(&mut c))
-            else {
-                self.message = "Não foi possível ler os registros da tabela dinâmica".into();
-                return;
-            };
-            if let Some(d) = self.doc.as_mut() {
-                d.pivots.loaded.insert(cache_id, (c, rec));
-            }
+        if let Err(e) = self.ensure_pivot_cache(cache_id) {
+            self.message = e;
+            return;
         }
         let Some(doc) = self.doc.as_ref() else { return };
         let (cache, rec) = &doc.pivots.loaded[&cache_id];
-        let names: HashSet<&str> = tables.iter().map(|t| t.1.as_str()).collect();
 
         let mut step: crate::edit::Step = Vec::new();
         let mut total = 0;
@@ -349,7 +360,7 @@ impl crate::app::SheetsApp {
             let mut layout = sh.layout.clone();
             let mut cells = Vec::new();
             for (ti, t) in sh.layout.pivots.iter().enumerate() {
-                if t.cache_id != cache_id || !names.contains(t.name.as_str()) {
+                if t.cache_id != cache_id || !tables.iter().any(|x| x.0 == sh.tab_id && x.1 == t.name) {
                     continue;
                 }
                 let mut nt = t.clone();
@@ -385,5 +396,75 @@ impl crate::app::SheetsApp {
             self.switch_sheet(active);
         }
         self.message = format!("Tabelas dinâmicas atualizadas ({total} células)");
+    }
+
+    /// Lê os registros de um cache, se ainda não foram lidos.
+    pub fn ensure_pivot_cache(&mut self, id: u32) -> Result<(), String> {
+        let doc = self.doc.as_mut().ok_or("sem planilha")?;
+        if doc.pivots.loaded.contains_key(&id) {
+            return Ok(());
+        }
+        let meta = doc.calc.extras.pivot_caches.iter().find(|c| c.id == id);
+        let mut c = meta.cloned().ok_or("Cache da tabela dinâmica não encontrado")?;
+        if c.external {
+            return Err("Tabela dinâmica do Modelo de Dados".into());
+        }
+        let rec = duck_xlsx::Book::open(&doc.path)
+            .ok()
+            .and_then(|b| b.read_pivot_records(&mut c))
+            .ok_or("Não foi possível ler os registros da tabela dinâmica")?;
+        doc.pivots.loaded.insert(id, (c, rec));
+        Ok(())
+    }
+
+    /// Aplica definições novas de dinâmicas (aba, índice, tabela): recalcula,
+    /// reescreve as células e o layout, num passo. Devolve quantas células
+    /// mudaram.
+    pub fn apply_pivots(&mut self, list: Vec<(usize, usize, PivotTable)>) -> Result<usize, String> {
+        // As do Modelo de Dados têm conta própria.
+        let (cube, list): (Vec<_>, Vec<_>) = list.into_iter().partition(|x| x.2.cube.is_some());
+        let mut total = 0;
+        if !cube.is_empty() {
+            total += self.cube_apply(&cube, &[], &mut |_| {})?;
+        }
+        for (_, _, t) in &list {
+            self.ensure_pivot_cache(t.cache_id)?;
+        }
+        let doc = self.doc.as_ref().ok_or("sem planilha")?;
+        let mut step: crate::edit::Step = Vec::new();
+        for (si, slot) in doc.sheets.iter().enumerate() {
+            if !list.iter().any(|x| x.0 == si) {
+                continue;
+            }
+            let sh = slot.data.as_ref().ok_or("A aba ainda está carregando")?;
+            let mut layout = sh.layout.clone();
+            let mut cells = Vec::new();
+            for (_, ti, t) in list.iter().filter(|x| x.0 == si) {
+                let (cache, rec) = &doc.pivots.loaded[&t.cache_id];
+                let mut nt = t.clone();
+                nt.first_data_col = engine::label_cols(&nt);
+                let res = engine::compute(&nt, cache, rec);
+                let (out, range) = render(&nt, cache, &res);
+                let old = sh.layout.pivots.get(*ti).map_or(range, |o| o.range);
+                cells.extend(changes(sh, &doc.strings, old, out, range));
+                nt.range = range;
+                nt.row_items = res.row_items;
+                nt.col_items = res.col_items;
+                layout.pivots[*ti] = nt;
+            }
+            total += cells.len();
+            let mut cmds = Vec::new();
+            if !cells.is_empty() {
+                cmds.push(Command::SetCells(cells));
+            }
+            if layout != sh.layout {
+                cmds.push(Command::Layout(Box::new(layout)));
+            }
+            step.push((si, Command::Group(cmds)));
+        }
+        if !step.is_empty() && !self.run_step(step) {
+            return Err("A planilha não pode ser editada agora".into());
+        }
+        Ok(total)
     }
 }

@@ -129,9 +129,15 @@ impl crate::app::SheetsApp {
         let mut parts: Vec<String> = Vec::new();
         for s in doc.sheets.iter().filter_map(|s| s.data.as_ref()) {
             for o in &s.layout.objects {
-                if let ObjectKind::Picture { part } = &o.kind
-                    && !parts.contains(part)
-                {
+                let part = match &o.kind {
+                    ObjectKind::Picture { part, .. } => part,
+                    ObjectKind::Shape(s) => match &s.fill {
+                        duck_core::shape::Fill::Picture(part) => part,
+                        _ => continue,
+                    },
+                    _ => continue,
+                };
+                if !parts.contains(part) {
                     parts.push(part.clone());
                 }
             }

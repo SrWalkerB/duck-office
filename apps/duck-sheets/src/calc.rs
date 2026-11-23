@@ -84,11 +84,18 @@ pub struct Calc {
     /// resultado) e as que querem espalhar mas estão bloqueadas.
     pub spills: Spills,
     pub blocked: Spills,
+    /// Quantas vezes os dados de cada aba mudaram (o Modelo de Dados se
+    /// refaz quando a origem dele muda).
+    versions: std::collections::HashMap<usize, u64>,
 }
 
 impl Calc {
     pub fn new(extras: Arc<BookExtras>) -> Self {
         Self { extras, stale: true, pending: Pending::Volatile, ..Default::default() }
+    }
+
+    pub fn version(&self, sheet: usize) -> u64 {
+        self.versions.get(&sheet).copied().unwrap_or(0)
     }
 
     pub fn running(&self) -> bool {
@@ -101,10 +108,12 @@ impl Calc {
         match cmd {
             Command::SetCells(_) | Command::Restore(_) => {
                 self.stale = true;
+                *self.versions.entry(sheet).or_default() += 1;
                 self.pending.add(Pending::Cells(cmd.cells().into_iter().map(|(r, c)| (s, r, c)).collect()));
             }
             Command::Shift(..) | Command::SortRows { .. } => {
                 self.stale = true;
+                *self.versions.entry(sheet).or_default() += 1;
                 self.pending.add(Pending::All);
             }
             Command::Group(v) => v.iter().for_each(|c| self.note(sheet, c)),
@@ -439,6 +448,7 @@ impl crate::app::SheetsApp {
             touched.push(i);
         }
         for i in touched {
+            *doc.calc.versions.entry(i).or_default() += 1;
             // A formatação condicional depende dos valores.
             let n = doc.sheets[i].data.as_ref().map_or(0, |s| s.layout.cond.len());
             if let Some(v) = doc.sheets[i].view.as_mut() {

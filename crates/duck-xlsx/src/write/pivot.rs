@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use duck_core::pivot::{AxisItem, PivotFilter, PivotTable};
+use duck_core::pivot::{Axis, AxisItem, PivotField, PivotFilter, PivotTable};
 use memchr::memmem;
 
 use super::cellxml::{cell_ref, escape_attr};
@@ -47,6 +47,134 @@ fn retag(tag_src: &[u8], set: &[(&[u8], Option<Vec<u8>>)]) -> Vec<u8> {
         }
     }
     out.extend_from_slice(if self_closing { b"/>" } else { b">" });
+    out
+}
+
+fn axis_attr(a: Axis) -> Option<Vec<u8>> {
+    Some(match a {
+        Axis::Row => b"axisRow".to_vec(),
+        Axis::Col => b"axisCol".to_vec(),
+        Axis::Page => b"axisPage".to_vec(),
+        Axis::Values => b"axisValues".to_vec(),
+        Axis::None => return None,
+    })
+}
+
+/// `<items>` de um campo, a partir do modelo.
+fn items_xml(f: &PivotField) -> Vec<u8> {
+    let mut s = format!("<items count=\"{}\">", f.items.len());
+    for it in &f.items {
+        s.push_str("<item");
+        if it.hidden {
+            s.push_str(" h=\"1\"");
+        }
+        if it.collapsed {
+            s.push_str(" sd=\"0\"");
+        }
+        match (&it.t, it.x) {
+            (Some(t), _) => s.push_str(&format!(" t=\"{t}\"")),
+            (None, Some(x)) => s.push_str(&format!(" x=\"{x}\"")),
+            _ => {}
+        }
+        s.push_str("/>");
+    }
+    s.push_str("</items>");
+    s.into_bytes()
+}
+
+/// `<rowFields>`/`<colFields>`; vazio = sem o elemento.
+fn fields_xml(tag: &str, list: &[i32]) -> Vec<u8> {
+    if list.is_empty() {
+        return Vec::new();
+    }
+    let body: String = list.iter().map(|f| format!("<field x=\"{f}\"/>")).collect();
+    format!("<{tag} count=\"{}\">{body}</{tag}>", list.len()).into_bytes()
+}
+
+/// O `pivotField` (tag e conteúdo) com a ordenação por valor do modelo.
+/// `None` = a do arquivo já é essa.
+fn sort_xml(body: &[u8], tag: &[u8], f: &PivotField) -> Option<Vec<u8>> {
+    use duck_core::pivot::SortType;
+    let want = match f.sort {
+        SortType::Manual => None,
+        SortType::Ascending => Some(b"ascending".to_vec()),
+        SortType::Descending => Some(b"descending".to_vec()),
+    };
+    let t = find_tag(tag, 0, b"pivotField")?;
+    let had = crate::xml::attr(t.attrs, b"sortType").filter(|v| *v != b"manual").map(<[u8]>::to_vec);
+    let scope = find_tag(body, 0, b"autoSortScope");
+    // Referências do arquivo, na mesma forma do modelo.
+    let mut by_data = None;
+    let mut refs = Vec::new();
+    if let Some(s) = &scope {
+        let n = |a: &[u8], k: &[u8]| {
+            crate::xml::attr(a, k).and_then(|v| std::str::from_utf8(v).ok()?.parse::<i64>().ok())
+        };
+        crate::xml::for_each(crate::xml::inner(body, s, b"autoSortScope"), b"reference", |a, b| {
+            let x = find_tag(b, 0, b"x").and_then(|x| n(x.attrs, b"v")).unwrap_or(0) as u32;
+            match n(a, b"field") {
+                Some(4_294_967_294) | Some(-2) => by_data = Some(x),
+                Some(k) if k >= 0 => refs.push((k as u32, x)),
+                _ => {}
+            }
+        });
+    }
+    if want == had && (want.is_none() || (by_data == f.sort_by_data && refs == f.sort_refs)) {
+        return None;
+    }
+    let mut out = retag(tag, &[(b"sortType", want)]);
+    // Conteúdo sem o `autoSortScope` antigo; o novo vai depois dos itens.
+    let mut rest = body.to_vec();
+    if let Some(s) = scope {
+        let close = b"</autoSortScope>";
+        let end = memmem::find(&rest[s.end..], close).map_or(s.end, |i| s.end + i + close.len());
+        rest.drain(s.start..end);
+    }
+    if let Some(d) = f.sort_by_data {
+        let mut s = String::from(
+            "<autoSortScope><pivotArea dataOnly=\"0\" outline=\"0\" fieldPosition=\"0\"><references count=\"",
+        );
+        s.push_str(&format!(
+            "{}\"><reference field=\"4294967294\" count=\"1\" selected=\"0\"><x v=\"{d}\"/></reference>",
+            1 + f.sort_refs.len()
+        ));
+        for (k, x) in &f.sort_refs {
+            s.push_str(&format!(
+                "<reference field=\"{k}\" count=\"1\" selected=\"0\"><x v=\"{x}\"/></reference>"
+            ));
+        }
+        s.push_str("</references></pivotArea></autoSortScope>");
+        let at = memmem::find(&rest, b"</items>").map_or(0, |i| i + 8);
+        rest.splice(at..at, s.into_bytes());
+    }
+    out.extend_from_slice(&rest);
+    Some(out)
+}
+
+/// Ordenações mudadas (por valor ou manual), campo a campo.
+fn patch_sort(xml: &[u8], t: &PivotTable) -> Vec<u8> {
+    let Some(pfs) = find_tag(xml, 0, b"pivotFields") else { return xml.to_vec() };
+    let mut out = Vec::with_capacity(xml.len());
+    let mut pos = 0;
+    let mut at = pfs.end;
+    let fields_end = memmem::find(&xml[at..], b"</pivotFields>").map_or(xml.len(), |i| at + i);
+    let mut fi = 0;
+    while let Some(pf) = find_tag(xml, at, b"pivotField").filter(|p| p.start < fields_end) {
+        at = pf.end;
+        if !pf.self_closing {
+            let end = memmem::find(&xml[at..], b"</pivotField>").map_or(xml.len(), |i| at + i);
+            if let Some(f) = t.fields.get(fi)
+                && let Some(new) = sort_xml(&xml[at..end], &xml[pf.start..pf.end], f)
+            {
+                out.extend_from_slice(&xml[pos..pf.start]);
+                out.extend_from_slice(&new);
+                pos = end;
+            }
+            at = end;
+        }
+        fi += 1;
+    }
+    out.extend_from_slice(&xml[pos..]);
     out
 }
 
@@ -111,7 +239,10 @@ pub fn patch_pivot_table(xml: &[u8], t: &PivotTable) -> Vec<u8> {
         cell_ref(t.range.first_row, t.range.first_col, &mut r);
         r.push(b':');
         cell_ref(t.range.last_row, t.range.last_col, &mut r);
-        let new = retag(&out[loc.start..loc.end], &[(b"ref", Some(r))]);
+        let new = retag(
+            &out[loc.start..loc.end],
+            &[(b"ref", Some(r)), (b"firstDataCol", Some(t.first_data_col.to_string().into_bytes()))],
+        );
         out = [&out[..loc.start], &new[..], &out[loc.end..]].concat();
     }
     // Itens escondidos, campo a campo.
@@ -119,13 +250,31 @@ pub fn patch_pivot_table(xml: &[u8], t: &PivotTable) -> Vec<u8> {
         let mut pos = pfs.end;
         let mut fi = 0usize;
         let mut rebuilt: Vec<u8> = out[..pos].to_vec();
-        while let Some(pf) = find_tag(&out, pos, b"pivotField") {
-            rebuilt.extend_from_slice(&out[pos..pf.end]);
+        let fields_end = memmem::find(&out[pos..], b"</pivotFields>").map_or(out.len(), |i| pos + i);
+        while let Some(pf) = find_tag(&out, pos, b"pivotField").filter(|p| p.start < fields_end) {
+            rebuilt.extend_from_slice(&out[pos..pf.start]);
+            // Campo que entrou ou saiu de um eixo.
+            let axis = t.fields.get(fi).map_or(Axis::None, |f| f.axis);
+            let tag = match axis_attr(axis) {
+                a if crate::xml::attr(pf.attrs, b"axis") == a.as_deref() => out[pf.start..pf.end].to_vec(),
+                a => retag(&out[pf.start..pf.end], &[(b"axis", a)]),
+            };
             pos = pf.end;
             if pf.self_closing {
+                // Sem filhos no arquivo: ganha os itens, se tem algum agora.
+                match t.fields.get(fi).filter(|f| !f.items.is_empty()) {
+                    Some(f) => {
+                        rebuilt.extend_from_slice(&tag[..tag.len() - 2]);
+                        rebuilt.push(b'>');
+                        rebuilt.extend_from_slice(&items_xml(f));
+                        rebuilt.extend_from_slice(b"</pivotField>");
+                    }
+                    None => rebuilt.extend_from_slice(&tag),
+                }
                 fi += 1;
                 continue;
             }
+            rebuilt.extend_from_slice(&tag);
             let close = memmem::find(&out[pf.end..], b"</pivotField>").map_or(out.len(), |i| pf.end + i);
             // Itens deste campo.
             let mut k = 0usize;
@@ -154,8 +303,21 @@ pub fn patch_pivot_table(xml: &[u8], t: &PivotTable) -> Vec<u8> {
             }
         }
         rebuilt.extend_from_slice(&out[pos..]);
-        out = rebuilt;
+        out = patch_sort(&rebuilt, t);
     }
+    // Campos dos eixos.
+    out = replace_or_insert(
+        &out,
+        b"rowFields",
+        &fields_xml("rowFields", &t.row_fields),
+        &[b"rowItems", b"colFields", b"colItems", b"pageFields", b"dataFields"],
+    );
+    out = replace_or_insert(
+        &out,
+        b"colFields",
+        &fields_xml("colFields", &t.col_fields),
+        &[b"colItems", b"pageFields", b"dataFields", b"formats"],
+    );
     // Linhas e colunas do resultado.
     out = replace_or_insert(
         &out,
@@ -320,6 +482,41 @@ pub fn patch_slicer_cache(xml: &[u8], selected: &HashMap<u32, bool>) -> Vec<u8> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Campo de linha trocado e ordenado por valor: eixo, itens, `rowFields`
+    /// e `autoSortScope`, e o que foi gravado volta igual.
+    #[test]
+    fn field_swap_and_sort() {
+        use duck_core::pivot::{FieldItem, SortType};
+        let xml = br#"<pivotTableDefinition name="T" cacheId="1"><location ref="A1:B4" firstHeaderRow="1" firstDataRow="1" firstDataCol="1"/><pivotFields count="3"><pivotField axis="axisRow" showAll="0"><items count="2"><item x="0"/><item t="default"/></items></pivotField><pivotField showAll="0"/><pivotField dataField="1" showAll="0"/></pivotFields><rowFields count="1"><field x="0"/></rowFields><rowItems count="1"><i><x/></i></rowItems><colItems count="1"><i/></colItems><dataFields count="1"><dataField name="Soma" fld="2"/></dataFields></pivotTableDefinition>"#;
+        let mut t = crate::pivot::parse_pivot_table(xml).unwrap();
+        // Sem mudança, nada de eixo ou ordem muda.
+        let same = String::from_utf8(patch_pivot_table(xml, &t)).unwrap();
+        assert!(same.contains(r#"<pivotField showAll="0"/>"#) && !same.contains("autoSortScope"), "{same}");
+        t.fields[0].axis = Axis::None;
+        let f = &mut t.fields[1];
+        f.axis = Axis::Row;
+        f.items = vec![
+            FieldItem { x: Some(2), ..Default::default() },
+            FieldItem { x: Some(0), hidden: true, ..Default::default() },
+            FieldItem { t: Some("default".into()), ..Default::default() },
+        ];
+        f.sort = SortType::Descending;
+        f.sort_by_data = Some(0);
+        t.row_fields = vec![1];
+        let out = patch_pivot_table(xml, &t);
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains(r#"<rowFields count="1"><field x="1"/></rowFields>"#), "{text}");
+        assert!(text.contains(r#"<items count="3"><item x="2"/><item h="1" x="0"/><item t="default"/></items><autoSortScope>"#), "{text}");
+        let back = crate::pivot::parse_pivot_table(&out).unwrap();
+        assert_eq!(back.fields[1], t.fields[1]);
+        assert_eq!((back.fields[0].axis, &back.row_fields), (Axis::None, &t.row_fields));
+        // De volta a manual: o `autoSortScope` sai.
+        t.fields[1].sort = SortType::Manual;
+        t.fields[1].sort_by_data = None;
+        let out = String::from_utf8(patch_pivot_table(&out, &t)).unwrap();
+        assert!(!out.contains("autoSortScope") && !out.contains("sortType"), "{out}");
+    }
 
     #[test]
     fn slicer_selection() {

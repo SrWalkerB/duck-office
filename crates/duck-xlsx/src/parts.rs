@@ -19,6 +19,8 @@ use crate::xml::{attr, attr_str, find_tag, for_each, inner, parse_u32, rich_text
 pub struct SheetMeta {
     pub name: String,
     pub hidden: bool,
+    /// `sheetId`.
+    pub id: u32,
     /// Caminho da parte no zip (ex.: `xl/worksheets/sheet1.xml`).
     pub path: String,
 }
@@ -93,6 +95,14 @@ pub fn resolve_links(pkg: &Package, part: &str, links: &mut [duck_core::Hyperlin
     if links.iter().all(|l| l.target.is_none()) {
         return;
     }
+    let map = link_targets(pkg, part);
+    for l in links {
+        l.target = l.target.take().and_then(|id| map.get(&id).cloned());
+    }
+}
+
+/// Endereços dos hiperlinks de uma parte (id → alvo como está no arquivo).
+pub(crate) fn link_targets(pkg: &Package, part: &str) -> std::collections::HashMap<String, String> {
     let (dir, file) = match part.rfind('/') {
         Some(i) => (&part[..i], &part[i + 1..]),
         None => ("", part),
@@ -108,9 +118,7 @@ pub fn resolve_links(pkg: &Package, part: &str, links: &mut [duck_core::Hyperlin
             }
         });
     }
-    for l in links {
-        l.target = l.target.take().and_then(|id| map.get(&id).cloned());
-    }
+    map
 }
 
 /// Junta `dir` + `target`, tratando caminhos absolutos e `..`.
@@ -171,7 +179,8 @@ pub fn read_workbook(pkg: &Package) -> Result<WorkbookMeta, Error> {
             if this_tab == active_tab && !hidden {
                 active = Some(sheets.len());
             }
-            sheets.push(SheetMeta { name, hidden, path: rel.target.clone() });
+            let id = attr(a, b"sheetId").and_then(parse_u32).unwrap_or(0);
+            sheets.push(SheetMeta { name, hidden, id, path: rel.target.clone() });
         }
     });
     // Aba ativa escondida ou de gráfico: a primeira visível.
@@ -439,6 +448,7 @@ pub(crate) fn parse_styles(buf: &[u8]) -> Styles {
                 _ => VAlign::Bottom,
             };
             al.wrap = matches!(attr(t.attrs, b"wrapText"), Some(b"1") | Some(b"true"));
+            al.shrink = matches!(attr(t.attrs, b"shrinkToFit"), Some(b"1") | Some(b"true"));
             al.indent = attr(t.attrs, b"indent").and_then(parse_u32).unwrap_or(0).min(255) as u8;
             al.rotation = match attr(t.attrs, b"textRotation").and_then(parse_u32) {
                 Some(r @ 0..=180) | Some(r @ 255) => r as u8,

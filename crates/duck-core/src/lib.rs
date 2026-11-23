@@ -16,12 +16,15 @@
 //!   é idêntico com qualquer número de threads (ADR-012).
 
 pub mod cond;
+pub mod cube;
 pub mod drawing;
 pub mod edit;
 pub mod input;
 mod layout;
 pub mod numfmt;
+pub mod outline;
 pub mod pivot;
+pub mod shape;
 pub mod shift;
 mod styles;
 
@@ -30,8 +33,8 @@ use std::collections::HashMap;
 pub use cond::{CfApply, CfCtx, CfKind, CfOp, CfRule, CfState, Cfvo, CfvoKind, Period, TextOp};
 pub use edit::{CellChange, CellValue, Command, Edits, OpsHandle, RawCell};
 pub use layout::{
-    AutoFilter, CellRange, ColSpec, FilterColumn, FilterKind, Hyperlink, Layout, Pane, RowSpec, SheetView,
-    Table,
+    AutoFilter, CellRange, ColSpec, ControlRef, FilterColumn, FilterKind, Hyperlink, Layout, Pane, RowSpec,
+    SheetView, Table,
 };
 pub use numfmt::{Formatted, NumFmt};
 pub use shift::{Axis, FormulaOps, Shift};
@@ -885,6 +888,8 @@ impl SheetPart {
 pub struct Sheet {
     pub name: String,
     pub hidden: bool,
+    /// `sheetId` no arquivo (as segmentações apontam por ele).
+    pub tab_id: u32,
     columns: Vec<Column>,
     /// Strings que não estão na tabela compartilhada (inline, resultado de
     /// fórmula): uma tabela por parte, movida sem cópia no merge. A célula
@@ -915,6 +920,7 @@ impl Sheet {
         Self {
             name: name.into(),
             hidden: false,
+            tab_id: 0,
             columns: Vec::new(),
             strings: Vec::new(),
             formula_texts: StringTable::new(),

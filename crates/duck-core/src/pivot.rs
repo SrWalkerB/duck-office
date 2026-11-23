@@ -134,6 +134,8 @@ pub struct PivotField {
     pub name: Option<String>,
     pub num_fmt: Option<u32>,
     pub insert_blank_row: bool,
+    /// Modelo de Dados: na ordem da origem (`dataSourceSort`).
+    pub source_sort: bool,
 }
 
 impl Default for PivotField {
@@ -153,6 +155,7 @@ impl Default for PivotField {
             name: None,
             num_fmt: None,
             insert_blank_row: false,
+            source_sort: false,
         }
     }
 }
@@ -261,4 +264,8 @@ pub struct PivotTable {
     pub error_caption: String,
     /// Filtros de rótulo, data e valor.
     pub filters: Vec<PivotFilter>,
+    /// Texto das células sem valor (`missingCaption`).
+    pub missing_caption: Option<String>,
+    /// Dinâmica do Modelo de Dados: filtros por membro.
+    pub cube: Option<Box<crate::cube::CubePivot>>,
 }

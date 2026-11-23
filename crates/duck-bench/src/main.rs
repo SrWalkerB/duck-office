@@ -18,6 +18,8 @@ mod calc;
 mod emf;
 mod generate;
 mod mem;
+mod olap;
+mod regress;
 mod roundtrip;
 mod showcase;
 mod verify;
@@ -76,10 +78,12 @@ fn main() {
         "parse" => cmd_parse(rest),
         "preview" => cmd_preview(rest),
         "roundtrip" => roundtrip::cmd(rest),
+        "regress" => regress::cmd(rest),
         "calc" => calc::cmd(rest),
         "objetos" => calc::cmd_objects(rest),
         "emf" => emf::cmd_emf(rest),
         "dinamicas" => calc::cmd_pivots(rest),
+        "modelo" => olap::cmd(rest),
         "grupos" => calc::cmd_pivot_groups(rest),
         "celula" => calc::cmd_cell(rest),
         "gen-showcase" => match rest.first() {

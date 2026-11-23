@@ -19,15 +19,15 @@ use crate::xml::{attr, attr_str, find_tag, for_each, inner, unescape_into};
 // ---------------------------------------------------------------------------
 
 /// Um elemento: nome, atributos e conteúdo (vazio se `<x/>`).
-struct El<'a> {
-    name: &'a [u8],
-    attrs: &'a [u8],
-    body: &'a [u8],
+pub(crate) struct El<'a> {
+    pub name: &'a [u8],
+    pub attrs: &'a [u8],
+    pub body: &'a [u8],
 }
 
 /// Filhos diretos de um trecho de XML (respeita elementos aninhados com o
 /// mesmo nome, como grupos dentro de grupos).
-fn children(xml: &[u8]) -> Vec<El<'_>> {
+pub(crate) fn children(xml: &[u8]) -> Vec<El<'_>> {
     let mut out = Vec::new();
     let mut i = 0;
     while let Some(lt) = memchr::memchr(b'<', &xml[i..]).map(|k| i + k) {
@@ -75,7 +75,7 @@ fn children(xml: &[u8]) -> Vec<El<'_>> {
     out
 }
 
-fn child<'a>(xml: &'a [u8], name: &[u8]) -> Option<El<'a>> {
+pub(crate) fn child<'a>(xml: &'a [u8], name: &[u8]) -> Option<El<'a>> {
     children(xml).into_iter().find(|e| e.name == name)
 }
 
@@ -95,7 +95,7 @@ fn marker(xml: &[u8]) -> Marker {
     }
 }
 
-fn num_attr(a: &[u8], k: &[u8]) -> Option<f64> {
+pub(crate) fn num_attr(a: &[u8], k: &[u8]) -> Option<f64> {
     attr(a, k).and_then(|v| std::str::from_utf8(v).ok()?.parse().ok())
 }
 
@@ -134,7 +134,7 @@ fn mods(body: &[u8]) -> (f32, f32, f32, f32) {
 }
 
 /// Cor de um `<a:solidFill>` (ou do conteúdo dele).
-fn color(xml: &[u8]) -> Option<ChartColor> {
+pub(crate) fn color(xml: &[u8]) -> Option<ChartColor> {
     for name in [b"a:srgbClr".as_slice(), b"a:sysClr"] {
         if let Some(t) = find_tag(xml, 0, name) {
             let key: &[u8] = if name == b"a:sysClr" { b"lastClr" } else { b"val" };
@@ -414,6 +414,7 @@ pub fn parse_chart(xml: &[u8]) -> Option<Chart> {
                 chart.title = Some(t);
                 chart.title_text = text_props(el.body);
             }
+            b"c:plotVisOnly" => chart.plot_hidden = attr(el.attrs, b"val") == Some(b"0"),
             b"c:autoTitleDeleted" => auto_deleted = attr(el.attrs, b"val") == Some(b"1"),
             b"c:legend" => {
                 chart.legend_text =
@@ -697,6 +698,34 @@ pub fn read_slicer_caches(pkg: &Package, workbook: &str) -> SlicerCaches {
                 link.item_x.push(idx as u32);
             });
             s.pivot = Some(link);
+        } else if let Some(olap) = find_tag(&x, 0, b"olap") {
+            // Modelo de Dados: os membros do último nível e os escolhidos.
+            let mut link = duck_core::drawing::SlicerPivot {
+                part: target.clone(),
+                source: source.clone(),
+                cache_id: attr_str(olap.attrs, b"pivotCacheId").unwrap_or_default(),
+                ..Default::default()
+            };
+            for_each(&x, b"pivotTable", |a, _| {
+                if let (Some(tab), Some(name)) = (num_attr(a, b"tabId"), attr_str(a, b"name")) {
+                    link.tables.push((tab as u32, name));
+                }
+            });
+            let body = inner(&x, &olap, b"olap");
+            let mut chosen = std::collections::HashSet::new();
+            for_each(body, b"selection", |a, _| chosen.extend(attr_str(a, b"n")));
+            let all = chosen.is_empty() || chosen.iter().any(|c| !c.contains('&'));
+            for_each(body, b"i", |a, _| {
+                let n = attr_str(a, b"n").unwrap_or_default();
+                let nd = attr(a, b"nd").is_some_and(|v| v == b"1");
+                let sel = all || chosen.contains(&n);
+                s.items.push((attr_str(a, b"c").unwrap_or_default(), sel, !nd));
+                link.members.push(n);
+            });
+            if let Some((_, col)) = duck_core::cube::split_unique(&source) {
+                s.caption = col;
+            }
+            s.pivot = Some(link);
         } else if let Some(t) = find_tag(&x, 0, b"x15:tableSlicerCache") {
             let tid = attr_str(t.attrs, b"tableId").unwrap_or_default();
             let col = attr_str(t.attrs, b"column").unwrap_or_default();
@@ -744,6 +773,7 @@ struct Walk<'a> {
     pkg: &'a Package,
     drawing: &'a str,
     rels: &'a [(String, String, String)],
+    links: &'a HashMap<String, String>,
     slicers: &'a HashMap<String, Slicer>,
     timelines: &'a HashMap<String, Timeline>,
     anchor: Anchor,
@@ -753,7 +783,8 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    fn push(&mut self, rect: Option<R>, kind: ObjectKind) {
+    /// `el`: o elemento do objeto (para o nome, o link e a macro).
+    fn push(&mut self, el: &El, rect: Option<R>, kind: ObjectKind) {
         let frac = match (rect, self.top) {
             (Some(r), Some(t)) if t[2] > 0.0 && t[3] > 0.0 => [
                 ((r[0] - t[0]) / t[2]) as f32,
@@ -763,7 +794,19 @@ impl Walk<'_> {
             ],
             _ => [0.0, 0.0, 1.0, 1.0],
         };
-        self.out.push(Object { anchor: self.anchor, frac, kind });
+        let mut o = Object::new(self.anchor, kind);
+        o.frac = frac;
+        o.macro_name = attr_str(el.attrs, b"macro").filter(|m| !m.is_empty());
+        let nv = children(el.body).into_iter().find(|c| c.name.starts_with(b"xdr:nv"));
+        if let Some(c) = nv.as_ref().and_then(|n| child(n.body, b"xdr:cNvPr")) {
+            o.id = num_attr(c.attrs, b"id").unwrap_or(0.0) as u32;
+            o.name = attr_str(c.attrs, b"name").unwrap_or_default();
+            o.hidden = attr(c.attrs, b"hidden") == Some(b"1");
+            o.link = child(c.body, b"a:hlinkClick")
+                .and_then(|h| attr_str(h.attrs, b"r:id"))
+                .and_then(|id| self.links.get(&id).cloned());
+        }
+        self.out.push(o);
     }
 
     /// Visita os elementos de `xml` com `map` levando coordenadas locais ao
@@ -815,47 +858,47 @@ impl Walk<'_> {
                             && let Some(mut chart) = parse_chart(&x)
                         {
                             chart.part = target.clone();
-                            self.push(rect, ObjectKind::Chart(Box::new(chart)));
+                            self.push(&el, rect, ObjectKind::Chart(Box::new(chart)));
                         }
                     } else if let Some(s) = find_tag(el.body, 0, b"sle:slicer") {
                         let name = attr_str(s.attrs, b"name").unwrap_or_default();
                         if let Some(sl) = self.slicers.get(&name) {
-                            self.push(rect, ObjectKind::Slicer(Box::new(sl.clone())));
+                            self.push(&el, rect, ObjectKind::Slicer(Box::new(sl.clone())));
                         }
                     } else if let Some(s) = find_tag(el.body, 0, b"tsle:timeslicer") {
                         let name = attr_str(s.attrs, b"name").unwrap_or_default();
                         if let Some(tl) = self.timelines.get(&name) {
-                            self.push(rect, ObjectKind::Timeline(Box::new(tl.clone())));
+                            self.push(&el, rect, ObjectKind::Timeline(Box::new(tl.clone())));
                         }
                     }
                 }
-                b"xdr:sp" => {
+                b"xdr:sp" | b"xdr:cxnSp" => {
                     let rect = child(el.body, b"xdr:spPr").and_then(|p| xfrm(p.body)).map(|(r, _)| map(r));
                     if depth == 0 && self.top.is_none() {
                         self.top = rect;
                     }
-                    let text = child(el.body, b"xdr:txBody").map(|t| text_of(t.body)).unwrap_or_default();
-                    let sp = sp_pr(el.body);
-                    if !text.trim().is_empty() || sp.fill.is_some() {
-                        self.push(
-                            rect,
-                            ObjectKind::Shape {
-                                text,
-                                fill: sp.fill,
-                                line: if sp.no_line { None } else { sp.line },
-                            },
-                        );
-                    }
+                    let s = crate::shape::parse(el.body, self.rels);
+                    self.push(&el, rect, ObjectKind::Shape(Box::new(s)));
                 }
                 b"xdr:pic" => {
                     let rect = child(el.body, b"xdr:spPr").and_then(|p| xfrm(p.body)).map(|(r, _)| map(r));
                     if depth == 0 && self.top.is_none() {
                         self.top = rect;
                     }
-                    if let Some(b) = find_tag(el.body, 0, b"a:blip") {
+                    if let Some(f) = child(el.body, b"xdr:blipFill")
+                        && let Some(b) = find_tag(f.body, 0, b"a:blip")
+                    {
                         let rid = attr_str(b.attrs, b"r:embed").unwrap_or_default();
                         if let Some((_, _, target)) = self.rels.iter().find(|r| r.0 == rid) {
-                            self.push(rect, ObjectKind::Picture { part: target.clone() });
+                            let kind = ObjectKind::Picture {
+                                part: target.clone(),
+                                crop: crate::shape::crop(f.body),
+                                line: crate::shape::pic_line(el.body),
+                                camera: find_tag(el.body, 0, b"a14:cameraTool")
+                                    .and_then(|t| attr_str(t.attrs, b"cellRange"))
+                                    .filter(|r| !r.is_empty()),
+                            };
+                            self.push(&el, rect, kind);
                         }
                     }
                 }
@@ -863,6 +906,52 @@ impl Walk<'_> {
             }
         }
         let _ = self.drawing;
+    }
+}
+
+/// Liga os `<control>` da aba às formas (escondidas) do desenho: elas têm a
+/// posição e o texto; as propriedades vêm da parte do controle.
+pub fn attach_controls(pkg: &Package, sheet_part: &str, layout: &mut duck_core::Layout) {
+    use duck_core::drawing::{Control, ControlKind};
+    if layout.controls.is_empty() {
+        return;
+    }
+    let rels = parts::rel_targets_typed(pkg, sheet_part);
+    let (mut group, mut index) = (0, 0);
+    for c in &layout.controls {
+        let Some(part) = rels.iter().find(|r| r.0 == c.rid).map(|r| r.2.clone()) else { continue };
+        let Ok(x) = pkg.read(&part) else { continue };
+        let Some(t) = find_tag(&x, 0, b"formControlPr") else { continue };
+        let kind = match attr(t.attrs, b"objectType") {
+            Some(b"Radio") => ControlKind::Radio,
+            Some(b"CheckBox") => ControlKind::Check,
+            Some(b"Button") => ControlKind::Button,
+            Some(b"GBox") => ControlKind::GroupBox,
+            Some(b"Label") => ControlKind::Label,
+            _ => ControlKind::Other,
+        };
+        let mut ctl = Control {
+            kind,
+            checked: attr(t.attrs, b"checked") == Some(b"Checked"),
+            link: attr_str(t.attrs, b"fmlaLink").filter(|l| !l.is_empty()),
+            part,
+            ..Default::default()
+        };
+        if kind == ControlKind::Radio {
+            if group == 0 || attr(t.attrs, b"firstButton") == Some(b"1") {
+                group += 1;
+                index = 0;
+            }
+            index += 1;
+            (ctl.group, ctl.index) = (group, index);
+        }
+        let Some(o) = layout.objects.iter_mut().find(|o| o.id == c.shape_id) else { continue };
+        if let ObjectKind::Shape(s) = &mut o.kind {
+            ctl.text = std::mem::take(&mut s.text);
+        }
+        o.hidden = false;
+        o.macro_name = c.macro_name.clone();
+        o.kind = ObjectKind::Control(Box::new(ctl));
     }
 }
 
@@ -884,6 +973,7 @@ pub fn read_objects(
         let Some(root) = find_tag(&xml, 0, b"xdr:wsDr") else { continue };
         let body = inner(&xml, &root, b"xdr:wsDr");
         let rels = parts::rel_targets_typed(pkg, &drawing);
+        let links = parts::link_targets(pkg, &drawing);
         // Âncoras na ordem do arquivo; as de dentro de `mc:AlternateContent`
         // contam todas (para o gravador), mas só as do `mc:Choice` desenham.
         let mut list: Vec<(El, bool)> = Vec::new();
@@ -931,6 +1021,7 @@ pub fn read_objects(
                 pkg,
                 drawing: &drawing,
                 rels: &rels,
+                links: &links,
                 slicers: &slicers,
                 timelines: &timelines,
                 anchor,

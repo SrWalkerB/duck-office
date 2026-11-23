@@ -303,25 +303,26 @@ impl Panel {
             if row.contains(mouse.0, mouse.1) {
                 p.fill(row, &a.list, th.hover);
             }
-            let on = match x {
-                None => vis.iter().skip(1).all(|y| self.is_checked(*y)),
-                _ => self.is_checked(*x),
+            // "(Selecionar tudo)" com só uma parte marcada: quadrado no meio.
+            let (on, partial) = match x {
+                None => {
+                    let all = vis.iter().skip(1).all(|y| self.is_checked(*y));
+                    (all, !all && vis.iter().skip(1).any(|y| self.is_checked(*y)))
+                }
+                _ => (self.is_checked(*x), false),
             };
             let bx = Rect::new(row.x0 + 6.0 * s, row.y0 + 5.0 * s, row.x0 + 20.0 * s, row.y0 + 19.0 * s);
             p.fill(bx, &a.list, if on { th.accent } else { [255, 255, 255, 255] });
             p.stroke(bx, &a.list, px, if on { th.accent } else { th.muted });
             if on {
-                // Marca: dois traços.
-                p.fill(
-                    Rect::new(bx.x0 + 3.0 * s, bx.y0 + 6.0 * s, bx.x0 + 6.0 * s, bx.y0 + 9.0 * s),
-                    &a.list,
-                    [255, 255, 255, 255],
-                );
-                p.fill(
-                    Rect::new(bx.x0 + 5.0 * s, bx.y0 + 8.0 * s, bx.x1 - 3.0 * s, bx.y0 + 10.0 * s),
-                    &a.list,
-                    [255, 255, 255, 255],
-                );
+                // Marca: um traço só, dobrado em (6, 10) (três vértices por
+                // lado, em quina), para os dois braços se encontrarem.
+                let at = |x: f32, y: f32| [bx.x0 + x * s, bx.y0 + y * s];
+                let white = [255, 255, 255, 255];
+                p.polygon(&[at(2.6, 7.2), at(3.8, 6.0), at(6.0, 8.2), at(6.0, 10.6)], &a.list, white);
+                p.polygon(&[at(6.0, 8.2), at(10.4, 3.8), at(11.6, 5.0), at(6.0, 10.6)], &a.list, white);
+            } else if partial {
+                p.fill(bx.inset(3.0 * s), &a.list, th.accent);
             }
             let label = match x {
                 None => "(Selecionar tudo)",

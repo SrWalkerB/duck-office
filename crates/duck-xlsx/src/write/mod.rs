@@ -12,6 +12,7 @@
 
 mod blank;
 mod cellxml;
+mod cube;
 mod deflate;
 mod objects;
 mod patch;
@@ -171,6 +172,38 @@ impl Book {
                 }
             }
         }
+        // Botões de opção e caixas de seleção marcados ou desmarcados.
+        for (m, s) in self.meta.sheets.iter().zip(sheets).filter_map(|(m, s)| Some((m, (*s)?))) {
+            if !s.edits().pivots {
+                continue;
+            }
+            let mut marks: HashMap<u32, bool> = HashMap::new();
+            for o in &s.layout.objects {
+                if let duck_core::drawing::ObjectKind::Control(c) = &o.kind
+                    && matches!(
+                        c.kind,
+                        duck_core::drawing::ControlKind::Radio | duck_core::drawing::ControlKind::Check
+                    )
+                    && let Ok(xml) = self.pkg.read(&c.part)
+                {
+                    marks.insert(o.id, c.checked);
+                    if let Some(new) = objects::patch_control(&xml, c.checked) {
+                        small.insert(c.part.clone(), new);
+                    }
+                }
+            }
+            if marks.is_empty() {
+                continue;
+            }
+            for (_, kind, part) in crate::parts::rel_targets_typed(&self.pkg, &m.path) {
+                if kind.ends_with("/vmlDrawing")
+                    && let Ok(xml) = self.pkg.read(&part)
+                    && let Some(new) = objects::patch_vml_checked(&xml, &marks)
+                {
+                    small.insert(part, new);
+                }
+            }
+        }
         // Tabelas dinâmicas e segmentações de dados mudadas.
         for s in sheets.iter().flatten() {
             if !s.edits().pivots {
@@ -180,7 +213,11 @@ impl Book {
                 if !t.part.is_empty()
                     && let Ok(xml) = self.pkg.read(&t.part)
                 {
-                    small.insert(t.part.clone(), pivot::patch_pivot_table(&xml, t));
+                    let mut new = pivot::patch_pivot_table(&xml, t);
+                    if t.cube.is_some() {
+                        new = self.patch_cube(&xml, new, t, &mut small);
+                    }
+                    small.insert(t.part.clone(), new);
                 }
             }
             for o in &s.layout.objects {
@@ -189,6 +226,10 @@ impl Book {
                     && !small.contains_key(&link.part)
                     && let Ok(xml) = self.pkg.read(&link.part)
                 {
+                    if link.is_cube() {
+                        small.insert(link.part.clone(), cube::patch_slicer(&xml, sl, link));
+                        continue;
+                    }
                     let sel: std::collections::HashMap<u32, bool> =
                         link.item_x.iter().zip(&sl.items).map(|(x, it)| (*x, it.1)).collect();
                     small.insert(link.part.clone(), pivot::patch_slicer_cache(&xml, &sel));
@@ -296,6 +337,32 @@ impl Book {
         rep.bytes = len;
         rep.wall = t0.elapsed();
         Ok(rep)
+    }
+
+    /// Dinâmica do Modelo de Dados: a tabela (já com o remendo comum) e o
+    /// cache dela, se foi recalculada ou mudou de filtro.
+    fn patch_cube(
+        &self,
+        orig: &[u8],
+        new: Vec<u8>,
+        t: &duck_core::pivot::PivotTable,
+        small: &mut HashMap<String, Vec<u8>>,
+    ) -> Vec<u8> {
+        let same = crate::cube::parse_cube_pivot(orig).map(Box::new) == t.cube;
+        let part = crate::parts::rel_targets_typed(&self.pkg, &t.part)
+            .into_iter()
+            .find(|r| r.1.ends_with("/pivotCacheDefinition"))
+            .map(|r| r.2);
+        let Some((part, cache)) = part.filter(|_| !same).and_then(|p| {
+            let c = crate::cube::read_cube_cache(&self.pkg, &p)?;
+            Some((p, c))
+        }) else {
+            return new;
+        };
+        if let Ok(xml) = self.pkg.read(&part) {
+            small.insert(part, cube::patch_cache(&xml, t, &cache));
+        }
+        cube::patch_table(&new, t, &cache)
     }
 
     /// Aba com mudança de estrutura: começo e fim do XML original

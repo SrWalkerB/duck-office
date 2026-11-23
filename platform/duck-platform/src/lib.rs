@@ -433,6 +433,8 @@ pub enum Event {
         delta: WheelDelta,
         modifiers: Modifiers,
     },
+    /// Pinça no touchpad (macOS): variação da escala (0,1 = +10%).
+    Pinch(f64),
     Key {
         key: Key,
         pressed: bool,
@@ -676,6 +678,9 @@ impl<A: App> ApplicationHandler<()> for Runner<'_, A> {
                 };
                 let modifiers = self.modifiers;
                 self.dispatch(event_loop, Event::Wheel { delta, modifiers });
+            }
+            WindowEvent::PinchGesture { delta, .. } if delta.is_finite() => {
+                self.dispatch(event_loop, Event::Pinch(delta))
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let key = map_key(&event.logical_key);

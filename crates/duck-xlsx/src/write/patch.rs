@@ -287,7 +287,7 @@ impl<'a> Patcher<'a> {
         out.extend_from_slice(b"<row");
         let mut skip: Vec<&[u8]> = vec![b"spans"];
         if height {
-            skip.extend([&b"ht"[..], b"customHeight", b"hidden"]);
+            skip.extend([&b"ht"[..], b"customHeight", b"hidden", b"collapsed"]);
         }
         push_attrs_except(attrs, &skip, out);
         if height {
@@ -310,7 +310,7 @@ impl<'a> Patcher<'a> {
             skip.push(b"spans");
         }
         if height {
-            skip.extend([&b"ht"[..], b"customHeight", b"hidden"]);
+            skip.extend([&b"ht"[..], b"customHeight", b"hidden", b"collapsed"]);
         }
         if skip.is_empty() {
             out.extend_from_slice(attrs);
@@ -385,6 +385,9 @@ impl<'a> Patcher<'a> {
         if self.sheet.row_hidden(r) {
             out.extend_from_slice(b" hidden=\"1\"");
         }
+        if self.sheet.layout.outline.closed_rows.contains(&r) {
+            out.extend_from_slice(b" collapsed=\"1\"");
+        }
     }
 
     fn is_data_table(&self, r: u32, c: u32) -> bool {
@@ -443,7 +446,11 @@ impl<'a> Patcher<'a> {
             let mut keep = Vec::new();
             push_attrs_except(a, &[b"min", b"max"], &mut keep);
             let mut rest = Vec::new();
-            push_attrs_except(a, &[b"min", b"max", b"width", b"customWidth", b"hidden"], &mut rest);
+            push_attrs_except(
+                a,
+                &[b"min", b"max", b"width", b"customWidth", b"hidden", b"collapsed"],
+                &mut rest,
+            );
             let mut start = first;
             for &c in changed.range(first..=last) {
                 if c > start {
@@ -472,6 +479,9 @@ impl<'a> Patcher<'a> {
             out.push(b'"');
             if edited && self.sheet.col_hidden(first) {
                 out.extend_from_slice(b" hidden=\"1\"");
+            }
+            if edited && self.sheet.layout.outline.closed_cols.contains(&first) {
+                out.extend_from_slice(b" collapsed=\"1\"");
             }
             if edited && let Some(w) = self.sheet.col_width(first) {
                 out.extend_from_slice(b" width=\"");
@@ -939,6 +949,34 @@ mod tests {
         t.filter = Some(duck_core::AutoFilter { range: t.range, columns: Vec::new() });
         let patched = String::from_utf8(patch_table(table_xml, &t)).unwrap();
         assert!(patched.contains(r#"ref="A1:B10"><autoFilter ref="A1:B10"/><tableColumns count="2"><tableColumn id="1" name="UF"/><tableColumn id="2" name="Total"/></tableColumns><tableStyleInfo"#), "{patched}");
+    }
+
+    #[test]
+    fn outline_groups() {
+        let xml = br#"<worksheet><cols><col min="2" max="4" width="9" outlineLevel="1"/><col min="5" max="5" width="9" collapsed="1"/></cols><sheetData><row r="1" outlineLevel="1"><c r="A1"><v>1</v></c></row><row r="2" outlineLevel="1" hidden="1"><c r="A2"><v>2</v></c></row><row r="3" collapsed="1"><c r="A3"><v>3</v></c></row></sheetData></worksheet>"#;
+        let mut sh = crate::parse_sheet_xml(xml);
+        let o = &sh.layout.outline;
+        assert_eq!((&o.rows.0[..], &o.cols.0[..]), (&[(0, 1, 1)][..], &[(1, 3, 1)][..]));
+        assert!(o.closed_rows.contains(&2) && o.closed_cols.contains(&4));
+        // Abrir os grupos: `hidden` e `collapsed` saem, o nível fica.
+        let mut new = o.clone();
+        new.closed_rows.clear();
+        new.closed_cols.clear();
+        duck_core::Command::Group(vec![
+            duck_core::Command::RowsHidden(vec![(1, false), (2, false)]),
+            duck_core::Command::ColsHidden(vec![(4, false)]),
+            duck_core::Command::Outline(Box::new(new)),
+        ])
+        .apply(&mut sh);
+        let strings = StringTable::new();
+        let mut p = Patcher::new(&sh, &strings, false);
+        let mut out = Vec::new();
+        p.feed(xml, &mut out);
+        p.finish(&mut out);
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains("collapsed") && !out.contains("hidden"), "{out}");
+        assert!(out.contains(r#"<row r="2" outlineLevel="1">"#), "{out}");
+        assert!(out.contains(r#"<col min="2" max="4" width="9" outlineLevel="1"/>"#), "{out}");
     }
 
     #[test]

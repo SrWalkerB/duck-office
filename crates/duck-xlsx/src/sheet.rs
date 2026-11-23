@@ -163,24 +163,38 @@ pub fn parse_rows(
         if starts_tag(rest, b"row") {
             let Some(end) = tag_end(buf, i) else { break };
             let attrs = &buf[i + 4..end - 1];
-            state.row = match attr(attrs, b"r").and_then(parse_u32) {
+            // Uma passada só pelos atributos (são milhões de linhas).
+            let (mut num, mut height, mut style) = (None, None, None);
+            let (mut hidden, mut custom, mut collapsed, mut level) = (false, false, false, 0);
+            let yes = |v: &[u8]| v == b"1" || v == b"true";
+            crate::xml::for_each_value(attrs, |k, v| match k {
+                b"r" => num = parse_u32(v),
+                b"ht" => height = std::str::from_utf8(v).ok().and_then(|s| s.parse::<f32>().ok()),
+                b"s" => style = parse_u32(v),
+                b"hidden" => hidden = yes(v),
+                b"customFormat" => custom = yes(v),
+                b"collapsed" => collapsed = yes(v),
+                b"outlineLevel" => level = parse_u32(v).unwrap_or(0).min(7) as u8,
+                _ => {}
+            });
+            state.row = match num {
                 Some(r) if r > 0 => Some(r - 1),
                 _ => state.row.map(|r| r + 1),
             };
             state.next_col = 0;
             // Altura própria (ou calculada pelo Excel, ex.: texto quebrado),
             // linhas ocultas e estilo de linha inteira.
-            let height = attr_f32(attrs, b"ht");
-            let hidden = attr_true(attrs, b"hidden");
-            let style = if attr_true(attrs, b"customFormat") {
-                attr(attrs, b"s").and_then(parse_u32).map(|s| s.min(u16::MAX as u32) as u16)
-            } else {
-                None
-            };
-            if let Some(row) = state.row
-                && (height.is_some() || hidden || style.is_some())
-            {
-                part.layout.rows.push(RowSpec { row, height, hidden, style });
+            let style = style.filter(|_| custom).map(|s| s.min(u16::MAX as u32) as u16);
+            if let Some(row) = state.row {
+                if height.is_some() || hidden || style.is_some() {
+                    part.layout.rows.push(RowSpec { row, height, hidden, style });
+                }
+                if level > 0 {
+                    part.layout.outline.rows.push(row, row, level);
+                }
+                if collapsed {
+                    part.layout.outline.closed_rows.insert(row);
+                }
             }
             pos = end;
             continue;
@@ -197,6 +211,12 @@ pub fn parse_rows(
                 (attr(attrs, b"min").and_then(parse_u32), attr(attrs, b"max").and_then(parse_u32))
                 && min >= 1
             {
+                let o = &mut part.layout.outline;
+                let level = attr(attrs, b"outlineLevel").and_then(parse_u32).unwrap_or(0).min(7);
+                o.cols.push(min - 1, max.max(min) - 1, level as u8);
+                if attr_true(attrs, b"collapsed") {
+                    o.closed_cols.insert(min - 1);
+                }
                 part.layout.cols.push(ColSpec {
                     first: min - 1,
                     last: max.max(min) - 1,
@@ -264,6 +284,41 @@ pub fn parse_rows(
                     .and_then(parse_range)
                     .map(|r| (r.first_row, r.first_col));
             }
+            pos = end;
+            continue;
+        }
+        // Controles: `mc:Choice` e `mc:Fallback` repetem o mesmo.
+        if starts_tag(rest, b"control") {
+            let Some(end) = tag_end(buf, i) else { break };
+            let attrs = &buf[i + 8..end - 1];
+            let id = attr(attrs, b"shapeId").and_then(parse_u32).unwrap_or(0);
+            let list = &mut part.layout.controls;
+            if id > 0 && !list.iter().any(|c| c.shape_id == id) {
+                let rid = attr(attrs, b"r:id").map(|v| String::from_utf8_lossy(v).into_owned());
+                list.push(duck_core::ControlRef {
+                    shape_id: id,
+                    rid: rid.unwrap_or_default(),
+                    macro_name: None,
+                });
+            }
+            pos = end;
+            continue;
+        }
+        if starts_tag(rest, b"controlPr") {
+            let Some(end) = tag_end(buf, i) else { break };
+            let attrs = &buf[i + 10..end - 1];
+            if let Some(c) = part.layout.controls.last_mut() {
+                c.macro_name = crate::xml::attr_str(attrs, b"macro").filter(|m| !m.is_empty());
+            }
+            pos = end;
+            continue;
+        }
+        if starts_tag(rest, b"outlinePr") {
+            let Some(end) = tag_end(buf, i) else { break };
+            let attrs = &buf[i + 10..end - 1];
+            let o = &mut part.layout.outline;
+            o.below = attr(attrs, b"summaryBelow") != Some(b"0");
+            o.right = attr(attrs, b"summaryRight") != Some(b"0");
             pos = end;
             continue;
         }

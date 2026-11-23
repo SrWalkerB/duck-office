@@ -544,7 +544,8 @@ pub fn cmd_objects(args: &[String]) -> Res {
                     if sl.table.is_some() { " (de tabela)" } else { "" }
                 ),
                 ObjectKind::Timeline(t) => format!("linha do tempo (nível {})", t.level),
-                ObjectKind::Shape { .. } => "forma".into(),
+                ObjectKind::Shape(_) => "forma".into(),
+                ObjectKind::Control(_) => "controle".into(),
                 ObjectKind::Picture { .. } => "imagem".into(),
             };
             *kinds.entry(k).or_default() += 1;
@@ -580,7 +581,15 @@ pub fn cmd_pivots(args: &[String]) -> Res {
                 continue;
             }
             if let std::collections::hash_map::Entry::Vacant(e) = records.entry(t.cache_id) {
+                let t1 = Instant::now();
                 e.insert(book.read_pivot_records(&mut caches[ci]));
+                if verbose {
+                    println!(
+                        "  registros do cache {}: {:.0} ms",
+                        t.cache_id,
+                        t1.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
             }
             let Some(Some(rec)) = records.get(&t.cache_id) else { continue };
             let res = pivot::compute(t, &caches[ci], rec);

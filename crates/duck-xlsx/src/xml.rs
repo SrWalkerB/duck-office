@@ -125,6 +125,18 @@ pub fn attr<'a>(attrs: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
 
 /// Visita cada atributo: `f(nome, atributo inteiro)` (ex.: `cm`, `cm="1"`).
 pub fn for_each_attr<'a>(attrs: &'a [u8], mut f: impl FnMut(&'a [u8], &'a [u8])) {
+    scan_attrs(attrs, |k0, k1, _, v1| f(&attrs[k0..k1], &attrs[k0..v1 + 1]));
+}
+
+/// Cada atributo: nome e valor.
+#[inline]
+pub fn for_each_value<'a>(attrs: &'a [u8], mut f: impl FnMut(&'a [u8], &'a [u8])) {
+    scan_attrs(attrs, |k0, k1, v0, v1| f(&attrs[k0..k1], &attrs[v0..v1]));
+}
+
+/// Posições de cada atributo: nome (início, fim) e valor (início, fim).
+#[inline]
+fn scan_attrs(attrs: &[u8], mut f: impl FnMut(usize, usize, usize, usize)) {
     let mut i = 0;
     let n = attrs.len();
     while i < n {
@@ -148,7 +160,7 @@ pub fn for_each_attr<'a>(attrs: &'a [u8], mut f: impl FnMut(&'a [u8], &'a [u8]))
         }
         let Some(len) = memchr(q, &attrs[i + 1..]) else { return };
         let v1 = i + 1 + len;
-        f(&attrs[k0..k1], &attrs[k0..v1 + 1]);
+        f(k0, k1, i + 1, v1);
         i = v1 + 1;
     }
 }
@@ -291,6 +303,26 @@ mod tests {
         assert_eq!(attr(a, b"t"), Some(&b"s"[..]));
         assert_eq!(attr(a, b"xml:space"), Some(&b"preserve"[..]));
         assert_eq!(attr(a, b"x"), None);
+    }
+
+    /// Uma passada vê o mesmo que as buscas por nome, e para num atributo quebrado.
+    #[test]
+    fn values_in_one_pass() {
+        let pairs = |a: &[u8]| {
+            let mut v = Vec::new();
+            for_each_value(a, |k, x| {
+                v.push((String::from_utf8(k.to_vec()).unwrap(), String::from_utf8(x.to_vec()).unwrap()));
+            });
+            v
+        };
+        let a = br#" r="12" ht='15.5'  hidden = "1" x14ac:dyDescent="0.25""#;
+        let got = pairs(a);
+        assert_eq!(got.len(), 4);
+        for (k, v) in &got {
+            assert_eq!(attr(a, k.as_bytes()), Some(v.as_bytes()));
+        }
+        assert_eq!(pairs(br#"r="1" s="2"#), [("r".to_string(), "1".to_string())]);
+        assert!(pairs(b"  ").is_empty());
     }
 
     #[test]

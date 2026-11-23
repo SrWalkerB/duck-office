@@ -273,6 +273,9 @@ fn alignment_xml(a: &Alignment, out: &mut Vec<u8>) {
     if a.wrap {
         out.extend_from_slice(b" wrapText=\"1\"");
     }
+    if a.shrink {
+        out.extend_from_slice(b" shrinkToFit=\"1\"");
+    }
     if a.indent != 0 {
         out.extend_from_slice(b" indent=\"");
         push_u32(out, a.indent as u32);

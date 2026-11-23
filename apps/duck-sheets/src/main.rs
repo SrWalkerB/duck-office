@@ -7,7 +7,7 @@
 //!             [--aba inicial|inserir|exibir] [--menu NOME] [--novo]
 //! ```
 //!
-//! Sem arquivo, abre o diálogo nativo. Teclas: setas (+Shift seleciona,
+//! Sem arquivo, abre uma planilha em branco. Teclas: setas (+Shift seleciona,
 //! +Ctrl vai até a borda dos dados), PageUp/PageDown, Ctrl+Home/End,
 //! Ctrl+PageUp/PageDown (abas), Ctrl+C (copia a seleção), Ctrl+F (busca),
 //! Ctrl+G (ir para), Ctrl+O (abrir), Ctrl+A, Ctrl + roda / Ctrl +/−/0 (zoom).
@@ -26,6 +26,8 @@ mod app;
 mod axis;
 mod calc;
 mod chart;
+mod control;
+mod cube;
 mod draw;
 mod edit;
 mod filter;
@@ -33,11 +35,15 @@ mod format;
 mod images;
 mod loader;
 mod look;
+mod macros;
 mod menu;
+mod outline;
 mod pivot;
 mod ribbon;
 mod search;
+mod shape;
 mod tablestyle;
+mod zoombar;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -87,7 +93,8 @@ pub struct Opts {
     /// `tamanho`, `numero`, `bordas`, `cor`, `fundo`, `mesclar`, `inserir`,
     /// `excluir`, `formatar`, `limpar`, `congelar`, `contexto`.
     pub menu: Option<String>,
-    /// Começa com uma planilha nova em branco (`--novo`).
+    /// Começa com uma planilha nova em branco mesmo com um arquivo na linha de
+    /// comando (`--novo`; sem arquivo já é assim).
     pub new_file: bool,
 }
 
@@ -135,7 +142,9 @@ fn main() {
     let opts = parse_args();
     let mut app = app::SheetsApp::new(t0, opts);
     let config = duck_platform::WindowConfig { title: "duck-sheets".into(), width: 1440.0, height: 900.0 };
-    if let Err(e) = duck_platform::run(config, &mut app) {
+    let run = duck_platform::run(config, &mut app);
+    app.cleanup();
+    if let Err(e) = run {
         eprintln!("erro: {e}");
         std::process::exit(1);
     }

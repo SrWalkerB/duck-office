@@ -90,9 +90,13 @@ impl SheetsApp {
                 self.namebox.select_all();
             }
             Act::Zoom(d) => {
-                let z = if d == 0 { 100 } else { self.zoom() + 10 * d as i32 };
-                self.set_zoom(z);
+                if d == 0 {
+                    self.set_zoom(100);
+                } else {
+                    self.zoom_step(d > 0);
+                }
             }
+            Act::ZoomTo(z) => self.set_zoom(z as i32),
             Act::Grid => {
                 if let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) {
                     v.grid = !v.grid;
@@ -229,6 +233,13 @@ impl SheetsApp {
             ],
             // As paletas abrem por `open_drop`.
             Drop::TextColor | Drop::FillColor => Vec::new(),
+            Drop::Zoom => {
+                let cur = self.zoom();
+                crate::zoombar::LEVELS
+                    .iter()
+                    .map(|&z| Item::new(format!("{z}%"), Act::ZoomTo(z)).checked(cur == z as i32))
+                    .collect()
+            }
             Drop::Freeze => {
                 let pane =
                     self.doc.as_ref().and_then(|d| d.current()).map(|(_, v)| (v.frozen_rows, v.frozen_cols));
@@ -538,6 +549,26 @@ impl SheetsApp {
         self.open(path, waker);
     }
 
+    /// Nome do arquivo para mostrar: `Planilha1` na planilha nova ainda não salva.
+    pub fn file_label(&self, path: &std::path::Path) -> String {
+        if self.untitled_path.as_deref() == Some(path) {
+            return format!("Planilha{}", self.new_count);
+        }
+        path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    }
+
+    /// Ao sair: apaga os arquivos temporários das planilhas novas.
+    pub fn cleanup(&mut self) {
+        if let Some(l) = self.loader.take() {
+            l.cancel();
+        }
+        self.doc = None;
+        let dir = std::env::temp_dir().join("duck-sheets");
+        for n in 1..=self.new_count {
+            let _ = std::fs::remove_file(dir.join(format!("Planilha{n}-{}.xlsx", std::process::id())));
+        }
+    }
+
     /// Lembra o arquivo na lista de recentes (no topo).
     pub fn remember_recent(&mut self, path: &std::path::Path) {
         if self.untitled_path.as_deref() == Some(path) {
@@ -614,6 +645,11 @@ impl SheetsApp {
             "formatar" => Drop::Format,
             "limpar" => Drop::Clear,
             "congelar" => Drop::Freeze,
+            "zoom" => {
+                let r = crate::zoombar::layout(&g).menu_anchor(&g);
+                self.open_drop(Drop::Zoom, r, &g);
+                return;
+            }
             _ => return,
         };
         if matches!(d, Drop::Freeze) {

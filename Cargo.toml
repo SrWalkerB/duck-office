@@ -13,6 +13,8 @@ members = [
     "crates/duck-xlsx",
     "crates/duck-calc",
     "crates/duck-emf",
+    "crates/duck-vba",
+    "crates/duck-dax",
     "crates/duck-bench",
 ]
 

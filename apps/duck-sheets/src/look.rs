@@ -35,6 +35,7 @@ pub struct Look {
     pub h: HAlign,
     pub v: VAlign,
     pub wrap: bool,
+    pub shrink: bool,
     pub indent: u8,
     /// `textRotation` do Excel (ver [`duck_core::Alignment::angle`]).
     pub rotation: u8,
@@ -107,6 +108,7 @@ impl Looks {
                     h: xf.alignment.horizontal,
                     v: xf.alignment.vertical,
                     wrap: xf.alignment.wrap,
+                    shrink: xf.alignment.shrink,
                     indent: xf.alignment.indent,
                     rotation: xf.alignment.rotation,
                     fmt: if xf.num_fmt == 0 { 0 } else { fmt_of(xf.num_fmt) },
@@ -121,6 +123,7 @@ impl Looks {
             h: HAlign::General,
             v: VAlign::Bottom,
             wrap: false,
+            shrink: false,
             indent: 0,
             rotation: 0,
             fmt: 0,

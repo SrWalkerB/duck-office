@@ -53,6 +53,8 @@ struct Ctx<'a> {
     px: f32,
     pad: f32,
     hits: &'a [(u32, u32)],
+    /// Mostra a seleção (as câmeras não mostram).
+    selection: bool,
     cf: CfCtx<'a>,
     /// Tabelas do Excel da aba: (intervalo, linhas de cabeçalho, de totais,
     /// faixas ligadas, aparência).
@@ -231,6 +233,113 @@ fn pos(axis: &crate::axis::Axis, origin: f64, i: u32, lo: f32, g: f32) -> f32 {
     lo + ((axis.offset(i) as f64 - origin) * g as f64).round() as f32
 }
 
+type TableLooks = Vec<(CellRange, u32, u32, bool, crate::tablestyle::TableLook)>;
+
+fn table_looks(sheet: &Sheet, styles: &Styles) -> TableLooks {
+    let one = |t: &duck_core::Table| {
+        let look = crate::tablestyle::table_look(t.style.as_deref(), styles);
+        (t.range, t.header_rows, t.totals_rows, t.row_stripes, look)
+    };
+    sheet.layout.tables.iter().map(one).collect()
+}
+
+/// `Aba!$A$1:$B$2` → (aba, intervalo).
+pub(crate) fn camera_range(doc: &crate::app::Doc, range: &str) -> Option<(usize, CellRange)> {
+    let i = range.rfind('!')?;
+    let name = &range[..i];
+    let name = name
+        .strip_prefix('\'')
+        .and_then(|n| n.strip_suffix('\''))
+        .map_or(name.to_string(), |n| n.replace("''", "'"));
+    let si = doc.sheets.iter().position(|s| s.info.name.eq_ignore_ascii_case(&name))?;
+    let (a, b) = crate::app::parse_range(&range[i + 1..].replace('$', ""))?;
+    Some((
+        si,
+        CellRange {
+            first_row: a.0.min(b.0),
+            first_col: a.1.min(b.1),
+            last_row: a.0.max(b.0),
+            last_col: a.1.max(b.1),
+        },
+    ))
+}
+
+/// Câmera (imagem ligada a um intervalo): as células e os objetos da outra
+/// aba, reduzidos ao retângulo. Enquanto os dados dela não mudam, vale a
+/// imagem que o Excel guardou (`false`).
+#[allow(clippy::too_many_arguments)]
+fn draw_camera(
+    p: &mut Painter,
+    doc: &crate::app::Doc,
+    images: &std::collections::HashMap<String, [f32; 4]>,
+    today: f64,
+    px: f32,
+    range: &str,
+    r: Rect,
+    clip: &Rect,
+) -> bool {
+    let Some((si, rg)) = camera_range(doc, range) else { return false };
+    if doc.calc.version(si) == 0 {
+        return false;
+    }
+    let slot = &doc.sheets[si];
+    let (Some(sheet), Some(view)) = (slot.data.as_ref(), slot.view.as_ref()) else { return false };
+    let last_row = rg.last_row.min(view.rows.len() - 1);
+    let last_col = rg.last_col.min(view.cols.len() - 1);
+    let w = (view.cols.offset(last_col + 1) - view.cols.offset(rg.first_col)) as f32;
+    let h = (view.rows.offset(last_row + 1) - view.rows.offset(rg.first_row)) as f32;
+    if w < 1.0 || h < 1.0 {
+        return false;
+    }
+    let g = (r.w() / w).min(r.h() / h);
+    let vis = r.intersect(clip);
+    p.fill(vis, &vis, WHITE);
+    // A parte visível: o painel começa nela.
+    let quad = Quad {
+        rect: vis,
+        ox: view.cols.offset(rg.first_col) as f64 + ((vis.x0 - r.x0) / g) as f64,
+        oy: view.rows.offset(rg.first_row) as f64 + ((vis.y0 - r.y0) / g) as f64,
+        row_start: rg.first_row,
+        row_end: last_row + 1,
+        col_start: rg.first_col,
+        col_end: last_col + 1,
+    };
+    let fonts: Vec<TextStyle> = doc
+        .looks
+        .fonts
+        .iter()
+        .map(|f| p.text.style(&f.name, f.pt * 96.0 / 72.0 * g, f.bold, f.italic))
+        .collect();
+    let cx = Ctx {
+        sheet,
+        view,
+        looks: &doc.looks,
+        styles: &doc.styles,
+        strings: &doc.strings,
+        date1904: doc.date1904,
+        fonts: &fonts,
+        g,
+        px,
+        pad: (3.0 * g).round().max(1.0),
+        hits: &[],
+        selection: false,
+        cf: CfCtx { sheet, shared: &doc.strings, today },
+        tables: table_looks(sheet, &doc.styles),
+    };
+    let (mut a, mut b) = (String::new(), String::new());
+    draw_cells(p, &cx, &quad, &mut a, &mut b);
+    let octx = crate::chart::ObjCtx {
+        styles: &doc.styles,
+        font: fonts.first().copied().unwrap_or(p.text.default_style()),
+        g,
+        date1904: doc.date1904,
+        images,
+    };
+    // Uma câmera dentro de outra fica com a imagem guardada.
+    crate::chart::draw_objects(p, &octx, &sheet.layout.objects, view, &quad, &mut |_, _, _, _| false);
+    true
+}
+
 impl SheetsApp {
     pub fn build_frame(&mut self) {
         let geom = self.geom();
@@ -269,16 +378,9 @@ impl SheetsApp {
                     px,
                     pad: (3.0 * geom.g).round().max(1.0),
                     hits,
+                    selection: true,
                     cf: CfCtx { sheet, shared: &doc.strings, today: self.today },
-                    tables: sheet
-                        .layout
-                        .tables
-                        .iter()
-                        .map(|t| {
-                            let look = crate::tablestyle::table_look(t.style.as_deref(), &doc.styles);
-                            (t.range, t.header_rows, t.totals_rows, t.row_stripes, look)
-                        })
-                        .collect(),
+                    tables: table_looks(sheet, &doc.styles),
                 };
                 // Fundo da grade.
                 p.fill(geom.grid, &geom.grid, WHITE);
@@ -292,7 +394,11 @@ impl SheetsApp {
                 for q in geom.quads.iter().rev() {
                     if !q.rect.is_empty() {
                         draw_cells(&mut p, &cx, q, &mut buf, &mut buf2);
-                        crate::chart::draw_objects(&mut p, &octx, &sheet.layout.objects, view, q);
+                        let (images, today) = (&self.images.uv, self.today);
+                        let mut live = |p: &mut Painter, range: &str, r: Rect, clip: &Rect| {
+                            draw_camera(p, doc, images, today, px, range, r, clip)
+                        };
+                        crate::chart::draw_objects(&mut p, &octx, &sheet.layout.objects, view, q, &mut live);
                     }
                 }
                 // Linhas dos painéis congelados.
@@ -462,10 +568,14 @@ impl SheetsApp {
         let small = ui.with_px(12.0 * s);
         let left = match (&self.hover_link, self.hover_act) {
             (_, Some((_, tip))) => tip.to_string(),
+            // Objetos abrem com um clique; links de célula, com Ctrl.
+            (Some(l), _) if l.starts_with('\u{1}') => l[1..].to_string(),
             (Some(l), _) => format!("Ctrl+clique para abrir: {l}"),
             _ => self.message.clone(),
         };
-        p.label(&left, small, st, Align::Left, 10.0 * s, UI_MUTED);
+        let zoombar = crate::zoombar::layout(&geom);
+        let st_text = Rect::new(st.x0, st.y0, zoombar.area().x0, st.y1);
+        p.label(&left, small, st_text, Align::Left, 10.0 * s, UI_MUTED);
         buf.clear();
         if let Some(stats) = stats
             && stats.count > 1
@@ -480,14 +590,12 @@ impl SheetsApp {
             }
             let _ = write!(buf, "Contagem: {}   ", fmt_int(stats.count));
         }
-        if let Some((_, v)) = self.doc.as_ref().and_then(|d| d.current()) {
-            let _ = write!(buf, "{}%", v.zoom);
-        }
-        if !self.recent_cpu.is_empty() {
+        // Tempo por frame: só na medição.
+        if self.opts.bench && !self.recent_cpu.is_empty() {
             let avg = self.recent_cpu.iter().sum::<f64>() / self.recent_cpu.len() as f64;
             let _ = write!(buf, "   ·   {avg:.2} ms/frame");
         }
-        p.label(&buf, small, st, Align::Right, 10.0 * s, UI_MUTED);
+        p.label(&buf, small, st_text, Align::Right, 10.0 * s, UI_MUTED);
 
         // Faixa de opções, menus e caixa de diálogo por último: ficam por cima.
         let theme = crate::ribbon::Theme {
@@ -500,6 +608,9 @@ impl SheetsApp {
             on: HEADER_SEL,
             accent: ACCENT,
         };
+        if let Some((_, v)) = self.doc.as_ref().and_then(|d| d.current()) {
+            zoombar.draw(&mut p, &geom, small, v.zoom as i32, self.hover_act.map(|t| t.0), &theme);
+        }
         let view = self.doc.as_ref().and_then(|d| d.current()).map(|(_, v)| (v.grid, v.headers));
         let num_fmt_name = match (active.as_ref(), self.doc.as_ref()) {
             (Some(a), Some(d)) => crate::format::format_name(&d.styles, a.num_fmt),
@@ -866,7 +977,7 @@ fn draw_cells(p: &mut Painter, cx: &Ctx, q: &Quad, buf: &mut String, buf2: &mut 
 
     // 6. Seleção.
     let (r0, c0, r1, c1) = v.sel();
-    if r1 >= r_first && r0 <= r_last && c1 >= c_first && c0 <= c_last {
+    if cx.selection && r1 >= r_first && r0 <= r_last && c1 >= c_first && c0 <= c_last {
         let sel = Rect::new(x_of(c0), y_of(r0), x_of(c1 + 1), y_of(r1 + 1));
         let cur = v.merges.at(v.cur.0, v.cur.1).unwrap_or(CellRange {
             first_row: v.cur.0,
@@ -932,6 +1043,22 @@ fn edge(
     }
 }
 
+/// "Reduzir para caber": a maior fonte em que o texto cabe em `width`.
+fn shrink_style(p: &mut Painter, s: &str, mut style: TextStyle, width: f32) -> TextStyle {
+    let w = p.text.measure_styled(s, style);
+    if w <= width + 0.5 || width <= 0.0 {
+        return style;
+    }
+    let mut px = (style.px() * width / w).floor().max(1.0);
+    style = style.with_px(px);
+    // O ajuste dos glifos à grade de pixels pode passar um pouco.
+    while px > 1.0 && p.text.measure_styled(s, style) > width + 0.5 {
+        px -= 1.0;
+        style = style.with_px(px);
+    }
+    style
+}
+
 /// Texto de uma célula (ou mesclagem, `ri == usize::MAX`), com alinhamento,
 /// quebra de linha, transbordo para vizinhas vazias e `###`.
 #[allow(clippy::too_many_arguments)]
@@ -988,9 +1115,12 @@ fn draw_cell_text(
             return;
         }
     }
-    let lh = p.text.line_height_of(style);
     let avail = (cell.w() - 2.0 * pad).max(0.0);
     let indent = look.indent as f32 * 3.0 * (style.px() * 0.55).round();
+    if look.shrink && !look.wrap && look.rotation == 0 {
+        style = shrink_style(p, buf, style, avail - indent);
+    }
+    let lh = p.text.line_height_of(style);
     let align = match look.h {
         HAlign::General => match shown.kind {
             Kind::Number => Align::Right,
@@ -1484,6 +1614,7 @@ fn draw_headers(p: &mut Painter, cx: &Ctx, geom: &Geom, style: TextStyle, buf: &
     // Canto.
     let corner = geom.corner;
     p.fill(corner, &corner, HEADER_BG);
+    crate::outline::draw(p, geom, v, style);
     p.fill(Rect::new(corner.x1 - px, corner.y0, corner.x1, corner.y1), &corner, HEADER_LINE);
     p.fill(Rect::new(corner.x0, corner.y1 - px, corner.x1, corner.y1), &corner, HEADER_LINE);
 }

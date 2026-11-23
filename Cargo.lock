@@ -551,10 +551,12 @@ dependencies = [
  "calamine",
  "duck-calc",
  "duck-core",
+ "duck-dax",
  "duck-deflate",
  "duck-emf",
  "duck-par",
  "duck-text",
+ "duck-vba",
  "duck-xlsx",
  "flate2",
  "libc",
@@ -576,6 +578,15 @@ dependencies = [
 [[package]]
 name = "duck-core"
 version = "1.0.0"
+
+[[package]]
+name = "duck-dax"
+version = "1.0.0"
+dependencies = [
+ "duck-calc",
+ "duck-core",
+ "rayon",
+]
 
 [[package]]
 name = "duck-deflate"
@@ -627,12 +638,14 @@ version = "1.0.0"
 dependencies = [
  "duck-calc",
  "duck-core",
+ "duck-dax",
  "duck-emf",
  "duck-gfx",
  "duck-par",
  "duck-platform",
  "duck-text",
  "duck-ui",
+ "duck-vba",
  "duck-xlsx",
  "libc",
  "libmimalloc-sys",
@@ -658,6 +671,14 @@ dependencies = [
  "duck-gfx",
  "duck-platform",
  "duck-text",
+]
+
+[[package]]
+name = "duck-vba"
+version = "1.0.0"
+dependencies = [
+ "duck-calc",
+ "duck-core",
 ]
 
 [[package]]

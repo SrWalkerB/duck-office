@@ -10,12 +10,14 @@ rust-version.workspace = true
 [dependencies]
 duck-calc = { path = "../../crates/duck-calc" }
 duck-core = { path = "../../crates/duck-core" }
+duck-dax = { path = "../../crates/duck-dax" }
 duck-emf = { path = "../../crates/duck-emf" }
 duck-gfx = { path = "../../platform/duck-gfx" }
 duck-par = { path = "../../crates/duck-par" }
 duck-platform = { path = "../../platform/duck-platform" }
 duck-text = { path = "../../platform/duck-text" }
 duck-ui = { path = "../../platform/duck-ui" }
+duck-vba = { path = "../../crates/duck-vba" }
 duck-xlsx = { path = "../../crates/duck-xlsx" }
 libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
 mimalloc = "0.1.52"

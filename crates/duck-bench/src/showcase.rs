@@ -45,7 +45,7 @@ const STYLES: &str = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <border><left style="thick"><color theme="4"/></left><right style="thick"><color theme="4"/></right><top style="thick"><color theme="4"/></top><bottom style="thick"><color theme="4"/></bottom><diagonal/></border>
 </borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="31">
+<cellXfs count="32">
 <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
 <xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
 <xf numFmtId="0" fontId="2" fillId="3" borderId="2" xfId="0" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
@@ -77,6 +77,7 @@ const STYLES: &str = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <xf numFmtId="0" fontId="0" fillId="4" borderId="0" xfId="0"/>
 <xf numFmtId="0" fontId="7" fillId="0" borderId="0" xfId="0"/>
 <xf numFmtId="0" fontId="8" fillId="0" borderId="0" xfId="0"/>
+<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyAlignment="1"><alignment shrinkToFit="1"/></xf>
 </cellXfs>
 <dxfs count="3">
 <dxf><font><color rgb="FF9C0006"/></font><fill><patternFill><bgColor rgb="FFFFC7CE"/></patternFill></fill></dxf>
@@ -173,12 +174,15 @@ pub fn write(path: &Path) -> std::io::Result<()> {
     put(
         &mut z,
         "xl/drawings/drawing1.xml",
-        r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor><xdr:from><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>20</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>11</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>36</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Gráfico 1"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor><xdr:twoCellAnchor><xdr:from><xdr:col>11</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>20</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>16</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>36</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="3" name="Gráfico 2"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId2"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor><xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>4</xdr:col><xdr:colOff>95250</xdr:colOff><xdr:row>15</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="4" name="Pato"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rId3"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"##,
+        &format!(
+            r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor><xdr:from><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>20</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>11</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>36</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Gráfico 1"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor><xdr:twoCellAnchor><xdr:from><xdr:col>11</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>20</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>16</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>36</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="3" name="Gráfico 2"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId2"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor><xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>4</xdr:col><xdr:colOff>95250</xdr:colOff><xdr:row>15</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="4" name="Pato"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rId3"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:twoCellAnchor>{}</xdr:wsDr>"##,
+            shapes_xml()
+        ),
     )?;
     put(
         &mut z,
         "xl/drawings/_rels/drawing1.xml.rels",
-        r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/></Relationships>"##,
+        r##"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/><Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="#Vitrine!B3"/></Relationships>"##,
     )?;
     put_bytes(&mut z, "xl/media/image1.png", include_bytes!("../assets/pato.png"))?;
     put(
@@ -381,6 +385,32 @@ fn recursos(st: &mut Strings) -> String {
         n(&mut x, &format!("D{r}"), 0, *v);
         x.push_str("</row>");
     }
+    // Grupos: 53–60 no nível 1, 55–57 no nível 2 (fechado), resumos embaixo.
+    for r in 53..=61u32 {
+        let level = match r {
+            55..=57 => 2,
+            61 => 0,
+            _ => 1,
+        };
+        let hidden = if level == 2 { r#" hidden="1""# } else { "" };
+        let closed = if r == 58 { r#" collapsed="1""# } else { "" };
+        let lv = if level > 0 { format!(r#" outlineLevel="{level}""#) } else { String::new() };
+        let _ = write!(x, r#"<row r="{r}"{hidden}{lv}{closed}>"#);
+        s(
+            &mut x,
+            st,
+            &format!("A{r}"),
+            if r == 59 { 31 } else { 0 },
+            match r {
+                61 => "Total do grupo",
+                58 => "Subtotal (grupo de dentro fechado)",
+                59 => "Um texto comprido reduzido para caber na coluna",
+                _ => "Detalhe",
+            },
+        );
+        n(&mut x, &format!("B{r}"), 0, r as f64);
+        x.push_str("</row>");
+    }
     x.push_str("</sheetData>");
     x.push_str(r#"<conditionalFormatting sqref="A6:A15"><cfRule type="colorScale" priority="1"><colorScale><cfvo type="min"/><cfvo type="percentile" val="50"/><cfvo type="max"/><color rgb="FFF8696B"/><color rgb="FFFFEB84"/><color rgb="FF63BE7B"/></colorScale></cfRule></conditionalFormatting>"#);
     x.push_str(r#"<conditionalFormatting sqref="B6:B15"><cfRule type="dataBar" priority="2"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar></cfRule></conditionalFormatting>"#);
@@ -406,5 +436,89 @@ fn resumo(st: &mut Strings) -> String {
     s(&mut x, st, "A4", 3, "Margem média");
     n(&mut x, "B4", 7, 0.1834);
     x.push_str("</row></sheetData></worksheet>");
+    x
+}
+
+/// Formas da vitrine (aba "Recursos", linhas 39 em diante): geometrias,
+/// gradiente, sombra, texto formatado, conector, imagem recortada e link.
+fn shapes_xml() -> String {
+    let anchor = |c0: u32, r0: u32, c1: u32, r1: u32, body: &str| {
+        format!(
+            "<xdr:twoCellAnchor><xdr:from><xdr:col>{c0}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{r0}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>{c1}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>{r1}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>{body}<xdr:clientData/></xdr:twoCellAnchor>"
+        )
+    };
+    let mut id = 10;
+    let mut sp = |nv: &str, geom: &str, pr: &str, text: &str| {
+        id += 1;
+        format!(
+            r#"<xdr:sp macro="" textlink=""><xdr:nvSpPr><xdr:cNvPr id="{id}" name="Forma {id}">{nv}</xdr:cNvPr><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm>{geom}{pr}</xdr:spPr><xdr:txBody>{text}</xdr:txBody></xdr:sp>"#
+        )
+    };
+    let prst =
+        |n: &str, adj: &str| format!(r#"<a:prstGeom prst="{n}"><a:avLst>{adj}</a:avLst></a:prstGeom>"#);
+    let solid = |rgb: &str| format!(r#"<a:solidFill><a:srgbClr val="{rgb}"/></a:solidFill>"#);
+    let text = |t: &str| {
+        format!(
+            r#"<a:bodyPr anchor="ctr" wrap="square"/><a:p><a:pPr algn="ctr"/><a:r><a:rPr sz="1200" b="1"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:rPr><a:t>{t}</a:t></a:r></a:p>"#
+        )
+    };
+    let grad = r#"<a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="4472C4"/></a:gs><a:gs pos="100000"><a:srgbClr val="1F3864"/></a:gs></a:gsLst><a:lin ang="5400000"/></a:gradFill>"#;
+    let shadow = r#"<a:effectLst><a:outerShdw blurRad="76200" dist="38100" dir="2700000"><a:srgbClr val="000000"><a:alpha val="45000"/></a:srgbClr></a:outerShdw></a:effectLst>"#;
+    let mut x = String::new();
+    let s = sp("", &prst("ellipse", ""), &format!("{grad}<a:ln><a:noFill/></a:ln>{shadow}"), &text("Elipse"));
+    x += &anchor(0, 38, 1, 43, &s);
+    let ln = r#"<a:ln w="28575"><a:solidFill><a:srgbClr val="1F3864"/></a:solidFill></a:ln>"#;
+    let s = sp(
+        r#"<a:hlinkClick r:id="rId4"/>"#,
+        &prst("roundRect", r#"<a:gd name="adj" fmla="val 30000"/>"#),
+        &format!("{}{ln}", solid("ED7D31")),
+        &text("Ir para a Vitrine (link)"),
+    );
+    x += &anchor(1, 38, 3, 43, &s);
+    let adj = r#"<a:gd name="adj1" fmla="val 30000"/><a:gd name="adj2" fmla="val 0"/>"#;
+    let s = sp("", &prst("snip2SameRect", adj), &solid("70AD47"), &text("Cantos cortados"));
+    x += &anchor(3, 38, 5, 43, &s);
+    let s = sp("", &prst("rightArrow", ""), &solid("FFC000"), &text("Seta"));
+    x += &anchor(5, 38, 8, 43, &s);
+    let s = sp("", &prst("homePlate", ""), &solid("7030A0"), &text("Etapa"));
+    x += &anchor(8, 38, 11, 43, &s);
+    // Texto com vários trechos, quebra e alinhamentos.
+    let rich = r#"<a:bodyPr wrap="square"/><a:p><a:r><a:rPr sz="1400" b="1"/><a:t>Título </a:t></a:r><a:r><a:rPr sz="1100" i="1"><a:solidFill><a:srgbClr val="C00000"/></a:solidFill></a:rPr><a:t>em itálico vermelho</a:t></a:r></a:p><a:p><a:pPr algn="r"/><a:r><a:rPr sz="1000" u="sng"/><a:t>à direita, sublinhado</a:t></a:r></a:p><a:p><a:r><a:rPr sz="1000"/><a:t>Um parágrafo comprido que precisa quebrar em várias linhas dentro da caixa.</a:t></a:r></a:p>"#;
+    let box_ln = r#"<a:ln w="9525"><a:solidFill><a:srgbClr val="7F7F7F"/></a:solidFill><a:prstDash val="dash"/></a:ln>"#;
+    let s = sp("", &prst("rect", ""), &format!("{}{box_ln}", solid("F2F2F2")), rich);
+    x += &anchor(0, 44, 3, 51, &s);
+    // Forma livre (estrela de três pontas), forma escondida e conector.
+    let path = r#"<a:custGeom><a:pathLst><a:path w="100" h="100"><a:moveTo><a:pt x="50" y="0"/></a:moveTo><a:lnTo><a:pt x="62" y="55"/></a:lnTo><a:lnTo><a:pt x="100" y="100"/></a:lnTo><a:lnTo><a:pt x="50" y="75"/></a:lnTo><a:lnTo><a:pt x="0" y="100"/></a:lnTo><a:lnTo><a:pt x="38" y="55"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom>"#;
+    let s = sp("", path, &solid("00B0F0"), "<a:bodyPr/><a:p/>");
+    x += &anchor(3, 44, 4, 51, &s);
+    let hidden = sp("", &prst("rect", ""), &solid("FF0000"), &text("Escondida")).replacen(
+        "<xdr:cNvPr ",
+        r#"<xdr:cNvPr hidden="1" "#,
+        1,
+    );
+    x += &anchor(3, 44, 8, 51, &hidden);
+    x += &anchor(
+        4,
+        45,
+        6,
+        50,
+        r#"<xdr:cxnSp macro=""><xdr:nvCxnSpPr><xdr:cNvPr id="40" name="Conector"/><xdr:cNvCxnSpPr/></xdr:nvCxnSpPr><xdr:spPr><a:xfrm flipV="1"><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm><a:prstGeom prst="straightConnector1"><a:avLst/></a:prstGeom><a:ln w="25400"><a:solidFill><a:srgbClr val="404040"/></a:solidFill><a:tailEnd type="triangle"/></a:ln></xdr:spPr></xdr:cxnSp>"#,
+    );
+    // Câmera: imagem ligada a um intervalo desta aba.
+    x += &anchor(
+        8,
+        44,
+        14,
+        51,
+        r#"<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="42" name="Câmera"><a:extLst><a:ext uri="{84589F7E-364E-4C9E-8A38-B11213B215E9}"><a14:cameraTool xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" cellRange="Recursos!$A$20:$D$28" spid="_x0000_s1042"/></a:ext></a:extLst></xdr:cNvPr><xdr:cNvPicPr/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rId3"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:ln w="9525"><a:solidFill><a:srgbClr val="404040"/></a:solidFill></a:ln></xdr:spPr></xdr:pic>"#,
+    );
+    // A imagem do pato, só a metade de cima e o meio.
+    x += &anchor(
+        6,
+        44,
+        8,
+        51,
+        r#"<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="41" name="Pato recortado"/><xdr:cNvPicPr/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rId3"/><a:srcRect l="20000" t="0" r="20000" b="50000"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:ln w="19050"><a:solidFill><a:srgbClr val="404040"/></a:solidFill></a:ln></xdr:spPr></xdr:pic>"#,
+    );
     x
 }

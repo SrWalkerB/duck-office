@@ -223,36 +223,129 @@ fn group_index(g: &Group, v: &PItem, n_items: usize) -> u32 {
 /// Lê os registros do cache: para cada campo, o índice do item (já no
 /// grupo, para campos agrupados). Valores próprios dos registros viram
 /// itens novos no campo.
-pub fn read_records(pkg: &Package, cache: &mut PivotCache) -> Option<Records> {
-    let part = cache.records_part.clone()?;
-    let x = pkg.read(&part).ok()?;
-    let n_fields = cache.fields.len();
-    let real: Vec<usize> = (0..n_fields).filter(|&i| !cache.fields[i].virtual_field).collect();
-    let mut cols: Vec<Vec<u32>> = vec![Vec::with_capacity(cache.record_count); n_fields];
-    // Itens brutos (os que os registros indexam) e índice para deduplicar os novos.
-    let mut raw: Vec<Vec<PItem>> = cache.fields.iter().map(|f| f.raw_items().to_vec()).collect();
-    let mut dedupe: Vec<HashMap<String, u32>> = vec![HashMap::new(); n_fields];
-    let mut count = 0;
-    for_each(&x, b"r", |_, body| {
+/// Chave de um valor escrito no próprio registro.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum ItemKey {
+    Text(String),
+    Num(u64),
+    Date(u64),
+    Bool(bool),
+    Err(String),
+    Missing,
+}
+
+fn item_key(i: &PItem) -> ItemKey {
+    match i {
+        PItem::Str(s) => ItemKey::Text(s.clone()),
+        PItem::Num(n) => ItemKey::Num(n.to_bits()),
+        PItem::Date(n) => ItemKey::Date(n.to_bits()),
+        PItem::Bool(b) => ItemKey::Bool(*b),
+        PItem::Err(e) => ItemKey::Err(e.clone()),
+        PItem::Missing => ItemKey::Missing,
+    }
+}
+
+/// Valor novo de um pedaço (índice na lista do pedaço).
+const NEW: u32 = 1 << 31;
+
+/// Registros de um pedaço: códigos por campo e os valores escritos neles.
+struct RecordChunk {
+    cols: Vec<Vec<u32>>,
+    new: Vec<Vec<PItem>>,
+    count: usize,
+}
+
+fn record_chunk(x: &[u8], real: &[usize], n_fields: usize) -> RecordChunk {
+    let mut out = RecordChunk { cols: vec![Vec::new(); n_fields], new: vec![Vec::new(); n_fields], count: 0 };
+    let mut seen: Vec<HashMap<ItemKey, u32>> = vec![HashMap::new(); n_fields];
+    for_each(x, b"r", |_, body| {
         let mut k = 0;
         simple_children(body, |n, a| {
             let Some(&fi) = real.get(k) else { return };
             k += 1;
             let idx = if n == b"x" {
-                num(a, b"v").unwrap_or(0.0) as u32
+                attr(a, b"v").and_then(parse_u32).unwrap_or(0)
             } else {
                 let it = item_of(n, a);
-                let key = format!("{it:?}");
-                let list = &mut raw[fi];
-                *dedupe[fi].entry(key).or_insert_with(|| {
+                let list = &mut out.new[fi];
+                NEW | *seen[fi].entry(item_key(&it)).or_insert_with(|| {
                     list.push(it);
-                    (list.len() - 1) as u32
+                    list.len() as u32 - 1
                 })
             };
-            cols[fi].push(idx);
+            out.cols[fi].push(idx);
         });
-        count += 1;
+        out.count += 1;
     });
+    out
+}
+
+/// Pedaços de um trecho que terminam em `</r>`.
+fn record_pieces(x: &[u8], size: usize) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    let mut a = 0;
+    while a < x.len() {
+        let end = (a + size).min(x.len());
+        let b = match memchr::memmem::find(&x[end..], b"</r>") {
+            Some(i) if end < x.len() => end + i + 4,
+            _ => x.len(),
+        };
+        out.push(&x[a..b]);
+        a = b;
+    }
+    out
+}
+
+pub fn read_records(pkg: &Package, cache: &mut PivotCache) -> Option<Records> {
+    /// Quanto XML fica na memória de uma vez, e o pedaço de cada thread.
+    const WINDOW: usize = 32 << 20;
+    const PIECE: usize = 1 << 20;
+    let part = cache.records_part.clone()?;
+    let n_fields = cache.fields.len();
+    let real: Vec<usize> = (0..n_fields).filter(|&i| !cache.fields[i].virtual_field).collect();
+    let mut cols: Vec<Vec<u32>> = (0..n_fields)
+        .map(|i| Vec::with_capacity(if real.contains(&i) { cache.record_count } else { 0 }))
+        .collect();
+    // Itens brutos (os que os registros indexam) e índice para deduplicar os novos.
+    let mut raw: Vec<Vec<PItem>> = cache.fields.iter().map(|f| f.raw_items().to_vec()).collect();
+    let mut dedupe: Vec<HashMap<ItemKey, u32>> = vec![HashMap::new(); n_fields];
+    let mut count = 0;
+    let mut take = |x: &[u8]| {
+        use rayon::prelude::*;
+        let chunks: Vec<RecordChunk> =
+            record_pieces(x, PIECE).into_par_iter().map(|p| record_chunk(p, &real, n_fields)).collect();
+        for c in chunks {
+            count += c.count;
+            for (fi, (codes, new)) in c.cols.into_iter().zip(c.new).enumerate() {
+                // Valores novos do pedaço na lista do campo.
+                let map: Vec<u32> = new
+                    .into_iter()
+                    .map(|it| {
+                        let list = &mut raw[fi];
+                        *dedupe[fi].entry(item_key(&it)).or_insert_with(|| {
+                            list.push(it);
+                            list.len() as u32 - 1
+                        })
+                    })
+                    .collect();
+                let code = |k: u32| if k & NEW != 0 { map[(k & !NEW) as usize] } else { k };
+                cols[fi].extend(codes.into_iter().map(code));
+            }
+        }
+    };
+    let mut buf: Vec<u8> = Vec::new();
+    pkg.read_pieces(&part, |b| {
+        buf.extend_from_slice(b);
+        if buf.len() >= WINDOW
+            && let Some(cut) = memchr::memmem::rfind(&buf, b"</r>").map(|i| i + 4)
+        {
+            take(&buf[..cut]);
+            buf.drain(..cut);
+        }
+    })
+    .ok()?;
+    take(&buf);
+    drop(buf);
     // Campos com grupo: índice bruto → índice do grupo (a partir dos índices
     // brutos: um campo base também pode estar agrupado).
     let raw_cols = cols.clone();
@@ -345,6 +438,7 @@ pub fn parse_pivot_table(x: &[u8]) -> Option<PivotTable> {
                 name: attr_str(fa, b"name"),
                 num_fmt: num(fa, b"numFmtId").map(|v| v as u32),
                 insert_blank_row: flag(fa, b"insertBlankRow", false),
+                source_sort: flag(fa, b"dataSourceSort", false),
                 ..Default::default()
             };
             if let Some(it) = find_tag(inner_b, 0, b"items") {
@@ -353,7 +447,8 @@ pub fn parse_pivot_table(x: &[u8]) -> Option<PivotTable> {
                         x: num(ia, b"x").map(|v| v as u32).or_else(|| attr(ia, b"t").is_none().then_some(0)),
                         t: attr_str(ia, b"t"),
                         hidden: flag(ia, b"h", false),
-                        collapsed: !flag(ia, b"sd", true),
+                        // No Modelo de Dados, recolhido é `e="0"`.
+                        collapsed: !flag(ia, b"sd", true) || !flag(ia, b"e", true),
                         missing: flag(ia, b"m", false),
                         name: attr_str(ia, b"n"),
                     });
@@ -470,6 +565,8 @@ pub fn parse_pivot_table(x: &[u8]) -> Option<PivotTable> {
         show_error: flag(a, b"showError", false),
         error_caption: attr_str(a, b"errorCaption").unwrap_or_default(),
         filters,
+        missing_caption: attr_str(a, b"missingCaption"),
+        cube: crate::cube::parse_cube_pivot(x).map(Box::new),
     })
 }
 
@@ -489,4 +586,21 @@ pub fn read_pivot_tables(pkg: &Package, sheet_part: &str) -> Vec<PivotTable> {
     }
     out.sort_by_key(|t| (t.range.first_row, t.range.first_col));
     out
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+
+    #[test]
+    fn pieces_and_chunks() {
+        let x = br#"<r><x v="1"/><n v="5"/></r><r><x v="0"/><n v="7"/></r><r><x v="2"/><n v="5"/></r>"#;
+        let p = record_pieces(x, 10);
+        assert_eq!(p.len(), 3);
+        assert_eq!(p.concat(), x.to_vec());
+        let c = record_chunk(x, &[0, 1], 2);
+        assert_eq!((c.count, &c.cols[0]), (3, &vec![1, 0, 2]));
+        assert_eq!(c.cols[1], [NEW, NEW | 1, NEW]);
+        assert_eq!(c.new[1], [PItem::Num(5.0), PItem::Num(7.0)]);
+    }
 }

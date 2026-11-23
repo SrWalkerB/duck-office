@@ -45,6 +45,8 @@ pub enum Act {
     GoTo,
     /// Zoom: mais/menos 10 (0 = 100%).
     Zoom(i8),
+    /// Zoom num nível.
+    ZoomTo(u16),
     Grid,
     Headers,
     Freeze(Freeze),
@@ -78,6 +80,7 @@ pub enum Drop {
     Format,
     Clear,
     Freeze,
+    Zoom,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -290,7 +293,7 @@ const VIEW: &[Group] = &[
             &[
                 b(Act::Zoom(-1), "-", "Diminuir o zoom (Ctrl+-)"),
                 b(Act::Zoom(0), "100%", "Zoom em 100% (Ctrl+0)"),
-                b(Act::Zoom(1), "+", "Aumentar o zoom (Ctrl+=)"),
+                b(Act::Zoom(1), "+", "Aumentar o zoom (Ctrl++)"),
             ],
             &[],
         ],

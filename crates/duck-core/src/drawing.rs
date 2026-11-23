@@ -206,6 +206,8 @@ pub struct Series {
     pub label_fill: Option<ChartColor>,
     /// Cores de pontos individuais (`c:dPt`): (índice, cor).
     pub points: Vec<(u32, ChartColor)>,
+    /// Todas as células da série estão escondidas: fora do gráfico e da legenda.
+    pub hidden: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -261,6 +263,8 @@ pub struct Chart {
     pub border: Option<ChartColor>,
     /// Gráfico de tabela dinâmica (os valores vêm da tabela).
     pub pivot: bool,
+    /// Mostra também as linhas e colunas escondidas (`plotVisOnly="0"`).
+    pub plot_hidden: bool,
     /// Parte do gráfico (`xl/charts/chartN.xml`).
     pub part: String,
 }
@@ -307,6 +311,15 @@ pub struct SlicerPivot {
     pub tables: Vec<(u32, String)>,
     /// Índice no cache de cada item (na ordem de `Slicer::items`).
     pub item_x: Vec<u32>,
+    /// Modelo de Dados: nome único de cada item (`source` é a hierarquia);
+    /// vazio nas outras.
+    pub members: Vec<String>,
+}
+
+impl SlicerPivot {
+    pub fn is_cube(&self) -> bool {
+        self.source.starts_with('[')
+    }
 }
 
 /// Linha do tempo: filtro de datas das tabelas dinâmicas (um período ou
@@ -338,20 +351,50 @@ pub struct Timeline {
     pub bounds: (f64, f64),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ControlKind {
+    Radio,
+    Check,
+    Button,
+    GroupBox,
+    Label,
+    /// Os outros (listas, barras): só o lugar deles.
+    #[default]
+    Other,
+}
+
+/// Controle de formulário (`xl/ctrlProps/ctrlPropN.xml`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Control {
+    pub kind: ControlKind,
+    pub text: crate::shape::TextBody,
+    pub checked: bool,
+    /// Célula ligada, como está no arquivo (`$B$2`, `Aba!$B$2`).
+    pub link: Option<String>,
+    /// Botões de opção: grupo na aba e posição nele (1, 2...).
+    pub group: u32,
+    pub index: u32,
+    /// Parte do controle.
+    pub part: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ObjectKind {
     Chart(Box<Chart>),
     Slicer(Box<Slicer>),
     Timeline(Box<Timeline>),
-    /// Forma com texto (caixa de texto, botão).
-    Shape {
-        text: String,
-        fill: Option<ChartColor>,
-        line: Option<ChartColor>,
-    },
+    /// Forma, caixa de texto ou conector.
+    Shape(Box<crate::shape::Shape>),
+    /// Controle de formulário (botão de opção, caixa de seleção, botão).
+    Control(Box<Control>),
     /// Imagem (caminho da parte no pacote).
     Picture {
         part: String,
+        /// Frações cortadas de cada lado (esquerda, cima, direita, baixo).
+        crop: [f32; 4],
+        line: Option<crate::shape::Line>,
+        /// Câmera: o intervalo que a imagem mostra (`Aba!$A$1:$B$2`).
+        camera: Option<String>,
     },
 }
 
@@ -362,10 +405,27 @@ pub struct Object {
     /// objetos dentro de grupos.
     pub frac: [f32; 4],
     pub kind: ObjectKind,
+    /// `id` e nome do objeto no desenho (`xdr:cNvPr`).
+    pub id: u32,
+    pub name: String,
+    pub hidden: bool,
+    /// Link ao clicar: `#Aba!A1` (neste arquivo) ou um endereço.
+    pub link: Option<String>,
+    /// Macro ao clicar (`[0]!Nome`).
+    pub macro_name: Option<String>,
 }
 
 impl Object {
     pub fn new(anchor: Anchor, kind: ObjectKind) -> Self {
-        Self { anchor, frac: [0.0, 0.0, 1.0, 1.0], kind }
+        Self {
+            anchor,
+            frac: [0.0, 0.0, 1.0, 1.0],
+            kind,
+            id: 0,
+            name: String::new(),
+            hidden: false,
+            link: None,
+            macro_name: None,
+        }
     }
 }

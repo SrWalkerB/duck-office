@@ -62,3 +62,9 @@ jobs:
             ./target/release/duck-bench roundtrip "$f" --edit 500
             ./target/release/duck-bench roundtrip "$f" --estrutura
           done
+
+      # Contagens e acertos da vitrine (formas, gráficos, fórmulas, links,
+      # salvar) contra a linha de base do repositório.
+      - name: Regressão
+        shell: bash
+        run: ./target/release/duck-bench regress target/vitrine.xlsx --base scripts/bench/vitrine.txt

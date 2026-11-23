@@ -23,7 +23,11 @@ crates/              a suíte office
   duck-deflate/      descompactação deflate em paralelo (especulativa)
   duck-xlsx/         leitura e gravação de .xlsx/.xlsm (em paralelo, gravação por remendo) e de .csv
   duck-calc/         fórmulas: referências, modelos relativos e ajuste ao inserir/apagar linhas
-  duck-bench/        medição: open, sweep, verify, roundtrip, gen, gen-showcase, inflate, preview
+  duck-emf/          imagens EMF (registros GDI) para pixels
+  duck-vba/          macros: projeto VBA do arquivo, analisador, interpretador e objetos do Excel
+  duck-dax/          Modelo de Dados: definições, medidas DAX e consultas das dinâmicas
+  duck-bench/        medição e conferência: open, sweep, verify, roundtrip, calc, dinamicas, modelo,
+                     objetos, regress, gen, gen-showcase, inflate, preview
 scripts/
   check-platform-deps.sh   garante que platform/ não depende da suíte
 ```
@@ -48,13 +52,15 @@ xcode-select --install
 cargo run --release -p duck-sheets -- caminho/arquivo.xlsx
 ```
 
-Sem arquivo, abre o diálogo nativo (ou arraste o arquivo para a janela). Teclas: setas (+Shift seleciona, +Ctrl vai até a borda dos dados), PageUp/PageDown, Ctrl+Home/End, Ctrl+PageUp/PageDown (abas), Ctrl+C (copia a seleção), Ctrl+F e F3 (busca), Ctrl+G ou F5 (ir para), Ctrl+O (abrir), Ctrl+A, Ctrl + roda ou Ctrl +/−/0 (zoom).
+Sem arquivo, abre uma planilha em branco (Ctrl+O abre um arquivo, ou arraste-o para a janela). Teclas: setas (+Shift seleciona, +Ctrl vai até a borda dos dados), PageUp/PageDown, Ctrl+Home/End, Ctrl+PageUp/PageDown (abas), Ctrl+C (copia a seleção), Ctrl+F e F3 (busca), Ctrl+G ou F5 (ir para), Ctrl+O (abrir), Ctrl+A, Ctrl + roda ou Ctrl +/−/0 (zoom; também no controle do canto inferior direito).
 
 A faixa de opções em cima tem as abas **Arquivo** (novo, abrir, recentes, salvar, salvar como, "Abrir com" do sistema), **Página Inicial** (área de transferência, fonte, alinhamento, número, células, edição), **Inserir** (linhas, colunas, mesclagem) e **Exibir** (zoom, linhas de grade, cabeçalhos, congelar painéis). O clique direito na grade ou nos cabeçalhos abre um menu com as ações mais comuns.
 
 Edição: digitar substitui a célula; F2, duplo clique ou clique na barra de fórmulas editam o conteúdo; Enter/Tab confirmam e Esc cancela; Delete apaga a seleção; Ctrl+C, Ctrl+X e Ctrl+V copiam, recortam e colam (de outros programas também); Ctrl+Z e Ctrl+Y desfazem e refazem; Ctrl+S salva e Ctrl+Shift+S salva como. A barra de ferramentas tem negrito, itálico, sublinhado, tachado, cores, alinhamento, formatos de número, bordas e inserir/apagar linhas e colunas (também Ctrl+N/B, Ctrl+I, Ctrl+U, Ctrl+5, Ctrl+Shift+1/3/4/5/7 e Ctrl+Alt+= / Ctrl+Alt+-).
 
-O que se digita é lido como no Excel em português: `1.234,56`, `10%`, `R$ 10`, `22/11/2026`, `14:30`, `VERDADEIRO`, `=A1*2`. Fórmulas simples ganham valor na hora; as outras (com intervalos, como `SUM`) ficam sem valor até o motor de cálculo (F4), e o arquivo salvo pede ao Excel para recalcular ao abrir.
+O que se digita é lido como no Excel em português: `1.234,56`, `10%`, `R$ 10`, `22/11/2026`, `14:30`, `VERDADEIRO`, `=A1*2`. As fórmulas digitadas são calculadas na hora (e o que depende delas acompanha); uma função que o motor ainda não tem fica sem valor e o arquivo salvo pede ao Excel para recalcular ao abrir.
+
+Objetos: formas, imagens e controles com link ou macro respondem ao clique; os botões +/− dos grupos abrem e fecham linhas e colunas. As macros VBA do arquivo rodam num interpretador próprio, que pergunta uma vez por arquivo e só enxerga a planilha (sem arquivos, internet ou outros programas); Ctrl+Z desfaz a macro inteira.
 
 Opções: `--sheet N` (aba inicial, 1 = primeira), `--cell B12`, `--zoom 80`, `--find texto`, `--novo` (planilha em branco). Para testar a edição sem a janela: `--edit A1=valor` (também `copiar:A1:B2`, `colar:D5`, `inserir:A5:A6`, `formatar:negrito:A1:B2`, `mesclar-centralizar:A1:C1`, `ocultar-linhas:A3:A4`, `congelar:B2`, `largura=20:C1`...), `--undo N`, `--save-to cópia.xlsx`; e, para screenshots, `--aba exibir` e `--menu bordas` (abre um menu).
 
@@ -137,6 +143,16 @@ Salvar numa cópia e conferir (partes intactas idênticas byte a byte, abas regr
 ```
 cargo run --release -p duck-bench -- roundtrip caminho/arquivo.xlsx --edit 500
 ```
+
+Conferir de uma vez o que já funciona (abertura, memória, fórmulas, dinâmicas, Modelo de Dados, gráficos, links, macros, salvar) contra a linha de base, e falhar se algo piorou:
+
+```
+cargo run --release -p duck-bench -- regress
+cargo run --release -p duck-bench -- regress --gravar
+cargo run --release -p duck-bench -- regress vitrine.xlsx --base scripts/bench/vitrine.txt
+```
+
+Sem arquivo, usa as linhas `regress = "..."` do `bench.local.toml` e a base `bench.baseline.txt` (os dois fora do git). Com `--base`, só o que não depende da máquina: é o que o CI confere com a vitrine.
 
 Gerar uma planilha sintética grande (600 mil linhas × 37 colunas por padrão):
 

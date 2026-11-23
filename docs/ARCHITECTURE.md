@@ -169,12 +169,15 @@ duck-office/
 │   ├── duck-core          # modelo do workbook: células, blocos, strings, estilos
 │   ├── duck-xlsx          # leitura (v1) e escrita (v2) de xlsx/xlsm em streaming
 │   ├── duck-calc          # fórmulas: referências e modelos relativos (hoje); parser, AST e cálculo (F4)
+│   ├── duck-emf           # imagens EMF
+│   ├── duck-vba           # macros: leitura do projeto, analisador e interpretador (ADR-010)
+│   ├── duck-dax           # Modelo de Dados: tabelas, medidas DAX e consultas das dinâmicas
 │   ├── duck-sheets        # o app: grade virtualizada, barra de fórmulas, abas
 │   └── duck-bench         # CLI de benchmark + gerador de planilhas sintéticas
 └── docs/
 ```
 
-Futuras: `duck-vba`, `duck-docs`, `duck-slides`, todas reutilizando `duck-core` (quando fizer sentido) e a camada `platform/`.
+Futuras: `duck-docs`, `duck-slides`, todas reutilizando `duck-core` (quando fizer sentido) e a camada `platform/`.
 
 **Regras de dependência.**
 
@@ -329,14 +332,14 @@ Futuras: `duck-vba`, `duck-docs`, `duck-slides`, todas reutilizando `duck-core` 
 
 ---
 
-## ADR-010 · VBA: preservar agora, executar depois
+## ADR-010 · VBA: preservar e executar isolado
 
 **Contexto.** Arquivos `.xlsm` dependem de macros. Executar VBA é um projeto grande e um risco de segurança (macros são um vetor clássico de malware).
 
 **Decisão.**
 
 - **v1**: o `vbaProject.bin` é **preservado intacto** (ADR-006). O app mostra que o arquivo tem macros, sem executá-las.
-- **Futuro (`duck-vba`)**:
+- **F6 (`duck-vba`, feito; veja o status da F6)**:
   1. Ler o container CFB (OLE) e descompactar o código-fonte (MS-OVBA).
   2. Parser e interpretador VBA em Rust.
   3. **Modelo de objetos estilo Excel** (`Application`, `Workbook`, `Worksheet`, `Range`, ...) implementado sobre a camada de comandos (ADR-009).
@@ -865,6 +868,19 @@ Conferência (`duck-bench dinamicas`): na planilha de painel, 21 de 21 tabelas c
 - **Matrizes dinâmicas** (`duck-calc/src/dynarr.rs`): as funções avaliam os argumentos em modo matricial e devolvem `V::Arr`. LET vira variáveis locais no compilador (`Node::Local`, pilha no avaliador). No recálculo, `Engine::eval_full` devolve a matriz inteira; espalham as fórmulas de matriz do arquivo e as digitadas na sessão (avaliadas como no Excel atual), as comuns de arquivos antigos mantêm a interseção implícita. O app guarda a área de cada uma (`Calc::spills`), grava os vizinhos, muda a área da fórmula (`set_formula_kind`), limpa o que sobrou e bloqueia quando o usuário escreve na área. O gravador usa `t="array" ref`, `cm` e cria o `metadata.xml` (`XLDAPR`) se faltar.
 
 Conferência: 38 de 38 dinâmicas com registros idênticas ao Excel; 100% das fórmulas iguais nas duas planilhas reais e 0 valores mudados no recálculo completo; round-trip em todos os modos; clique, linha do tempo, desfazer e inserir/apagar conferidos nas cópias salvas.
+
+### Status da F6 (23/11/2026): planilhas de painel reais
+
+- **Dados visíveis dos gráficos** (`duck-calc/src/chartdata.rs`): com `plotVisOnly`, as séries são relidas só das linhas e colunas à mostra, com a mesma seleção do Excel (categorias e valores saem juntos).
+- **Formas** (`duck-core/src/shape.rs`, `duck-xlsx/src/shape.rs`): a geometria vira polígonos uma vez, na leitura; o desenho triangula por orelhas e usa um tipo de instância novo na GPU para linhas (distância ao segmento, suavizada sem MSAA).
+- **Macros** (`duck-vba`): `vbaProject.bin` (CFB + MS-OVBA) é lido só no primeiro clique. O interpretador fala com a planilha por um trait (`Backend`): células e dinâmicas escritas ficam numa fila e são aplicadas quando a macro lê algo que depende delas ou no fim, como **um** passo de desfazer. Limpar célula já vazia não vira mudança.
+- **Modelo de Dados**: o `item.data` (backup ABF, comprimido em Xpress) é lido só para as **definições** (tabelas, colunas, relações, medidas). Os dados vêm das tabelas das abas, montados no primeiro uso (abrir o arquivo não paga por isso): cada coluna tem dicionário e índice por código, os filtros são bitsets, as relações viram tabelas código → linha e as agregações comuns saem de varreduras por código em paralelo (rayon) com memória por contexto. As linhas e colunas das dinâmicas são calculadas em paralelo.
+- **Dinâmicas e segmentações do modelo** (`duck-xlsx/src/write/cube.rs`): o gravador escreve itens, membros escolhidos e caches no formato OLAP; membros novos entram no cache.
+- **Registros de cache grandes**: descomprimidos e lidos em paralelo em janelas de 32 MB (o primeiro clique no cache de 593 mil registros caiu de 3,4 s para 0,86 s).
+- **Custo**: abrir continua igual (292 e 389 ms; antes 289 e 377 ms, dentro do ruído) e a memória também (176 e 373 MB; antes 178 e 381 MB). Os atributos das linhas são lidos numa passada só.
+- **Regressão** (`duck-bench regress`): as métricas acima, por arquivo, contra uma linha de base. A das planilhas reais fica fora do git e não guarda nomes nem conteúdo; a da vitrine (`scripts/bench/vitrine.txt`) roda no CI.
+
+Conferência: 74 de 74 séries de gráficos iguais, 38 de 38 dinâmicas com registros idênticas, 28 de 34 do modelo idênticas (13.129 de 13.144 valores), 100% das fórmulas, 6 de 6 macros da planilha maior e round-trip em todos os modos. Os arquivos salvos são conferidos pelo nosso leitor e pelo calamine; não foram abertos no Excel.
 
 ---
 

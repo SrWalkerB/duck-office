@@ -13,7 +13,8 @@ Onde o projeto está, o que já foi feito e o que falta. Os detalhes de cada dec
 | **F3.5** | Casca do app: faixa de opções, menu Arquivo, clique direito, novo arquivo, "Abrir com"; filtro e classificação | ✅ Concluída (teste manual pendente) |
 | **F4** | Motor de cálculo | ✅ Concluída (com matrizes dinâmicas) |
 | **F5** | Gráficos, imagens, tabelas dinâmicas, segmentações, linhas do tempo | ✅ Concluída (versão 1.0) |
-| **F6+** | Edição de gráficos, VBA, formato nativo, docs e slides | ⏳ Depois da versão 1.0 |
+| **F6** | Planilhas de painel reais: formas fiéis, controles, links, grupos, macros VBA e Modelo de Dados | ✅ Concluída (teste manual pendente) |
+| **F7+** | Edição de gráficos, formato nativo, docs e slides | ⏳ Depois |
 
 ---
 
@@ -171,16 +172,28 @@ Critério de pronto: recalcular o arquivo de referência sem travar a janela. �
 
 ## ✅ Versão 1.0 do duck-sheets
 
-O que entra na primeira versão: tudo das fases F0 a F5. O que fica para depois: edição de gráficos, LAMBDA, VBA (preservado, não executado), formato nativo, impressão/PDF, `duck-docs` e `duck-slides`.
+O que entra na primeira versão: tudo das fases F0 a F5. O que fica para depois: edição de gráficos, LAMBDA, formato nativo, impressão/PDF, `duck-docs` e `duck-slides`.
 
 - [x] Versão 1.0.0, "Sobre o duck-sheets" no menu Arquivo e `duck-sheets --version`.
 - [x] Pacotes (`scripts/package.sh`, fluxo `.github/workflows/release.yml` numa etiqueta `v*`): Windows (`.zip`), Linux (`.tar.gz` com `.desktop`) e macOS (`.app` com os tipos de arquivo, sem assinatura).
 - [ ] Teste manual de teclado e mouse na janela nos três sistemas.
 - [ ] Publicar a etiqueta `v1.0.0`.
 
-## ⏳ F6+ · O resto da suíte
+## ✅ F6 · Planilhas de painel reais
 
-- [ ] VBA (hoje só preservado).
+Tudo o que as duas planilhas reais de teste usam, com os mesmos resultados do Excel (menos Power Query):
+
+- [x] **Gráficos ignoram linhas e colunas escondidas** (`plotVisOnly`); série toda escondida sai do gráfico e da legenda. 74 de 74 séries iguais às que o Excel guardou.
+- [x] **Formas fiéis**: geometrias prontas e livres, gradiente, contorno, setas, sombra e texto com trechos formatados; linhas suavizadas na GPU. Imagens recortadas e com contorno; câmera (imagem ligada a um intervalo) ao vivo.
+- [x] **Links, macros e controles**: clicar em formas, imagens e gráficos segue o link ou roda a macro; botões de opção, caixas de seleção e listas desenhados, clicáveis, ligados à célula e gravados.
+- [x] **Grupos** de linhas e colunas com +/− e níveis; **reduzir para caber**; grade que cresce ao rolar.
+- [x] **Macros VBA** (`duck-vba`): as 6 macros da planilha maior rodam, salvam e desfazem num passo. Sem acesso a arquivos, rede ou outros programas; pergunta uma vez por arquivo.
+- [x] **Modelo de Dados** (`duck-dax`): 34 dinâmicas e 13 segmentações recalculadas a partir das tabelas das abas, com as medidas DAX e as relações do arquivo. 28 idênticas; 13.129 de 13.144 valores iguais, ~0,2 s para todas. Das 6 diferentes, 4 são dados que mudaram nas tabelas depois da última atualização no Excel, e 2 são ordem de empates e de texto concatenado.
+- [x] **Regressão** (`duck-bench regress`): contagens, acertos, tempo e memória contra uma linha de base; no CI, com a vitrine.
+- [ ] Macros que excluem abas ou usam outros programas (PowerPoint, Outlook) param com um erro claro.
+
+## ⏳ F7+ · O resto da suíte
+
 - [ ] Formato de arquivo nativo (ADR-013, em discussão).
 - [ ] Assinatura e notarização do pacote do macOS; instalador do Windows.
 - [ ] `duck-docs` e `duck-slides` sobre a mesma camada `platform/`.

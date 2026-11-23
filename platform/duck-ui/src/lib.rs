@@ -136,10 +136,27 @@ impl<'a> Painter<'a> {
             self.fill(r, clip, color);
             return;
         }
-        let (nx, ny) = (-dy / len * w / 2.0, dx / len * w / 2.0);
-        let p =
-            [[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]];
-        self.polygon(&p, clip, color);
+        if let Some((a, b)) = clip_segment(a, b, clip) {
+            self.out.push(Instance::line(a, b, w, color));
+        }
+    }
+
+    /// Polígono simples (convexo ou não), com as bordas suavizadas.
+    pub fn shape(&mut self, pts: &[[f32; 2]], clip: &Rect, color: Rgba) {
+        for t in triangulate(pts) {
+            self.triangle(pts[t[0]], pts[t[1]], pts[t[2]], clip, color);
+        }
+        // Borda fina por cima dos triângulos (que não são suaves).
+        if color[3] == 255 {
+            self.outline(pts, clip, 0.7, color);
+        }
+    }
+
+    /// Contorno fechado com `w` pixels de espessura.
+    pub fn outline(&mut self, pts: &[[f32; 2]], clip: &Rect, w: f32, color: Rgba) {
+        for i in 0..pts.len() {
+            self.line(pts[i], pts[(i + 1) % pts.len()], w, clip, color);
+        }
     }
 
     /// Retângulo tracejado (bordas pontilhadas e tracejadas).
@@ -224,6 +241,72 @@ impl<'a> Painter<'a> {
         let y = (r.y0 + (r.h() - lh) / 2.0).floor();
         self.text_aligned(s, style, r.x0 + pad, r.x1 - pad, y, align, &r, color)
     }
+}
+
+/// Parte do segmento dentro do retângulo (Liang–Barsky).
+fn clip_segment(a: [f32; 2], b: [f32; 2], c: &Rect) -> Option<([f32; 2], [f32; 2])> {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for (p, q) in [(-dx, a[0] - c.x0), (dx, c.x1 - a[0]), (-dy, a[1] - c.y0), (dy, c.y1 - a[1])] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+        } else if p < 0.0 {
+            t0 = t0.max(q / p);
+        } else {
+            t1 = t1.min(q / p);
+        }
+    }
+    let at = |t: f32| [a[0] + dx * t, a[1] + dy * t];
+    (t0 <= t1).then(|| (at(t0), at(t1)))
+}
+
+/// Triângulos (índices) de um polígono simples, por corte de orelhas.
+pub fn triangulate(pts: &[[f32; 2]]) -> Vec<[usize; 3]> {
+    let n = pts.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    let cross =
+        |a: [f32; 2], b: [f32; 2], c: [f32; 2]| (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    let area: f32 = (0..n)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum();
+    let sign = if area < 0.0 { -1.0 } else { 1.0 };
+    let mut idx: Vec<usize> = (0..n).collect();
+    let mut out = Vec::with_capacity(n - 2);
+    while idx.len() > 3 {
+        let m = idx.len();
+        let ear = (0..m).find(|&i| {
+            let (a, b, c) = (pts[idx[(i + m - 1) % m]], pts[idx[i]], pts[idx[(i + 1) % m]]);
+            let turn = cross(a, b, c) * sign;
+            if turn < 0.0 {
+                return false;
+            }
+            // Vértices quase alinhados: pode cortar sem olhar os outros.
+            turn < 1e-6
+                || !idx.iter().enumerate().any(|(k, &q)| {
+                    let p = pts[q];
+                    k != i
+                        && k != (i + m - 1) % m
+                        && k != (i + 1) % m
+                        && cross(a, b, p) * sign > 0.0
+                        && cross(b, c, p) * sign > 0.0
+                        && cross(c, a, p) * sign > 0.0
+                })
+        });
+        let Some(i) = ear else { break };
+        out.push([idx[(i + m - 1) % m], idx[i], idx[(i + 1) % m]]);
+        idx.remove(i);
+    }
+    if idx.len() == 3 {
+        out.push([idx[0], idx[1], idx[2]]);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

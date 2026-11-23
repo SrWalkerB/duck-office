@@ -1,6 +1,7 @@
 /target
 # Caminho local do arquivo de referência (dados reais, nunca vai para o repositório).
 bench.local.toml
+bench.baseline.txt
 *.png
 !docs/**/*.png
 !site/img/*.png

@@ -1,0 +1,12 @@
+[package]
+name = "duck-vba"
+description = "Leitor e interpretador restrito de macros VBA de planilhas"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+duck-core = { path = "../duck-core", version = "1.0.0" }
+duck-calc = { path = "../duck-calc", version = "1.0.0" }
