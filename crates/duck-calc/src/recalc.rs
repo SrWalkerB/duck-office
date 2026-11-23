@@ -41,6 +41,21 @@ pub struct SpillOut {
     /// Valores das células da área, sem a da fórmula.
     pub values: Vec<(u32, u32, CellValue)>,
 }
+
+/// Fórmula digitada que o motor não sabe calcular (mostra um erro em vez de
+/// ficar vazia).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Uncalculated {
+    pub sheet: u32,
+    pub row: u32,
+    pub col: u32,
+    pub error: CellError,
+    /// Nome (em português) da função que falta, se for uma função.
+    pub function: Option<String>,
+    /// A função não existe (as outras existem no Excel).
+    pub unknown: bool,
+}
+
 use crate::parse::{self, Area, Formula, MAX_COL, MAX_ROW, Node, SheetSel, flag};
 use crate::value::{Sid, V};
 
@@ -106,6 +121,8 @@ pub struct Outcome {
     pub overlay: Overlay,
     /// Fórmulas que espalham.
     pub spills: Vec<SpillOut>,
+    /// Fórmulas digitadas que não foram calculadas.
+    pub uncalculated: Vec<Uncalculated>,
     pub cells: u64,
     pub levels: usize,
     pub cancelled: bool,
@@ -416,17 +433,29 @@ impl Graph {
         let levels = self.plan(dirty);
         let mut overlay = Overlay::default();
         let mut spill_out: Vec<SpillOut> = Vec::new();
+        let mut uncalculated: Vec<Uncalculated> = Vec::new();
         let mut cells = 0u64;
         let n_levels = levels.len();
         for level in levels {
             if cancel.load(Ordering::Relaxed) {
-                return Outcome { overlay, spills: spill_out, cells, levels: n_levels, cancelled: true };
+                return Outcome {
+                    overlay,
+                    spills: spill_out,
+                    uncalculated,
+                    cells,
+                    levels: n_levels,
+                    cancelled: true,
+                };
             }
             // Tarefas: pedaços de linhas dos blocos do nível.
             let mut tasks: Vec<(u32, u32, u32)> = Vec::new();
             for &k in &level {
                 let Some(r) = self.runs.get(k as usize) else { continue };
-                if r.flags & flag::OPAQUE != 0 {
+                // Função que o motor não calcula: o valor do arquivo fica. Só as
+                // digitadas (sem valor nenhum) precisam mostrar o erro.
+                if r.flags & flag::OPAQUE != 0
+                    && book.sheets.get(r.sheet as usize).is_none_or(|s| s.edits().cells.is_empty())
+                {
                     continue;
                 }
                 if r.seq {
@@ -444,22 +473,27 @@ impl Graph {
                 continue;
             }
             let view = Book { overlay: Some(&overlay), ..book.clone() };
-            type TaskOut = (Vec<(u32, u32, u32, CellValue)>, Vec<SpillOut>);
+            type TaskOut = (Vec<(u32, u32, u32, CellValue)>, Vec<SpillOut>, Vec<Uncalculated>);
             let results: Vec<TaskOut> = tasks
                 .par_iter()
                 .map(|&(k, a, b)| {
                     let r = self.runs[k as usize];
                     let mut out = Vec::new();
                     let mut sp = Vec::new();
+                    let mut un = Vec::new();
                     if cancel.load(Ordering::Relaxed) {
-                        return (out, sp);
+                        return (out, sp, un);
                     }
                     if r.seq {
                         // De cima para baixo, vendo os próprios resultados.
                         let local = RwLock::new(Overlay::default());
                         let seq_view = Book { local: Some(&local), ..view.clone() };
                         for row in a..=b {
-                            if let Some(v) = eng.eval_cell(&seq_view, r.sheet, row, r.col)
+                            let v = match eng.eval_cell(&seq_view, r.sheet, row, r.col) {
+                                None => typed_error(&seq_view, eng, r.sheet, row, r.col, &mut un),
+                                v => v,
+                            };
+                            if let Some(v) = v
                                 && !same(&seq_view.get(Sid::Local(r.sheet), row, r.col), &v)
                             {
                                 local.write().unwrap().set(r.sheet, row, r.col, v.clone());
@@ -470,23 +504,20 @@ impl Graph {
                         let sheet = &view.sheets[r.sheet as usize];
                         for row in a..=b {
                             // Espalham: fórmulas de matriz e as digitadas nesta sessão.
-                            let spill_ok = matches!(
+                            let is_array = matches!(
                                 sheet.formula(row, r.col).map(|f| f.kind),
                                 Some(FormulaKind::Array { .. })
-                            ) || sheet.edits().has(row, r.col);
+                            );
+                            let spill_ok = is_array || sheet.edits().has(row, r.col);
                             let v = match eng.eval_full(&view, r.sheet, row, r.col, spill_ok) {
-                                None => continue,
+                                None => match typed_error(&view, eng, r.sheet, row, r.col, &mut un) {
+                                    Some(v) => v,
+                                    None => continue,
+                                },
                                 Some(Full::One(v)) => {
-                                    // Espalhava e agora é um valor só: a área volta a ser só ela.
-                                    if spills.contains_key(&(r.sheet, row, r.col)) {
-                                        sp.push(SpillOut {
-                                            sheet: r.sheet,
-                                            row,
-                                            col: r.col,
-                                            range: None,
-                                            fixed: false,
-                                            values: Vec::new(),
-                                        });
+                                    if spill_ok || !spills.is_empty() {
+                                        let typed = spill_ok && !is_array;
+                                        sp.extend(one_result(&view, eng, &r, row, typed, spills));
                                     }
                                     v
                                 }
@@ -505,22 +536,77 @@ impl Graph {
                             }
                         }
                     }
-                    (out, sp)
+                    (out, sp, un)
                 })
                 .collect();
             if cancel.load(Ordering::Relaxed) {
-                return Outcome { overlay, spills: spill_out, cells, levels: n_levels, cancelled: true };
+                return Outcome {
+                    overlay,
+                    spills: spill_out,
+                    uncalculated,
+                    cells,
+                    levels: n_levels,
+                    cancelled: true,
+                };
             }
             cells += tasks.iter().map(|t| (t.2 - t.1 + 1) as u64).sum::<u64>();
-            for (list, sp) in results {
+            for (list, sp, un) in results {
                 for (s, r, c, v) in list {
                     overlay.set(s, r, c, v);
                 }
                 spill_out.extend(sp);
+                uncalculated.extend(un);
             }
         }
-        Outcome { overlay, spills: spill_out, cells, levels: n_levels, cancelled: false }
+        Outcome { overlay, spills: spill_out, uncalculated, cells, levels: n_levels, cancelled: false }
     }
+}
+
+/// O que muda na área de uma fórmula que deu um valor só.
+#[cold]
+#[inline(never)]
+fn one_result(
+    book: &Book,
+    eng: &Engine,
+    r: &Run,
+    row: u32,
+    typed: bool,
+    spills: &Spills,
+) -> Option<SpillOut> {
+    let out = |range| SpillOut { sheet: r.sheet, row, col: r.col, range, fixed: false, values: Vec::new() };
+    if typed
+        && matches!(book.get(Sid::Local(r.sheet), row, r.col), V::Empty)
+        && eng.needs_array(book, r.sheet, row, r.col)
+    {
+        // Recém-digitada, com matrizes dentro e um resultado só: gravada como
+        // matriz de uma célula, como o Excel faz.
+        let single = CellRange { first_row: row, first_col: r.col, last_row: row, last_col: r.col };
+        return Some(out(Some(single)));
+    }
+    // Espalhava e agora é um valor só: a área volta a ser só ela.
+    spills.contains_key(&(r.sheet, row, r.col)).then(|| out(None))
+}
+
+/// Erro de uma fórmula que o motor não calcula, se ela foi digitada (célula
+/// editada e ainda sem valor). As do arquivo ficam com o valor guardado.
+#[cold]
+#[inline(never)]
+fn typed_error(
+    book: &Book,
+    eng: &Engine,
+    sheet: u32,
+    row: u32,
+    col: u32,
+    un: &mut Vec<Uncalculated>,
+) -> Option<CellValue> {
+    let s = book.sheets.get(sheet as usize)?;
+    if !s.edits().has(row, col) || !matches!(book.get(Sid::Local(sheet), row, col), V::Empty) {
+        return None;
+    }
+    let u = eng.why_uncalculated(book, sheet, row, col);
+    let error = u.error;
+    un.push(u);
+    Some(CellValue::Error(error))
 }
 
 /// Uma fórmula com resultado matricial: a área que ocupa e os valores, ou
@@ -717,6 +803,91 @@ mod tests {
         assert_eq!(num(&out.overlay, 4, 3), Some(25.0));
         // B2..B5 não mudaram: não estão no resultado.
         assert_eq!(num(&out.overlay, 3, 1), None);
+    }
+
+    #[test]
+    fn typed_arrays_with_one_result() {
+        let mut s = sheet();
+        let shared = StringTable::new();
+        let extras = BookExtras::default();
+        let cancel = AtomicBool::new(false);
+        let typed = [
+            ("SUM(ABS(A1:A5))", true),
+            ("SUM(A1:A5)", false),
+            ("SUMPRODUCT((A1:A5>2)*A1:A5)", false),
+            ("SUM(_xlfn.MAP(A1:A5,_xlfn.LAMBDA(_xlpm.x,_xlpm.x)))", true),
+            ("SUM((A1:A5>2)*A1:A5)", true),
+            ("INDEX(A1:A5,2)+VLOOKUP(A2,A1:B5,1,FALSE)", false),
+            ("CORREL(A1:A5,A1:A5)", false),
+            ("MAX(LARGE(A1:A5,{1,2}))", true),
+        ];
+        for (k, (f, _)) in typed.iter().enumerate() {
+            s.set_cell(9, k as u32, CellValue::Empty, Some(f), None);
+        }
+        let book = Book::new(vec![&s], &shared, &extras, false);
+        let eng = Engine::new(&book);
+        let g = Graph::build(&book, &eng);
+        let dirty = Dirty::Cells((0..typed.len() as u32).map(|c| (0, 9, c)).collect());
+        let out = g.recalc(&book, &eng, &dirty, &cancel);
+        for (k, (f, array)) in typed.iter().enumerate() {
+            let marked = out.spills.iter().any(|x| x.col == k as u32 && x.range.is_some());
+            assert_eq!(marked, *array, "{f}");
+        }
+        assert_eq!(num(&out.overlay, 9, 0), Some(15.0));
+        assert_eq!(num(&out.overlay, 9, 4), Some(12.0));
+    }
+
+    #[test]
+    fn typed_formulas_never_stay_empty() {
+        let mut s = sheet();
+        let shared = StringTable::new();
+        let extras = BookExtras::default();
+        let cancel = AtomicBool::new(false);
+        // Do arquivo, com o valor do Excel: fica. Digitadas: erro na célula.
+        let mut p = SheetPart::new();
+        p.set_formula(0, 4, "CUBEVALUE(\"x\",\"y\")", FormulaKind::Normal);
+        p.set(0, 4, kind::NUMBER | kind::FORMULA, 0, 77f64.to_bits());
+        s.merge_part(p);
+        s.finish();
+        s.set_cell(0, 5, CellValue::Empty, Some("CUBEVALUE(\"x\",\"y\")"), None);
+        s.set_cell(0, 6, CellValue::Empty, Some("MINHAFUNC(A1)+1"), None);
+        s.set_cell(0, 7, CellValue::Empty, Some("IFERROR(_xlfn.IMAGE(A1),0)"), None);
+        s.set_cell(0, 8, CellValue::Empty, Some("[1]Fora!A1*2"), None);
+        s.set_cell(0, 9, CellValue::Empty, Some("CELL(\"color\",A1)"), None);
+        // Dependente de uma não calculada: recebe o erro.
+        s.set_cell(0, 10, CellValue::Empty, Some("F1+1"), None);
+        let book = Book::new(vec![&s], &shared, &extras, false);
+        let eng = Engine::new(&book);
+        let g = Graph::build(&book, &eng);
+        let dirty = Dirty::Cells((4..11).map(|c| (0, 0, c)).collect());
+        let out = g.recalc(&book, &eng, &dirty, &cancel);
+        let err = |c: u32| match out.overlay.get(0, 0, c) {
+            Some(CellValue::Error(e)) => Some(*e),
+            _ => None,
+        };
+        assert_eq!(out.overlay.get(0, 0, 4), None, "o valor do arquivo fica");
+        assert_eq!(err(5), Some(CellError::Name));
+        assert_eq!(err(6), Some(CellError::Name));
+        assert_eq!(err(7), Some(CellError::Name), "SEERRO não esconde");
+        assert_eq!(err(8), Some(CellError::Ref));
+        assert_eq!(err(9), Some(CellError::Value));
+        assert_eq!(err(10), Some(CellError::Name));
+        let why = |c: u32| {
+            let u = out.uncalculated.iter().find(|u| u.col == c).unwrap();
+            (u.function.as_deref(), u.unknown)
+        };
+        assert_eq!(out.uncalculated.len(), 5);
+        assert_eq!(why(5), (Some("VALORCUBO"), false));
+        assert_eq!(why(6), (Some("MINHAFUNC"), true));
+        assert_eq!(why(7), (Some("IMAGEM"), false));
+        assert_eq!(why(8), (None, false));
+        assert_eq!(why(9), (Some("CÉL"), false));
+        // Com o erro já na célula, continua assim (e não é anotada de novo).
+        s.set_calc_values(vec![(0, 5, CellValue::Error(CellError::Name))]);
+        let book = Book::new(vec![&s], &shared, &extras, false);
+        let eng = Engine::new(&book);
+        let out = Graph::build(&book, &eng).recalc(&book, &eng, &Dirty::All, &cancel);
+        assert_eq!(out.overlay.get(0, 0, 5), None);
     }
 
     #[test]

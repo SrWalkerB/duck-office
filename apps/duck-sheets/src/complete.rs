@@ -1085,10 +1085,10 @@ mod tests {
     fn finds_without_case_or_accents() {
         assert_eq!(found("unico")[0], "ÚNICO");
         assert_eq!(found("ÚNIco")[0], "ÚNICO");
-        assert_eq!(found("media")[..3], ["MÉDIA", "MÉDIAA", "MÉDIASE"]);
-        assert!(found("so").starts_with(&["SOMA".into(), "SOMARPRODUTO".into(), "SOMASE".into()]));
+        assert_eq!(found("media")[..3], ["MÉDIA", "MÉDIA.GEOMÉTRICA", "MÉDIA.HARMÔNICA"]);
+        assert!(found("so").starts_with(&["SOMA".into(), "SOMAQUAD".into(), "SOMARPRODUTO".into()]));
         // Nome definido, tabela e nome com acento.
-        assert_eq!(found("tax"), ["Taxa"]);
+        assert_eq!(found("tax")[..2], ["Taxa", "TAXA"]);
         assert_eq!(found("vend"), ["Vendas"]);
         assert_eq!(found("ind")[..3], ["ÍNDICE", "Índice_Anual", "INDIRETO"]);
         assert!(found("indice").contains(&"Índice_Anual".to_string()));
@@ -1097,7 +1097,7 @@ mod tests {
         assert_eq!(found("contse")[0], "CONT.SE");
         assert_eq!(found("vlook"), ["PROCV"]);
         // Já escrito por inteiro: o Tab volta a confirmar.
-        assert!(found("taxa").is_empty() && found("VENDAS").is_empty());
+        assert!(found("índice_anual").is_empty() && found("VENDAS").is_empty());
         // Uma referência não vira sugestão frouxa.
         assert!(found("B2").is_empty());
         assert!(found("").is_empty());
@@ -1107,7 +1107,20 @@ mod tests {
     fn only_computed_functions() {
         let names: Vec<&str> = functions().iter().map(|i| i.name.as_str()).collect();
         assert_eq!(names.len(), funcs::all().iter().filter(|d| !d.opaque).count());
-        assert!(names.contains(&"FILTRO") && !names.contains(&"LAMBDA") && !names.contains(&"PGTO"));
+        assert!(names.len() >= 442);
+        assert!(names.contains(&"FILTRO") && names.contains(&"LAMBDA") && names.contains(&"PGTO"));
+        assert!(!names.contains(&"VALORCUBO") && !names.contains(&"IMAGEM"));
+        // Todas com descrição e assinatura, e achadas pelo próprio nome.
+        for it in functions() {
+            let Kind::Func(func) = it.kind else { panic!("{}", it.name) };
+            let d = funcs::def(func);
+            let text: String = signature(Call { func, arg: 0 }).into_iter().map(|p| p.0).collect();
+            assert!(text.starts_with(&format!("{}(", d.pt)) && text.ends_with(')'), "{text}");
+            assert!(!it.help.is_empty() && (d.max == 0) == d.args.is_empty(), "{}", it.name);
+            let call = analyze(&format!("={}(", d.pt), d.pt.len() + 2).call;
+            assert_eq!(call, Some(Call { func, arg: 0 }), "{}", it.name);
+            assert_eq!(funcs::lookup_pt(d.pt), Some(func), "{}", it.name);
+        }
     }
 
     #[test]

@@ -941,6 +941,18 @@ Conferido na vitrine, nos dois temas: células, formatação condicional, gráfi
 
 Conferência: `duck-bench roundtrip --abas --celulas` (cria, copia, renomeia, move, oculta e exclui abas; move e desloca células) com 0 divergências na vitrine e nas planilhas reais que o duck-sheets lê, e `duck-bench conferir-pacote`, que procura no pacote salvo relações sem alvo, tipos faltando, ids repetidos e nomes inválidos. Não foi aberto no Excel.
 
+### Funções e LAMBDA (23/11/2026)
+
+- **Tabela**: cada assunto tem a sua lista (`duck-calc/src/fns/*.rs`, `DEFS`); `funcs.rs` junta todas numa tabela estática montada na compilação, então achar a função de um nó continua sendo um índice. Nomes em português que mudaram entre versões entram em `PT_ALIASES` (aceitos ao digitar; na tela aparece o da tabela).
+- **Valores como argumentos**: as funções recebem nós, não valores. Um nó com o bit `TEMP` é um argumento já calculado (pilha `Eval::temps`). É assim que LAMBDA, `BYROW(A1:B3;SOMA)` e a aplicação item a item chamam qualquer função sem mudar a assinatura dela.
+- **Item a item**: a máscara `lift` diz que argumentos de uma função são um valor só; no modo matricial, se um deles é uma matriz, a função roda uma vez por item (`Eval::lifted`). Fora do modo matricial o custo é um teste de um booleano por chamada.
+- **LAMBDA**: compilada em `Node::Lambda` (parâmetros e corpo no mesmo `Formula`); a chamada é `Node::Apply`. O valor (`V::Fn`) leva as variáveis visíveis onde foi escrita. A posição de uma variável na pilha é a mesma na compilação e na avaliação: LET reserva o lugar antes de calcular o valor. A recursão para em 1000 chamadas ou 1,2 MB de pilha (`#NÚM!`), porque as threads de cálculo têm 2 MB.
+- **Não calculadas**: `Graph::recalc` devolve em `Outcome::uncalculated` as fórmulas digitadas (célula editada e sem valor) que o motor não calcula, com o nome da função que falta; a célula recebe o erro.
+- **Gravação**: uma fórmula recém-digitada com resultado único que depende do modo matricial (`Engine::needs_array`) vira matriz dinâmica de uma célula, para o Excel não pôr `@` ao abrir.
+- **Referências dos testes**: exemplos da documentação da Microsoft e, nas distribuições e na regressão, o scipy. Não há Excel nesta máquina: o arquivo gravado não foi aberto nele.
+
+Conferência: 10.111.650 de 10.111.650 fórmulas iguais no arquivo de referência e 140.249 de 140.249 calculadas na outra planilha (uma usa uma função não suportada e fica com o valor gravado). Tempo com 4 threads (o menor de 12 repetições por rodada, 10 rodadas alternadas com o main anterior): recálculo completo 1353 ms antes e 1342 ms agora; avaliar todas as fórmulas, 1253 e 1248 ms. Por isso as pilhas de LET e LAMBDA ficam fora do `Eval` (só são criadas quando usadas), o teste do argumento temporário é o mesmo teste de limites do nó, os ramos de matriz das funções comuns ficam fora do caminho quente e o que se lê a cada chamada fica numa tabela própria (`funcs::Hot`).
+
 ---
 
 ## Questões em aberto
@@ -948,4 +960,4 @@ Conferência: `duck-bench roundtrip --abas --celulas` (cria, copia, renomeia, mo
 - **Nome próprio** para a biblioteca de `platform/`, já que ela vai ser usada fora da suíte (por enquanto os crates usam o prefixo `duck-`).
 - **Formato de arquivo nativo**: ideia registrada no ADR-013, com as perguntas que precisam de resposta antes de decidir.
 - **Corpus de testes**: reunir planilhas públicas grandes e variadas além do gerador sintético.
-- **Motor de cálculo**: funções financeiras e de matriz dinâmica; corpus maior de planilhas reais para a conferência.
+- **Motor de cálculo**: corpus maior de planilhas reais para a conferência.

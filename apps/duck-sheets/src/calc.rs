@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
-use duck_calc::recalc::{SpillOut, Spills};
+use duck_calc::recalc::{SpillOut, Spills, Uncalculated};
 use duck_calc::{Book, Dirty, Engine, Graph, Overlay};
 use duck_core::{BookExtras, CellRange, CellValue, Command, FormulaKind, Sheet, StringTable};
 
@@ -56,6 +56,7 @@ pub struct Done {
     pub graph: Arc<Graph>,
     pub overlay: Overlay,
     pub spills: Vec<SpillOut>,
+    pub uncalculated: Vec<Uncalculated>,
     pub cells: u64,
     pub elapsed: Duration,
     pub cancelled: bool,
@@ -162,6 +163,7 @@ impl Calc {
         sheets: Vec<Arc<Sheet>>,
         strings: Arc<StringTable>,
         date1904: bool,
+        path: String,
         waker: duck_platform::Waker,
     ) {
         if self.job.is_some() || matches!(self.pending, Pending::None) {
@@ -184,7 +186,8 @@ impl Calc {
                 let t = Instant::now();
                 let done = {
                     let refs: Vec<&Sheet> = sheets.iter().map(|s| &**s).collect();
-                    let book = Book::new(refs, &strings, &extras, date1904);
+                    let mut book = Book::new(refs, &strings, &extras, date1904);
+                    book.path = Some(path);
                     let (engine, graph) = match reuse {
                         Some((e, g)) => {
                             if let Dirty::Cells(cells) = &dirty {
@@ -206,6 +209,7 @@ impl Calc {
                         graph,
                         overlay: out.overlay,
                         spills: out.spills,
+                        uncalculated: out.uncalculated,
                         cells: out.cells,
                         elapsed: t.elapsed(),
                         cancelled: out.cancelled,
@@ -252,12 +256,18 @@ impl crate::app::SheetsApp {
         }
         let Some(waker) = self.waker.clone() else { return };
         let Some(doc) = &mut self.doc else { return };
+        // Planilha nova ainda não salva: sem caminho (CÉL("nome.arquivo") dá "").
+        let path = if self.untitled_path.as_ref() == Some(&doc.path) {
+            String::new()
+        } else {
+            doc.path.to_string_lossy().into_owned()
+        };
         if doc.finished.is_none() || doc.sheets.iter().any(|s| s.data.is_none() || s.preview) {
             return;
         }
         let sheets: Vec<Arc<Sheet>> = doc.sheets.iter().filter_map(|s| s.data.clone()).collect();
         let (strings, date1904) = (doc.strings.clone(), doc.date1904);
-        doc.calc.start(sheets, strings, date1904, waker);
+        doc.calc.start(sheets, strings, date1904, path, waker);
     }
 
     /// Termina todo o recálculo pendente antes de seguir (edições de teste
@@ -447,6 +457,7 @@ impl crate::app::SheetsApp {
 
     fn apply_calc(&mut self, done: Done) {
         let spills = done.spills;
+        let uncalculated = uncalculated_message(&done.uncalculated);
         let Some(doc) = &mut self.doc else { return };
         let changed = done.overlay.len();
         let mut per_sheet: Vec<Vec<(u32, u32, duck_core::CellValue)>> = vec![Vec::new(); doc.sheets.len()];
@@ -487,5 +498,33 @@ impl crate::app::SheetsApp {
                 changed
             );
         }
+        if let Some(m) = uncalculated {
+            if self.opts.save_to.is_some() {
+                eprintln!("{m}");
+            }
+            self.message = m;
+        }
     }
+}
+
+/// Aviso da barra de status sobre fórmulas digitadas que não são calculadas
+/// (nada, se todas são).
+fn uncalculated_message(list: &[Uncalculated]) -> Option<String> {
+    let u = list.first()?;
+    let mut cell = String::new();
+    crate::app::col_name(u.col, &mut cell);
+    cell.push_str(&(u.row + 1).to_string());
+    let error = duck_calc::locale::to_pt(u.error.as_str());
+    let mut m = match &u.function {
+        Some(f) if u.unknown => format!("A função {f} não existe: {cell} mostra {error}"),
+        Some(f) if u.error == duck_core::CellError::Name => {
+            format!("O duck-sheets ainda não calcula a função {f}: {cell} mostra {error}")
+        }
+        Some(f) => format!("O duck-sheets ainda não calcula {f} com esses argumentos: {cell} mostra {error}"),
+        None => format!("A fórmula usa outro arquivo que não está disponível: {cell} mostra {error}"),
+    };
+    if list.len() > 1 {
+        m.push_str(&format!(" (e mais {})", list.len() - 1));
+    }
+    Some(m)
 }
