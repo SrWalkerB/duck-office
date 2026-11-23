@@ -20,8 +20,10 @@
 
 pub mod valid;
 
+pub mod cellops;
 pub mod chartdata;
 pub mod dynarr;
+pub mod editing;
 pub mod eval;
 pub mod funcs;
 pub mod index;
@@ -29,6 +31,8 @@ pub mod locale;
 pub mod parse;
 pub mod pivot;
 pub mod recalc;
+pub mod sheetrefs;
+pub mod tabs;
 pub mod value;
 
 pub use eval::{Book, Engine, Eval, Overlay};

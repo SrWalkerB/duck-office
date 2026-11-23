@@ -331,7 +331,7 @@ fn alignment_xml(a: &Alignment, out: &mut Vec<u8>) {
     out.extend_from_slice(b"/>");
 }
 
-fn color_xml(tag: &[u8], c: Color, out: &mut Vec<u8>) {
+pub(super) fn color_xml(tag: &[u8], c: Color, out: &mut Vec<u8>) {
     let start = out.len();
     out.push(b'<');
     out.extend_from_slice(tag);
@@ -360,6 +360,37 @@ fn color_xml(tag: &[u8], c: Color, out: &mut Vec<u8>) {
         }
     }
     out.extend_from_slice(b"/>");
+}
+
+/// Fonte de um trecho de texto rico (`<rPr>`).
+pub(super) fn run_xml(f: &duck_core::RunFont, out: &mut Vec<u8>) {
+    out.extend_from_slice(b"<rPr>");
+    for (on, tag) in [
+        (f.bold, &b"<b/>"[..]),
+        (f.italic, b"<i/>"),
+        (f.strike, b"<strike/>"),
+        (f.underline, b"<u/>"),
+        (f.script > 0, b"<vertAlign val=\"superscript\"/>"),
+        (f.script < 0, b"<vertAlign val=\"subscript\"/>"),
+    ] {
+        if on {
+            out.extend_from_slice(tag);
+        }
+    }
+    if let Some(s) = f.size {
+        out.extend_from_slice(b"<sz val=\"");
+        push_number(out, s as f64);
+        out.extend_from_slice(b"\"/>");
+    }
+    if let Some(c) = f.color {
+        color_xml(b"color", c, out);
+    }
+    if let Some(n) = &f.name {
+        out.extend_from_slice(b"<rFont val=\"");
+        super::cellxml::escape_attr(n, out);
+        out.extend_from_slice(b"\"/>");
+    }
+    out.extend_from_slice(b"</rPr>");
 }
 
 fn font_xml(f: &Font) -> Vec<u8> {

@@ -648,6 +648,9 @@ fn store_cell(
             rich_text_into(is, scratch);
         }
         let id = part.strings.push(scratch);
+        if let Some(runs) = kids.is.and_then(|is| crate::parts::rich_runs(is, scratch.len())) {
+            part.strings.set_rich(id, runs);
+        }
         part.set(row, col, kind::LOCAL_STR | formula, style, id as u64);
         return;
     }

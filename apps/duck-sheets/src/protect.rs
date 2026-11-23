@@ -82,7 +82,24 @@ fn refusal(sheet: &Sheet, styles: &Styles, cmd: &Command) -> Option<&'static str
             .then(|| denied(deny::PIVOTS, "A planilha protegida não permite mudar tabelas dinâmicas."))
             .flatten(),
         Command::Group(list) => list.iter().find_map(|c| refusal(sheet, styles, c)),
+        Command::TabColor(_) => Some("A planilha protegida não permite mudar a cor da guia."),
+        Command::CellOp(duck_core::cells::CellOp::Shift { .. }, _) => {
+            Some("A planilha protegida não permite inserir ou excluir células.")
+        }
+        Command::RichText(v) => v.iter().any(|x| locked(x.0, x.1)).then_some(LOCKED),
+        // O conteúdo das células movidas anda por `Restore` e `SetCells`, já
+        // conferidos; a troca de nome de aba nas fórmulas é consequência.
+        Command::CellOp(..) | Command::FormulaTexts(_) => None,
         Command::Pane(_) | Command::Protect(_) | Command::BookProtect(_) => None,
+    }
+}
+
+/// O comando insere, apaga ou move linhas, colunas ou células?
+fn moves_cells(cmd: &Command) -> bool {
+    match cmd {
+        Command::Shift(..) | Command::CellOp(..) => true,
+        Command::Group(list) => list.iter().any(moves_cells),
+        _ => false,
     }
 }
 
@@ -119,16 +136,17 @@ const OPTIONS: [(u32, &str); 15] = [
 impl SheetsApp {
     /// A proteção permite estes comandos? Se não, avisa.
     ///
-    /// Num passo com linhas ou colunas inseridas, só a aba que muda conta: os
-    /// ajustes de fórmulas nas outras são consequência, não edição.
+    /// Num passo que insere, apaga ou move linhas, colunas ou células, só a
+    /// aba que muda conta: os ajustes de fórmulas nas outras são
+    /// consequência, não edição.
     pub fn allowed(&mut self, step: &[(usize, &Command)]) -> bool {
         if self.unchecked {
             return true;
         }
-        let shifted = step.iter().any(|(_, c)| matches!(c, Command::Shift(..)));
+        let moved = step.iter().any(|(_, c)| moves_cells(c));
         let Some(doc) = self.doc.as_ref() else { return true };
         let why = step.iter().find_map(|(i, cmd)| {
-            if shifted && !matches!(cmd, Command::Shift(..)) {
+            if moved && !moves_cells(cmd) {
                 return None;
             }
             let sheet = doc.sheets.get(*i)?.data.as_deref()?;
@@ -572,6 +590,14 @@ mod tests {
             !(deny::DELETE_ROWS | deny::FORMAT_CELLS | deny::OBJECTS);
         assert!(!no(&s, &ops()), "a linha 2 só tem células desbloqueadas");
         assert!(!no(&s, &Command::SetStyles(vec![(0, 0, 1)])) && !no(&s, &Command::Notes(vec![])));
+        // Células inseridas não; movidas, sim (o conteúdo é conferido à parte).
+        let one = CellRange::default();
+        let shift = Shift { axis: Axis::Rows, at: 0, n: 1, insert: true };
+        let insert = duck_core::cells::CellOp::Shift { shift, lo: 0, hi: 0 };
+        let mv = duck_core::cells::CellOp::Move { src: one, dr: 1, dc: 0 };
+        assert!(no(&s, &Command::CellOp(insert, false)) && !no(&s, &Command::CellOp(mv, false)));
+        assert!(moves_cells(&Command::Group(vec![change(0, 0), Command::CellOp(mv, false)])));
+        assert!(no(&s, &Command::TabColor(None)) && !moves_cells(&change(0, 0)));
         // Filtro: só os critérios de um que já existe.
         let filter = Command::SetFilter { table: None, filter: Some(Default::default()) };
         s.layout.protection.as_mut().unwrap().deny &= !deny::AUTO_FILTER;

@@ -349,7 +349,7 @@ pub fn tail(orig: &[u8], sheet: &Sheet, sheet_name: &str, shifts: &[Shift]) -> V
             &super::patch::autofilter_xml(sheet.layout.autofilter.as_ref()),
         );
     }
-    super::tail::apply(&out, sheet, false).unwrap_or(out)
+    out
 }
 
 /// Dentro de um elemento: fórmulas (`<formula>`, `<xm:f>`) e listas de

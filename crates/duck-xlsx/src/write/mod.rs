@@ -11,6 +11,7 @@
 //!   regravadas contra o modelo e só então substitui o destino.
 
 mod blank;
+mod cells;
 mod cellxml;
 mod cube;
 mod deflate;
@@ -19,6 +20,7 @@ mod patch;
 mod pivot;
 mod regen;
 mod styles;
+mod workbook;
 mod zipw;
 
 use std::collections::HashMap;
@@ -37,6 +39,8 @@ use zipw::ZipWriter;
 
 pub use blank::write_blank;
 pub use deflate::compress_chunk;
+use workbook::Work;
+pub use workbook::{TabOrigin, TabOut, TabPlan};
 
 pub(crate) use cellxml::{cell_ref, escape_attr, escape_text, push_u32};
 pub(crate) mod notes;
@@ -55,11 +59,21 @@ pub struct SaveOptions {
     pub rewrite_all: bool,
     /// [`save_file`]: relê e confere as abas regravadas antes de substituir.
     pub verify: bool,
+    /// As abas do modelo, se podem não ser as do arquivo (criadas, copiadas,
+    /// excluídas, renomeadas, movidas, escondidas).
+    pub tabs: Option<TabPlan>,
 }
 
 impl Default for SaveOptions {
     fn default() -> Self {
-        Self { level: 6, chunk_bytes: 4 << 20, rewrite_all: false, verify: true, book_protection: None }
+        Self {
+            level: 6,
+            chunk_bytes: 4 << 20,
+            rewrite_all: false,
+            verify: true,
+            tabs: None,
+            book_protection: None,
+        }
     }
 }
 
@@ -78,6 +92,13 @@ pub struct SaveReport {
     pub bytes: u64,
     pub calc_chain_removed: bool,
     pub full_calc: bool,
+    /// Partes criadas e tiradas (abas novas, copiadas ou excluídas).
+    pub parts_added: Vec<String>,
+    pub parts_removed: Vec<String>,
+    /// Parte de cada aba no arquivo salvo.
+    pub sheet_parts: Vec<String>,
+    /// Partes das cópias de abas: (aba, nome provisório, nome no arquivo).
+    pub part_renames: Vec<(usize, String, String)>,
     /// Releitura e conferência ([`save_file`]).
     pub verify: Duration,
 }
@@ -98,47 +119,61 @@ impl Book {
     ) -> Result<SaveReport, Error> {
         let t0 = Instant::now();
         let mut rep = SaveReport::default();
+        let tabs = match &opts.tabs {
+            Some(p) => workbook::prepare(self, p, sheets)?,
+            None => None,
+        };
+        let tabs_changed = tabs.is_some();
+        let mut work = tabs.unwrap_or_else(|| Work::identity(self, sheets.len()));
         let edited = |s: &&Sheet| opts.rewrite_all || !s.edits().is_empty();
         let mut by_path: HashMap<&str, (usize, &Sheet)> = HashMap::new();
-        for (i, m) in self.meta.sheets.iter().enumerate() {
+        for (i, path) in work.parts.iter().enumerate() {
             if let Some(Some(s)) = sheets.get(i)
-                && edited(s)
+                && work.new[i].is_none()
+                && (edited(s) || work.deselect.contains(&i) || self.retext_needed(&work, path))
             {
-                by_path.insert(m.path.as_str(), (i, *s));
+                by_path.insert(path.as_str(), (i, *s));
             }
         }
+        // Layout de cada aba (nas cópias, com as partes definitivas).
+        let layouts: Vec<Option<&duck_core::Layout>> = sheets
+            .iter()
+            .zip(&work.layouts)
+            .map(|(s, l)| l.as_ref().or_else(|| s.map(|s| &s.layout)))
+            .collect();
+        let views = || sheets.iter().zip(&layouts).filter_map(|(s, l)| Some(((*s)?, (*l)?)));
         let new_styles = styles.has_new();
         let values = sheets.iter().flatten().any(|s| s.edits().values || s.edits().formulas);
-        let formulas = sheets.iter().flatten().any(|s| s.edits().formulas);
+        let moved = sheets.iter().flatten().any(|s| !s.edits().cell_ops.is_empty());
+        let values = values || work.structure || moved;
+        let formulas = sheets.iter().flatten().any(|s| s.edits().formulas) || work.structure;
         let calc_chain = self.meta.calc_chain.as_deref().filter(|_| formulas);
 
         // Partes pequenas remendadas: workbook, content types e rels.
-        let mut small: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut small: HashMap<String, Vec<u8>> = std::mem::take(&mut work.small);
         if values {
-            let mut wb = self.pkg.read(&self.meta.path)?;
+            let mut wb = work.read(&self.pkg, &small, &self.meta.path)?;
             // Nomes definidos (áreas de impressão, intervalos nomeados) andam
             // com as linhas/colunas inseridas ou apagadas.
-            let changes: Vec<(&str, &[duck_core::Shift])> = self
+            // (com abas mudadas, isso já foi feito na preparação).
+            let changes: Vec<(&str, &duck_core::Edits)> = self
                 .meta
                 .sheets
                 .iter()
                 .zip(sheets)
-                .filter_map(|(m, s)| {
-                    s.filter(|s| s.edits().structure).map(|s| (m.name.as_str(), &s.edits().shifts[..]))
-                })
+                .filter(|_| !tabs_changed)
+                .filter_map(|(m, s)| Some((m.name.as_str(), (*s)?.edits())))
                 .collect();
-            if !changes.is_empty() {
-                wb = regen::defined_names(&wb, &changes);
-            }
+            wb = workbook::moved_names(wb, &changes);
             small.insert(self.meta.path.clone(), force_full_calc(&wb));
             rep.full_calc = true;
         }
         // Tabelas com filtro, intervalo ou colunas mudadas.
-        for s in sheets.iter().flatten() {
+        for (s, l) in views() {
             for &t in &s.edits().tables {
-                if let Some(table) = s.layout.tables.get(t as usize)
+                if let Some(table) = l.tables.get(t as usize)
                     && !table.part.is_empty()
-                    && let Ok(xml) = self.pkg.read(&table.part)
+                    && let Ok(xml) = work.read(&self.pkg, &small, &table.part)
                 {
                     small.insert(table.part.clone(), patch::patch_table(&xml, table));
                 }
@@ -146,32 +181,33 @@ impl Book {
         }
         // Linhas/colunas inseridas ou apagadas: âncoras dos desenhos e fontes
         // dos caches de tabela dinâmica; gráficos com referências mudadas.
-        for s in sheets.iter().flatten() {
-            if s.edits().structure {
+        let mut charts_done: std::collections::HashSet<&str> = Default::default();
+        for (s, l) in views() {
+            if s.edits().structure || !s.edits().cell_ops.is_empty() {
                 let mut parts: Vec<(&str, Vec<duck_core::drawing::Anchor>)> = Vec::new();
-                for a in &s.layout.drawing_anchors {
+                for a in &l.drawing_anchors {
                     match parts.iter_mut().find(|p| p.0 == a.part) {
                         Some(p) => p.1.push(a.anchor),
                         None => parts.push((&a.part, vec![a.anchor])),
                     }
                 }
                 for (part, list) in parts {
-                    if let Ok(xml) = self.pkg.read(part) {
+                    if let Ok(xml) = work.read(&self.pkg, &small, part) {
                         small.insert(part.to_string(), objects::patch_anchors(&xml, &list));
                     }
                 }
-                for (part, r) in &s.layout.pivot_sources {
-                    if let Ok(xml) = self.pkg.read(part) {
+                for (part, r) in &l.pivot_sources {
+                    if let Ok(xml) = work.read(&self.pkg, &small, part) {
                         small.insert(part.clone(), objects::patch_cache_source(&xml, *r));
                     }
                 }
             }
             if s.edits().structure || s.edits().pivots {
-                for o in &s.layout.objects {
+                for o in &l.objects {
                     if let duck_core::drawing::ObjectKind::Chart(c) = &o.kind
                         && !c.part.is_empty()
-                        && !small.contains_key(&c.part)
-                        && let Ok(xml) = self.pkg.read(&c.part)
+                        && charts_done.insert(&c.part)
+                        && let Ok(xml) = work.read(&self.pkg, &small, &c.part)
                         && let Some(new) = objects::patch_chart_refs(&xml, c)
                     {
                         small.insert(c.part.clone(), new);
@@ -180,18 +216,28 @@ impl Book {
             }
         }
         // Botões de opção e caixas de seleção marcados ou desmarcados.
-        for (m, s) in self.meta.sheets.iter().zip(sheets).filter_map(|(m, s)| Some((m, (*s)?))) {
+        for (i, (s, l)) in
+            sheets.iter().zip(&layouts).enumerate().filter_map(|(i, (s, l))| Some((i, ((*s)?, (*l)?))))
+        {
             if !s.edits().pivots {
                 continue;
             }
             let mut marks: HashMap<u32, bool> = HashMap::new();
-            for o in &s.layout.objects {
+            for o in &l.objects {
+                // Célula ligada que mudou de lugar ou de aba.
+                if let duck_core::drawing::ObjectKind::Control(c) = &o.kind
+                    && let Some(link) = &c.link
+                    && let Ok(xml) = work.read(&self.pkg, &small, &c.part)
+                    && let Some(new) = workbook::patch_control_link(&xml, link)
+                {
+                    small.insert(c.part.clone(), new);
+                }
                 if let duck_core::drawing::ObjectKind::Control(c) = &o.kind
                     && matches!(
                         c.kind,
                         duck_core::drawing::ControlKind::Radio | duck_core::drawing::ControlKind::Check
                     )
-                    && let Ok(xml) = self.pkg.read(&c.part)
+                    && let Ok(xml) = work.read(&self.pkg, &small, &c.part)
                 {
                     marks.insert(o.id, c.checked);
                     if let Some(new) = objects::patch_control(&xml, c.checked) {
@@ -202,9 +248,17 @@ impl Book {
             if marks.is_empty() {
                 continue;
             }
-            for (_, kind, part) in crate::parts::rel_targets_typed(&self.pkg, &m.path) {
-                if kind.ends_with("/vmlDrawing")
-                    && let Ok(xml) = self.pkg.read(&part)
+            let vml = match (&work.new[i], small.get(&rels_path(&work.parts[i]))) {
+                // Cópia: as relações dela já foram refeitas.
+                (Some(_), Some(rels)) => workbook::vml_parts(rels, &work.parts[i]),
+                _ => crate::parts::rel_targets_typed(&self.pkg, &work.parts[i])
+                    .into_iter()
+                    .filter(|r| r.1.ends_with("/vmlDrawing"))
+                    .map(|r| r.2)
+                    .collect(),
+            };
+            for part in vml {
+                if let Ok(xml) = work.read(&self.pkg, &small, &part)
                     && let Some(new) = objects::patch_vml_checked(&xml, &marks)
                 {
                     small.insert(part, new);
@@ -212,26 +266,28 @@ impl Book {
             }
         }
         // Tabelas dinâmicas e segmentações de dados mudadas.
-        for s in sheets.iter().flatten() {
+        for (s, l) in views() {
             if !s.edits().pivots {
                 continue;
             }
-            for t in &s.layout.pivots {
+            for t in &l.pivots {
                 if !t.part.is_empty()
-                    && let Ok(xml) = self.pkg.read(&t.part)
+                    && let Ok(xml) = work.read(&self.pkg, &small, &t.part)
                 {
                     let mut new = pivot::patch_pivot_table(&xml, t);
                     if t.cube.is_some() {
-                        new = self.patch_cube(&xml, new, t, &mut small);
+                        let source = work.added.get(&t.part).unwrap_or(&t.part);
+                        new = self.patch_cube(&xml, new, t, source, &mut small);
                     }
                     small.insert(t.part.clone(), new);
                 }
             }
-            for o in &s.layout.objects {
+            let mut caches_done: std::collections::HashSet<&str> = Default::default();
+            for o in &l.objects {
                 if let duck_core::drawing::ObjectKind::Slicer(sl) = &o.kind
                     && let Some(link) = &sl.pivot
-                    && !small.contains_key(&link.part)
-                    && let Ok(xml) = self.pkg.read(&link.part)
+                    && caches_done.insert(&link.part)
+                    && let Ok(xml) = work.read(&self.pkg, &small, &link.part)
                 {
                     if link.is_cube() {
                         small.insert(link.part.clone(), cube::patch_slicer(&xml, sl, link));
@@ -243,8 +299,8 @@ impl Book {
                 }
                 if let duck_core::drawing::ObjectKind::Timeline(tl) = &o.kind
                     && !tl.part.is_empty()
-                    && !small.contains_key(&tl.part)
-                    && let Ok(xml) = self.pkg.read(&tl.part)
+                    && caches_done.insert(&tl.part)
+                    && let Ok(xml) = work.read(&self.pkg, &small, &tl.part)
                 {
                     small.insert(tl.part.clone(), pivot::patch_timeline_cache(&xml, tl.selection));
                 }
@@ -257,7 +313,9 @@ impl Book {
         // Matrizes dinâmicas: as abas regravadas apontam para os metadados
         // `XLDAPR`; o arquivo que não tem `metadata.xml` ganha um.
         let mut new_meta: Option<(String, Vec<u8>)> = None;
-        let has_dyn = by_path.values().any(|(_, s)| s.array_formulas().iter().any(|a| a.3));
+        let new_sheets = || sheets.iter().zip(&work.new).filter(|x| x.1.is_some()).filter_map(|x| *x.0);
+        let has_dyn =
+            by_path.values().map(|x| x.1).chain(new_sheets()).any(|s| s.array_formulas().iter().any(|a| a.3));
         let mut cm = 0;
         if has_dyn {
             let dir = self.meta.path.rsplit_once('/').map_or("", |p| p.0);
@@ -274,13 +332,13 @@ impl Book {
         cellxml::DYN_CM.store(cm, std::sync::atomic::Ordering::Relaxed);
 
         if let Some(cc) = calc_chain {
-            let ct = self.pkg.read("[Content_Types].xml")?;
+            let ct = work.read(&self.pkg, &small, "[Content_Types].xml")?;
             small.insert(
                 "[Content_Types].xml".into(),
                 drop_tag(&ct, b"Override", b"PartName", &format!("/{cc}")),
             );
             let rels = rels_path(&self.meta.path);
-            if let Ok(r) = self.pkg.read(&rels) {
+            if let Ok(r) = work.read(&self.pkg, &small, &rels) {
                 small.insert(rels, drop_calc_chain_rel(&r));
             }
             rep.calc_chain_removed = true;
@@ -311,25 +369,17 @@ impl Book {
             small.insert(self.meta.path.clone(), crate::protect::patch_book(&wb, p.as_ref()));
         }
         // Notas: as partes delas e, numa aba que não tinha, as ligações.
-        let mut added: Vec<(String, Vec<u8>)> = Vec::new();
-        for (m, s) in self.meta.sheets.iter().zip(sheets) {
+        for (path, s) in work.parts.iter().zip(sheets) {
             let Some(s) = *s else { continue };
             if !(s.edits().notes || opts.rewrite_all) {
                 continue;
             }
-            let o = notes::build(
-                &m.path,
-                s,
-                &|part| small.get(part).map_or_else(|| self.pkg.read(part), |b| Ok(b.clone())),
-                &|part| self.pkg.entry(part).is_some() || added.iter().any(|a| a.0 == part),
-            )?;
-            for (name, bytes) in o.parts.into_iter().chain(o.rels.map(|r| (rels_path(&m.path), r))) {
-                if self.pkg.entry(&name).is_some() {
-                    small.insert(name, bytes);
-                } else {
-                    added.push((name, bytes));
-                }
-            }
+            let o = notes::build(path, s, &|part| work.read(&self.pkg, &small, part), &|part| {
+                self.pkg.entry(part).is_some() || small.contains_key(part) || work.added.contains_key(part)
+            })?;
+            // As que o pacote não tem saem com as outras partes novas.
+            small.extend(o.parts);
+            small.extend(o.rels.map(|r| (rels_path(path), r)));
             if !o.types.is_empty() {
                 let ct = match small.get("[Content_Types].xml") {
                     Some(b) => b.clone(),
@@ -345,12 +395,32 @@ impl Book {
             if Some(e.name.as_str()) == calc_chain {
                 continue;
             }
+            if work.removed.contains(&e.name) {
+                rep.parts_removed.push(e.name.clone());
+                continue;
+            }
             if let Some((i, sheet)) = by_path.get(e.name.as_str()) {
+                let fix = TabFix {
+                    map: work.sheet_map(*i, ""),
+                    deselect: work.deselect.contains(i),
+                    copy: false,
+                    name: self.file_name(&e.name),
+                };
                 if sheet.edits().structure {
-                    let name = self.meta.sheets[*i].name.clone();
-                    self.write_sheet_regen(&mut zip, e, sheet, shared, &name, opts, &mut rep)?;
+                    let name = self.file_name(&e.name);
+                    self.write_sheet_regen(
+                        &mut zip,
+                        Some(e),
+                        &e.name,
+                        sheet,
+                        shared,
+                        &name,
+                        &fix,
+                        opts,
+                        &mut rep,
+                    )?;
                 } else {
-                    self.write_sheet(&mut zip, e, sheet, shared, opts, &mut rep)?;
+                    self.write_sheet(&mut zip, e, sheet, shared, &fix, opts, &mut rep)?;
                 }
                 rep.sheets_rewritten.push(*i);
                 rep.parts_rewritten += 1;
@@ -365,6 +435,47 @@ impl Book {
                 rep.parts_copied += 1;
             }
         }
+        // Abas novas e copiadas (o `<sheetData>` sai do modelo).
+        for (i, new) in work.new.iter().enumerate() {
+            let (Some(new), Some(Some(sheet))) = (new, sheets.get(i)) else { continue };
+            let name = opts.tabs.as_ref().map_or("", |p| p.tabs[i].name.as_str());
+            let fix =
+                TabFix { map: work.sheet_map(i, name), deselect: false, copy: true, name: String::new() };
+            let source = new.source.as_ref().and_then(|s| self.pkg.entry(&s.0));
+            let from = new.source.as_ref().map_or("", |s| s.1.as_str());
+            self.write_sheet_regen(
+                &mut zip,
+                source,
+                &work.parts[i],
+                sheet,
+                shared,
+                from,
+                &fix,
+                opts,
+                &mut rep,
+            )?;
+            rep.sheets_rewritten.push(i);
+            rep.parts_added.push(work.parts[i].clone());
+        }
+        // As outras partes novas: copiadas do arquivo ou já remendadas.
+        for (dst, src) in &work.added {
+            if !small.contains_key(dst)
+                && let Some(e) = self.pkg.entry(src)
+            {
+                zip.copy_raw(dst, e.method_code(), e.crc32, e.size, self.pkg.compressed(e))?;
+                rep.parts_added.push(dst.clone());
+            }
+        }
+        let mut fresh: Vec<&String> = small.keys().filter(|p| self.pkg.entry(p).is_none()).collect();
+        fresh.sort();
+        for p in fresh {
+            let bytes = &small[p];
+            let z = compress_chunk(bytes, opts.level, true);
+            let mut h = crc32fast::Hasher::new();
+            h.update(bytes);
+            zip.copy_raw(p, zipw::DEFLATED, h.finalize(), bytes.len() as u64, &z)?;
+            rep.parts_added.push(p.clone());
+        }
         if let Some((meta, bytes)) = &new_meta {
             let z = compress_chunk(bytes, opts.level, true);
             let mut h = crc32fast::Hasher::new();
@@ -372,7 +483,11 @@ impl Book {
             zip.copy_raw(meta, zipw::DEFLATED, h.finalize(), bytes.len() as u64, &z)?;
             rep.parts_rewritten += 1;
         }
-        rep.parts_rewritten += notes::write_added(&mut zip, &added, opts.level)?;
+        for (i, r) in work.renames.iter().enumerate() {
+            rep.part_renames.extend(r.iter().map(|(a, b)| (i, a.clone(), b.clone())));
+        }
+        rep.part_renames.sort();
+        rep.sheet_parts = work.parts.clone();
         let (w, len) = zip.finish()?;
         let file = w.into_inner().map_err(|e| Error::Io(e.into_error()))?;
         file.set_len(len)?;
@@ -383,6 +498,23 @@ impl Book {
         Ok(rep)
     }
 
+    /// Nome no arquivo da aba da parte `path`.
+    fn file_name(&self, path: &str) -> String {
+        self.meta.sheets.iter().find(|m| m.path == path).map(|m| m.name.clone()).unwrap_or_default()
+    }
+
+    /// O XML da aba cita, fora das células, alguma aba que mudou de nome ou
+    /// saiu? (As células com essas referências já estão marcadas.)
+    fn retext_needed(&self, work: &Work, path: &str) -> bool {
+        if work.map.is_empty() {
+            return false;
+        }
+        self.pkg
+            .entry(path)
+            .and_then(|e| self.head_and_tail(e).ok())
+            .is_some_and(|(_, tail)| workbook::retext_tail(&tail, &work.map).is_some())
+    }
+
     /// Dinâmica do Modelo de Dados: a tabela (já com o remendo comum) e o
     /// cache dela, se foi recalculada ou mudou de filtro.
     fn patch_cube(
@@ -390,10 +522,11 @@ impl Book {
         orig: &[u8],
         new: Vec<u8>,
         t: &duck_core::pivot::PivotTable,
+        source: &str,
         small: &mut HashMap<String, Vec<u8>>,
     ) -> Vec<u8> {
         let same = crate::cube::parse_cube_pivot(orig).map(Box::new) == t.cube;
-        let part = crate::parts::rel_targets_typed(&self.pkg, &t.part)
+        let part = crate::parts::rel_targets_typed(&self.pkg, source)
             .into_iter()
             .find(|r| r.1.ends_with("/pivotCacheDefinition"))
             .map(|r| r.2);
@@ -415,34 +548,55 @@ impl Book {
     fn write_sheet_regen<W: Write + Seek + Send>(
         &self,
         zip: &mut ZipWriter<W>,
-        e: &crate::package::Entry,
+        e: Option<&crate::package::Entry>,
+        part: &str,
         sheet: &Sheet,
         shared: &StringTable,
         name: &str,
+        fix: &TabFix,
         opts: &SaveOptions,
         rep: &mut SaveReport,
     ) -> Result<(), Error> {
-        let (head, tail) = self.head_and_tail(e)?;
+        let size = e.map_or(0, |e| e.size);
+        let (head, tail) = match e {
+            Some(e) => self.head_and_tail(e)?,
+            None => {
+                let (h, t) = workbook::blank_head();
+                (h.to_vec(), t.to_vec())
+            }
+        };
         let shifts = &sheet.edits().shifts;
-        zip.begin_part(&e.name, e.size >= 2 << 30)?;
+        zip.begin_part(part, size >= 2 << 30)?;
         let mut enc = PartEncoder::new(opts.level, opts.chunk_bytes);
         let mut h = regen::head(&head, sheet, shifts);
-        if sheet.edits().pane {
+        if sheet.edits().pane || e.is_none() {
             h = patch::patch_pane(&h, sheet.layout.pane);
         }
+        h = fix.head(h, sheet);
         enc.write(zip, &h)?;
         let mut xml_out = h.len() as u64;
         let cells = regen::sheet_data(sheet, shared, &mut |b| {
             xml_out += b.len() as u64;
             enc.write(zip, b)
         })?;
-        let t = regen::tail(&tail, sheet, name, shifts);
+        // Inserir/apagar linhas e mover células, na ordem em que foram feitos.
+        let mut t = tail;
+        let mut done = 0;
+        for (at, op) in &sheet.edits().cell_ops {
+            if *at > done {
+                t = regen::tail(&t, sheet, name, &shifts[done..*at]);
+                done = *at;
+            }
+            t = cells::tail(&t, op, name);
+        }
+        let t = fix.tail(regen::tail(&t, sheet, name, &shifts[done..]));
+        let t = tail::apply(&t, sheet, false).unwrap_or(t);
         xml_out += t.len() as u64;
         enc.write(zip, &t)?;
         let (crc, size) = enc.finish(zip)?;
         zip.end_part(crc, size)?;
         rep.cells_written += cells;
-        rep.xml_in += e.size;
+        rep.xml_in += size;
         rep.xml_out += xml_out;
         Ok(())
     }
@@ -482,12 +636,14 @@ impl Book {
         Ok((sc.head, sc.tail))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn write_sheet<W: Write + Seek + Send>(
         &self,
         zip: &mut ZipWriter<W>,
         e: &crate::package::Entry,
         sheet: &Sheet,
         shared: &StringTable,
+        fix: &TabFix,
         opts: &SaveOptions,
         rep: &mut SaveReport,
     ) -> Result<(), Error> {
@@ -497,7 +653,7 @@ impl Book {
             && rayon::current_num_threads() >= 4;
         if parallel {
             zip.begin_part(&e.name, big)?;
-            let mut patcher = patch::Patcher::new(sheet, shared, opts.rewrite_all);
+            let mut patcher = patch::Patcher::new(sheet, shared, opts.rewrite_all).with_fix(fix);
             let mut enc = PartEncoder::new(opts.level, opts.chunk_bytes);
             let mut buf = Vec::new();
             let mut xml_out = 0u64;
@@ -535,7 +691,7 @@ impl Book {
             zip.abort_part()?;
         }
         zip.begin_part(&e.name, big)?;
-        let mut patcher = patch::Patcher::new(sheet, shared, opts.rewrite_all);
+        let mut patcher = patch::Patcher::new(sheet, shared, opts.rewrite_all).with_fix(fix);
         let mut enc = PartEncoder::new(opts.level, opts.chunk_bytes);
         let mut inf = self.pkg.inflater(e);
         let mut input = Vec::with_capacity(opts.chunk_bytes);
@@ -559,6 +715,44 @@ impl Book {
         rep.cells_written += patcher.cells_written;
         rep.xml_in += e.size;
         Ok(())
+    }
+}
+
+/// O que muda no XML de uma aba por causa das abas (além das células).
+pub(super) struct TabFix {
+    /// Nomes de aba trocados.
+    map: Option<duck_calc::sheetrefs::SheetMap>,
+    /// Tira a marca de aba selecionada.
+    deselect: bool,
+    /// Aba nova ou copiada.
+    copy: bool,
+    /// Nome da aba no arquivo.
+    name: String,
+}
+
+impl TabFix {
+    fn head(&self, h: Vec<u8>, sheet: &Sheet) -> Vec<u8> {
+        if self.deselect || self.copy || sheet.edits().tab_color {
+            return workbook::patch_head(&h, sheet, self.deselect, self.copy);
+        }
+        h
+    }
+
+    /// O remendo da aba muda o fim do XML dela?
+    fn changes_tail(&self, sheet: &Sheet) -> bool {
+        self.map.is_some() || !sheet.edits().cell_ops.is_empty()
+    }
+
+    /// O fim do XML no remendo (sem linhas ou colunas inseridas ou apagadas).
+    fn patched_tail(&self, mut t: Vec<u8>, sheet: &Sheet) -> Vec<u8> {
+        for (_, op) in &sheet.edits().cell_ops {
+            t = cells::tail(&t, op, &self.name);
+        }
+        self.tail(t)
+    }
+
+    fn tail(&self, t: Vec<u8>) -> Vec<u8> {
+        self.map.as_ref().and_then(|m| workbook::retext_tail(&t, m)).unwrap_or(t)
     }
 }
 

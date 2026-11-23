@@ -6,7 +6,7 @@
 //! duck-bench verify [ARQUIVO]                                compara cada célula com o calamine
 //! duck-bench gen    SAIDA.xlsx [--rows N] [--cols M]         gera planilha sintética
 //! duck-bench preview [ARQUIVO] [--mb N]                      mede o caminho da primeira tela (F2)
-//! duck-bench roundtrip [ARQUIVO] [--rewrite-all] [--edit N] [--level L] [--keep]  salva numa cópia e confere (F3)
+//! duck-bench roundtrip [ARQUIVO] [--rewrite-all] [--edit N] [--estrutura] [--abas] [--celulas] [--level L] [--keep]  salva numa cópia e confere (F3)
 //! duck-bench gen-showcase SAIDA.xlsx                         planilha de vitrine (formatos, bordas, painéis)
 //! duck-bench calc [ARQUIVO] [--hoje AAAA-MM-DD]              calcula cada fórmula e compara com o Excel (F4)
 //! ```
@@ -17,6 +17,7 @@
 mod calc;
 mod emf;
 mod generate;
+mod lint;
 mod mem;
 mod olap;
 mod regress;
@@ -79,6 +80,14 @@ fn main() {
         "parse" => cmd_parse(rest),
         "preview" => cmd_preview(rest),
         "roundtrip" => roundtrip::cmd(rest),
+        "conferir-pacote" => match rest.first() {
+            Some(p) => {
+                let bad = lint::check(Path::new(p));
+                bad.iter().for_each(|b| println!("{b}"));
+                if bad.is_empty() { Ok(()) } else { Err(format!("{} problemas no pacote", bad.len())) }
+            }
+            None => Err("uso: duck-bench conferir-pacote ARQUIVO.xlsx".to_string()),
+        },
         "regress" => regress::cmd(rest),
         "calc" => calc::cmd(rest),
         "objetos" => calc::cmd_objects(rest),
@@ -128,6 +137,8 @@ fn positional(args: &[String]) -> Option<String> {
                     | "--rewrite-all"
                     | "--keep"
                     | "--estrutura"
+                    | "--abas"
+                    | "--celulas"
                     | "--formas-valor"
                     | "--recalc"
                     | "--detalhes"

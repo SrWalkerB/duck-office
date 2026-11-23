@@ -392,6 +392,60 @@ mod tests {
         assert_eq!(typed_formula(&book, 0, 0, 1, "B2*2"), Some(CellValue::Number(40.0)));
     }
 
+    /// Mover, inserir e excluir só células: regras e notas vão junto, e
+    /// desfazer volta ao mesmo.
+    #[test]
+    fn rules_and_notes_follow_moved_cells() {
+        use duck_core::cells::CellOp;
+        use duck_core::{Axis, Note, Shift};
+        let (mut sheets, extras) = data();
+        let shared = StringTable::new();
+        let rule = |ranges: Vec<CellRange>, f1: &str| DataValidation {
+            ranges,
+            kind: DvKind::Custom,
+            f1: f1.into(),
+            ..Default::default()
+        };
+        sheets[0].layout.validations = vec![rule(vec![r(0, 1, 3, 1)], "B1>$D$1")];
+        sheets[0].layout.notes = vec![Note::new(1, 1, "Ana", "x")];
+        sheets[1].layout.validations = vec![rule(vec![r(0, 0, 0, 0)], "Plan1!$B$2>0")];
+        let before: Vec<_> = sheets.iter().map(|s| s.layout.clone()).collect();
+        let mut run = |op: CellOp| {
+            let refs: Vec<&Sheet> = sheets.iter().collect();
+            let (cmds, _) = crate::cellops::plan(&refs, &shared, &extras, 0, op).unwrap();
+            let undo: Vec<_> = cmds.into_iter().map(|(k, c)| (k, c.apply(&mut sheets[k]))).collect();
+            let after: Vec<_> = sheets.iter().map(|s| s.layout.clone()).collect();
+            assert!(sheets[0].edits().validations && sheets[0].edits().notes);
+            for (k, c) in undo {
+                c.apply(&mut sheets[k]);
+            }
+            for (s, b) in sheets.iter().zip(&before) {
+                assert_eq!((&s.layout.validations, &s.layout.notes), (&b.validations, &b.notes));
+            }
+            after
+        };
+        // B1:B4 inteiro vai para F6: a regra vai junto, com a fórmula.
+        let a = run(CellOp::Move { src: r(0, 1, 3, 1), dr: 5, dc: 4 });
+        assert_eq!(a[0].validations[0].ranges, [r(5, 5, 8, 5)]);
+        assert_eq!(a[0].validations[0].f1, "F6>$D$1");
+        assert_eq!((a[0].notes[0].row, a[0].notes[0].col), (6, 5));
+        assert_eq!(a[1].validations[0].f1, "Plan1!$F$7>0", "a outra aba acompanha");
+        // Só B1 e B2 vão: a regra se divide, e a base passa a ser a que sobrou.
+        let a = run(CellOp::Move { src: r(0, 1, 1, 1), dr: 9, dc: 4 });
+        assert_eq!(a[0].validations[0].ranges, [r(2, 1, 3, 1), r(9, 5, 10, 5)]);
+        assert_eq!(a[0].validations[0].f1, "B3>$D$1");
+        // Uma célula inserida em B1 empurra as outras para baixo.
+        let s = Shift { axis: Axis::Rows, at: 0, n: 1, insert: true };
+        let a = run(CellOp::Shift { shift: s, lo: 1, hi: 1 });
+        assert_eq!(a[0].validations[0].ranges, [r(1, 1, 4, 1)]);
+        assert_eq!(a[0].notes[0].row, 2);
+        // Excluir a célula da nota.
+        let s = Shift { axis: Axis::Rows, at: 1, n: 1, insert: false };
+        let a = run(CellOp::Shift { shift: s, lo: 1, hi: 1 });
+        assert!(a[0].notes.is_empty());
+        assert_eq!(a[0].validations[0].ranges, [r(0, 1, 2, 1)]);
+    }
+
     /// Inserir e apagar linhas: intervalos e fórmulas andam.
     #[test]
     fn rules_follow_inserted_and_deleted_rows() {

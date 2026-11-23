@@ -33,21 +33,6 @@ pub fn vml_rid(sheet: &Sheet) -> &str {
     sheet.layout.legacy_drawing.as_deref().unwrap_or(RID_VML)
 }
 
-/// Grava as partes que o pacote não tinha; devolve quantas.
-pub fn write_added<W: std::io::Write + std::io::Seek>(
-    zip: &mut super::zipw::ZipWriter<W>,
-    added: &[(String, Vec<u8>)],
-    level: u32,
-) -> std::io::Result<usize> {
-    for (name, bytes) in added {
-        let z = super::compress_chunk(bytes, level, true);
-        let mut h = crc32fast::Hasher::new();
-        h.update(bytes);
-        zip.copy_raw(name, super::zipw::DEFLATED, h.finalize(), bytes.len() as u64, &z)?;
-    }
-    Ok(added.len())
-}
-
 /// `read` dá a parte como está sendo gravada (outro remendo pode tê-la
 /// mudado); `taken` diz se um caminho já existe ou foi criado agora.
 pub fn build(

@@ -248,6 +248,32 @@ pub fn at(list: &[DataValidation], row: u32, col: u32) -> Option<&DataValidation
     list.iter().rev().find(|v| v.contains(row, col))
 }
 
+/// As regras depois de mover, inserir ou excluir só células: os intervalos
+/// andam ou se dividem. As fórmulas passam para a base nova se ela não for a
+/// de antes (no lugar dela ou movida); o ajuste das referências fica com quem
+/// chama.
+pub fn move_cells(
+    list: &mut Vec<DataValidation>,
+    op: &crate::cells::CellOp,
+    relocate: &dyn Fn(&str, i64, i64) -> String,
+) {
+    list.retain_mut(|v| {
+        let ranges: Vec<CellRange> = v.ranges.iter().flat_map(|r| op.split(*r)).collect();
+        if ranges.is_empty() {
+            return false;
+        }
+        if ranges != v.ranges {
+            let old = v.base();
+            v.ranges = ranges;
+            let new = v.base();
+            if op.cell(old.0, old.1) != Some(new) {
+                v.rebase(old, new, relocate);
+            }
+        }
+        true
+    });
+}
+
 /// As regras depois de inserir ou apagar linhas/colunas na própria aba.
 pub fn shift(list: &mut Vec<DataValidation>, s: Shift, ops: &dyn FormulaOps) {
     let relocate = |f: &str, dr: i64, dc: i64| ops.shift_a1(f, dr, dc);

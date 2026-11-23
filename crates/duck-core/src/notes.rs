@@ -122,6 +122,21 @@ pub fn sort(list: &mut [Note]) {
     list.sort_by_key(|n| (n.row, n.col));
 }
 
+/// Depois de mover, inserir ou excluir só células: cada nota vai com a dela
+/// (as de células excluídas ou cobertas saem).
+pub fn move_cells(list: &mut Vec<Note>, op: &crate::cells::CellOp) {
+    list.retain_mut(|n| match op.cell(n.row, n.col) {
+        Some((r, c)) => {
+            if (r, c) != (n.row, n.col) {
+                n.move_to(r, c);
+            }
+            true
+        }
+        None => false,
+    });
+    sort(list);
+}
+
 /// Depois de inserir ou apagar linhas/colunas.
 pub fn shift(list: &mut Vec<Note>, s: Shift) {
     list.retain_mut(|n| {
