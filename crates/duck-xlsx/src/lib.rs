@@ -17,6 +17,7 @@ pub mod cube;
 pub mod drawing;
 mod extras;
 pub mod filter;
+mod ns;
 mod package;
 mod parts;
 pub mod pivot;
