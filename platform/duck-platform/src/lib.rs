@@ -11,13 +11,14 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use raw_window_handle::{DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, DeviceEvents, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, NamedKey};
 use winit::window::{CursorIcon, WindowId};
 
@@ -67,6 +68,56 @@ impl std::error::Error for Error {}
 #[derive(Clone)]
 pub struct Window {
     inner: Arc<winit::window::Window>,
+    pending: Arc<Pending>,
+}
+
+/// Espera máxima de um pedido de frame enquanto chegam outros eventos.
+const STARVED: Duration = Duration::from_millis(4);
+
+/// Pedido de frame ainda não atendido: quando foi feito (µs desde `epoch`,
+/// mais 1; 0 = nenhum).
+struct Pending {
+    epoch: Instant,
+    at: AtomicU64,
+}
+
+impl Default for Pending {
+    fn default() -> Self {
+        Self { epoch: Instant::now(), at: AtomicU64::new(0) }
+    }
+}
+
+impl Pending {
+    fn now(&self) -> u64 {
+        self.epoch.elapsed().as_micros() as u64 + 1
+    }
+
+    /// `true` = peça ao sistema. Um pedido já feito não se repete (cada um é
+    /// uma chamada ao sistema, e o mouse faz milhares por segundo), a não ser
+    /// que o sistema o tenha deixado para trás.
+    fn request(&self) -> bool {
+        const LOST: u64 = 50_000;
+        let now = self.now();
+        match self.at.load(Ordering::Relaxed) {
+            0 => {
+                self.at.store(now, Ordering::Relaxed);
+                true
+            }
+            at if now - at.min(now) > LOST => true,
+            _ => false,
+        }
+    }
+
+    fn clear(&self) {
+        self.at.store(0, Ordering::Relaxed);
+    }
+
+    fn age(&self) -> Option<Duration> {
+        match self.at.load(Ordering::Relaxed) {
+            0 => None,
+            at => Some(Duration::from_micros(self.now().saturating_sub(at))),
+        }
+    }
 }
 
 impl fmt::Debug for Window {
@@ -134,7 +185,9 @@ impl Window {
 
     /// Pede um novo frame. Várias chamadas antes do frame viram uma só.
     pub fn request_redraw(&self) {
-        self.inner.request_redraw();
+        if self.pending.request() {
+            self.inner.request_redraw();
+        }
     }
 
     pub fn set_title(&self, title: &str) {
@@ -587,6 +640,9 @@ pub fn run<A: App>(config: WindowConfig, app: &mut A) -> Result<(), Error> {
         EventLoop::<()>::with_user_event().build().map_err(|e| Error::EventLoop(e.to_string()))?;
     // Ocioso = 0% de CPU: só acorda com eventos ou pedidos de redraw.
     event_loop.set_control_flow(ControlFlow::Wait);
+    // Os movimentos crus do mouse (até 8 mil por segundo) não são usados e
+    // encheriam a fila de mensagens.
+    event_loop.listen_device_events(DeviceEvents::Never);
 
     let mut runner = Runner {
         app,
@@ -625,6 +681,24 @@ impl<A: App> Runner<'_, A> {
         self.app.event(&mut cx, event);
     }
 
+    fn redraw(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(w) = &self.window {
+            w.pending.clear();
+        }
+        let mut cx = Context { event_loop, clipboard: &mut self.clipboard, proxy: &self.proxy };
+        self.app.redraw(&mut cx);
+    }
+
+    /// O Windows só manda pintar com a fila de mensagens vazia: um mouse
+    /// rápido segura o frame por centenas de milissegundos. Se o pedido já
+    /// espera há tempo demais, desenha aqui mesmo.
+    fn redraw_if_starved(&mut self, event_loop: &ActiveEventLoop) {
+        let late = |w: &Window| w.pending.age().is_some_and(|a| a >= STARVED);
+        if cfg!(windows) && self.window.as_ref().is_some_and(late) {
+            self.redraw(event_loop);
+        }
+    }
+
     /// Conta cliques seguidos no mesmo lugar (intervalo do duplo clique).
     fn click_count(&mut self, button: MouseButton) -> u8 {
         const INTERVAL: Duration = Duration::from_millis(500);
@@ -659,7 +733,7 @@ impl<A: App> ApplicationHandler<()> for Runner<'_, A> {
             .with_min_inner_size(PhysicalSize::new(200, 150));
         match event_loop.create_window(attrs) {
             Ok(w) => {
-                let window = Window { inner: Arc::new(w) };
+                let window = Window { inner: Arc::new(w), pending: Arc::default() };
                 self.window = Some(window.clone());
                 let mut cx = Context { event_loop, clipboard: &mut self.clipboard, proxy: &self.proxy };
                 self.app.init(&mut cx, window.clone());
@@ -681,10 +755,7 @@ impl<A: App> ApplicationHandler<()> for Runner<'_, A> {
                     event_loop.exit();
                 }
             }
-            WindowEvent::RedrawRequested => {
-                let mut cx = Context { event_loop, clipboard: &mut self.clipboard, proxy: &self.proxy };
-                self.app.redraw(&mut cx);
-            }
+            WindowEvent::RedrawRequested => self.redraw(event_loop),
             WindowEvent::Resized(size) => {
                 self.dispatch(event_loop, Event::Resized { width: size.width, height: size.height })
             }
@@ -708,6 +779,7 @@ impl<A: App> ApplicationHandler<()> for Runner<'_, A> {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = (position.x, position.y);
                 self.dispatch(event_loop, Event::MouseMove { x: position.x, y: position.y });
+                self.redraw_if_starved(event_loop);
             }
             WindowEvent::CursorLeft { .. } => self.dispatch(event_loop, Event::MouseLeft),
             WindowEvent::MouseInput { state, button, .. } => {
@@ -734,6 +806,7 @@ impl<A: App> ApplicationHandler<()> for Runner<'_, A> {
                 };
                 let modifiers = self.modifiers;
                 self.dispatch(event_loop, Event::Wheel { delta, modifiers });
+                self.redraw_if_starved(event_loop);
             }
             WindowEvent::PinchGesture { delta, .. } if delta.is_finite() => {
                 self.dispatch(event_loop, Event::Pinch(delta))

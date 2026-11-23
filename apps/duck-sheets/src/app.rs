@@ -2683,6 +2683,16 @@ impl App for SheetsApp {
 
     fn redraw(&mut self, cx: &mut Context) {
         let t0 = Instant::now();
+        // Num arraste, espera a vez do frame antes de montá-lo e trata primeiro
+        // o que chegou nesse tempo: o que se arrasta acompanha o mouse. (Fora
+        // dele não: ao redimensionar a janela, o quadro reservado envelhece.)
+        if self.drag.is_some()
+            && self.gfx.as_mut().is_some_and(|g| g.begin_frame())
+            && t0.elapsed() > Duration::from_millis(2)
+        {
+            self.redraw_later();
+            return;
+        }
         self.bench_before_frame();
         self.clamp_scroll();
         let tb = Instant::now();

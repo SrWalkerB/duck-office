@@ -262,6 +262,11 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
 
 /// Dono da GPU, da superfície da janela e do pipeline 2D.
 pub struct Gfx {
+    /// Quadro já reservado na tela (ver [`Gfx::begin_frame`]). Antes da
+    /// superfície: precisa ser solto primeiro.
+    frame: Option<wgpu::SurfaceTexture>,
+    /// Instâncias (no buffer) e fundo do último quadro.
+    last: (u32, [u8; 4]),
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -686,6 +691,8 @@ impl Gfx {
         timings.push(("shader + pipeline", t.elapsed()));
 
         Ok(Self {
+            frame: None,
+            last: (0, [255; 4]),
             surface,
             device,
             queue,
@@ -730,15 +737,33 @@ impl Gfx {
         }
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        self.configure();
     }
 
     pub fn set_vsync(&mut self, vsync: bool) {
         let mode = present_mode(vsync);
         if self.config.present_mode != mode {
             self.config.present_mode = mode;
-            self.surface.configure(&self.device, &self.config);
+            self.configure();
         }
+    }
+
+    /// Aplica `config`. Um quadro já reservado é da configuração antiga: sai
+    /// com a imagem de antes. Descartado, o sistema esperaria por ele (no
+    /// DX12, 1 s a cada mudança de tamanho).
+    fn configure(&mut self) {
+        if let Some(frame) = self.frame.take() {
+            self.present(frame);
+        }
+        self.surface.configure(&self.device, &self.config);
+    }
+
+    /// Desenha as instâncias que estão no buffer e apresenta.
+    fn present(&self, frame: wgpu::SurfaceTexture) {
+        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let encoder = self.pass(&view);
+        self.queue.submit([encoder.finish()]);
+        self.queue.present(frame);
     }
 
     /// Copia uma região de alfa (1 byte por pixel, linhas contíguas) para o atlas.
@@ -781,24 +806,34 @@ impl Gfx {
 
     /// Desenha as instâncias, na ordem dada, sobre `clear` e apresenta.
     pub fn render(&mut self, instances: &[Instance], clear: [u8; 4]) -> FrameStatus {
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) => t,
+        self.begin_frame();
+        let Some(frame) = self.frame.take() else { return FrameStatus::Skipped };
+        self.upload(instances, clear);
+        self.present(frame);
+        FrameStatus::Presented
+    }
+
+    /// Reserva o próximo quadro da tela, esperando a vez dele (com vsync, até
+    /// um intervalo do monitor). Quem chama antes de montar o quadro monta
+    /// com a entrada mais recente, e não com a de antes da espera. `false` =
+    /// não dá para apresentar agora.
+    pub fn begin_frame(&mut self) -> bool {
+        if self.frame.is_some() {
+            return true;
+        }
+        match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) => self.frame = Some(t),
             wgpu::CurrentSurfaceTexture::Suboptimal(_)
             | wgpu::CurrentSurfaceTexture::Outdated
             | wgpu::CurrentSurfaceTexture::Lost => {
                 // Swapchain não bate mais com a janela: reconfigura e pula o frame.
-                self.surface.configure(&self.device, &self.config);
-                return FrameStatus::Skipped;
+                self.configure();
             }
             wgpu::CurrentSurfaceTexture::Timeout
             | wgpu::CurrentSurfaceTexture::Occluded
-            | wgpu::CurrentSurfaceTexture::Validation => return FrameStatus::Skipped,
-        };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let encoder = self.encode(&view, instances, clear);
-        self.queue.submit([encoder.finish()]);
-        self.queue.present(frame);
-        FrameStatus::Presented
+            | wgpu::CurrentSurfaceTexture::Validation => {}
+        }
+        self.frame.is_some()
     }
 
     /// Desenha um frame fora da tela e devolve os pixels em RGBA 8 bits
@@ -816,7 +851,8 @@ impl Gfx {
             view_formats: &[],
         });
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self.encode(&view, instances, clear);
+        self.upload(instances, clear);
+        let mut encoder = self.pass(&view);
 
         let row = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -871,13 +907,8 @@ impl Gfx {
         (w, h, out)
     }
 
-    /// Envia instâncias e uniforms e grava o render pass num encoder novo.
-    fn encode(
-        &mut self,
-        view: &wgpu::TextureView,
-        instances: &[Instance],
-        clear: [u8; 4],
-    ) -> wgpu::CommandEncoder {
+    /// Envia instâncias e uniforms para a GPU.
+    fn upload(&mut self, instances: &[Instance], clear: [u8; 4]) {
         if instances.len() > self.instance_capacity {
             self.instance_capacity = instances.len().next_power_of_two();
             self.instances = create_instance_buffer(&self.device, self.instance_capacity);
@@ -888,7 +919,12 @@ impl Gfx {
         let globals =
             Globals { screen: [self.config.width as f32, self.config.height as f32], _pad: [0.0; 2] };
         self.queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        self.last = (instances.len() as u32, clear);
+    }
 
+    /// Grava o render pass das instâncias enviadas num encoder novo.
+    fn pass(&self, view: &wgpu::TextureView) -> wgpu::CommandEncoder {
+        let (count, clear) = self.last;
         let mut encoder =
             self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         {
@@ -914,11 +950,11 @@ impl Gfx {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if !instances.is_empty() {
+            if count > 0 {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_vertex_buffer(0, self.instances.slice(..));
-                pass.draw(0..4, 0..instances.len() as u32);
+                pass.draw(0..4, 0..count);
             }
         }
         encoder
