@@ -284,7 +284,7 @@ fn alignment_xml(a: &Alignment, out: &mut Vec<u8>) {
     out.extend_from_slice(b"/>");
 }
 
-fn color_xml(tag: &[u8], c: Color, out: &mut Vec<u8>) {
+pub(super) fn color_xml(tag: &[u8], c: Color, out: &mut Vec<u8>) {
     let start = out.len();
     out.push(b'<');
     out.extend_from_slice(tag);

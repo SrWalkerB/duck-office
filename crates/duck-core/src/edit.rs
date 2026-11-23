@@ -69,6 +69,11 @@ pub struct Edits {
     /// Tabelas dinâmicas ou segmentações de dados mudadas (as partes delas
     /// são remendadas ao salvar).
     pub pivots: bool,
+    /// Cor da guia mudada (`<tabColor>` do `<sheetPr>`).
+    pub tab_color: bool,
+    /// Grupos de fórmula compartilhada (`si`) com o texto mudado: o `<f>`
+    /// original não vale mais para nenhuma célula do grupo.
+    pub retexted: BTreeSet<u32>,
 }
 
 impl Edits {
@@ -85,9 +90,10 @@ impl Edits {
             && self.tables.is_empty()
             && self.rewrite.is_empty()
             && !self.pivots
+            && !self.tab_color
     }
 
-    fn mark(&mut self, row: u32, col: u32) {
+    pub(crate) fn mark(&mut self, row: u32, col: u32) {
         self.cells.entry(row).or_default().insert(col);
     }
 
@@ -639,6 +645,11 @@ pub enum Command {
     Shift(crate::Shift, OpsHandle),
     /// O layout inteiro de volta (desfazer de uma mudança de estrutura).
     Layout(Box<crate::Layout>),
+    /// Texto novo de definições de fórmula (índice, texto): referências a
+    /// uma aba renomeada ou excluída (ver [`Sheet::formula_text_changes`]).
+    FormulaTexts(Vec<(u32, String)>),
+    /// Cor da guia (`None` = sem cor).
+    TabColor(Option<crate::Color>),
     /// Vários, em ordem (o inverso vem na ordem contrária).
     Group(Vec<Command>),
 }
@@ -697,6 +708,8 @@ impl Command {
                 }
                 Command::Layout(Box::new(old))
             }
+            Command::FormulaTexts(list) => Command::FormulaTexts(sheet.set_formula_texts(list)),
+            Command::TabColor(c) => Command::TabColor(sheet.set_tab_color(c)),
             Command::Group(list) => {
                 let mut inv: Vec<Command> = list.into_iter().map(|c| c.apply(sheet)).collect();
                 inv.reverse();

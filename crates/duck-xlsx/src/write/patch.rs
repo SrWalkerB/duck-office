@@ -57,11 +57,18 @@ pub struct Patcher<'a> {
     phase: Phase,
     last_row: Option<u32>,
     carry: Vec<u8>,
+    /// Mudanças por causa das abas (cor da guia, nomes trocados).
+    fix: Option<&'a super::TabFix>,
     /// Células escritas a partir do modelo (estatística).
     pub cells_written: u64,
 }
 
 impl<'a> Patcher<'a> {
+    pub fn with_fix(mut self, fix: &'a super::TabFix) -> Self {
+        self.fix = Some(fix);
+        self
+    }
+
     pub fn new(sheet: &'a Sheet, shared: &'a StringTable, rewrite_all: bool) -> Self {
         let e = sheet.edits();
         let mut rows: std::collections::BTreeMap<u32, Dirty> = std::collections::BTreeMap::new();
@@ -88,6 +95,7 @@ impl<'a> Patcher<'a> {
             phase: Phase::Head,
             last_row: None,
             carry: Vec::new(),
+            fix: None,
             cells_written: 0,
         }
     }
@@ -210,13 +218,17 @@ impl<'a> Patcher<'a> {
         }
         // Depois de `</sheetData>`: copia o resto (com mesclagens e filtro novos).
         let e = self.sheet.edits();
-        if self.phase == Phase::Tail && (e.merges || e.filter) {
+        let fix = self.fix.filter(|f| f.map.is_some());
+        if self.phase == Phase::Tail && (e.merges || e.filter || fix.is_some()) {
             let mut tail = seg[pos..].to_vec();
             if e.merges {
                 tail = replace_merges(&tail, &merges_xml(self.sheet));
             }
             if e.filter {
                 tail = replace_autofilter(&tail, &autofilter_xml(self.sheet.layout.autofilter.as_ref()));
+            }
+            if let Some(f) = fix {
+                tail = f.tail(tail);
             }
             out.extend_from_slice(&tail);
         } else {
@@ -397,6 +409,8 @@ impl<'a> Patcher<'a> {
     /// O que vem antes de `<sheetData>`, com o `<dimension>` e as larguras
     /// de coluna ajustados.
     fn head(&self, head: &[u8], out: &mut Vec<u8>) {
+        let fixed = self.fix.map(|f| f.head(head.to_vec(), self.sheet));
+        let head = fixed.as_deref().unwrap_or(head);
         if self.sheet.edits().pane {
             let mut tmp = Vec::with_capacity(head.len() + 256);
             self.head_cols(head, &mut tmp);
