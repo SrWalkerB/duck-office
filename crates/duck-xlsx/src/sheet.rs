@@ -351,6 +351,42 @@ pub fn parse_rows(
             pos = close;
             continue;
         }
+        if starts_tag(rest, b"dataValidations") || starts_tag(rest, b"x14:dataValidations") {
+            let Some(end) = tag_end(buf, i) else { break };
+            if buf[end - 2] == b'/' {
+                pos = end;
+                continue;
+            }
+            let ext = rest[0] == b'x';
+            let mark: &[u8] = if ext { b"</x14:dataValidations>" } else { b"</dataValidations>" };
+            let close = memmem::find(&buf[end..], mark).map_or(buf.len(), |x| end + x);
+            if ext {
+                crate::valid::parse_ext_block(&buf[end..close], &mut part.layout.validations);
+            } else {
+                crate::valid::parse_block(&buf[end..close], &mut part.layout.validations);
+            }
+            pos = close;
+            continue;
+        }
+        if starts_tag(rest, b"sheetProtection") {
+            let Some(end) = tag_end(buf, i) else { break };
+            part.layout.protection = Some(crate::protect::parse_sheet(&buf[i + 16..end - 1]));
+            pos = end;
+            continue;
+        }
+        if starts_tag(rest, b"protectedRange") {
+            let Some(end) = tag_end(buf, i) else { break };
+            part.layout.protected_ranges.extend(crate::protect::parse_range(&buf[i + 15..end - 1]));
+            pos = end;
+            continue;
+        }
+        if starts_tag(rest, b"legacyDrawing") {
+            let Some(end) = tag_end(buf, i) else { break };
+            part.layout.legacy_drawing =
+                attr(&buf[i + 14..end - 1], b"r:id").map(|v| String::from_utf8_lossy(v).into_owned());
+            pos = end;
+            continue;
+        }
         if starts_tag(rest, b"hyperlink") {
             let Some(end) = tag_end(buf, i) else { break };
             let attrs = &buf[i + 10..end - 1];

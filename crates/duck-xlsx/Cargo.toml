@@ -18,6 +18,8 @@ memchr = "2.8.3"
 memmap2 = "0.9.12"
 rayon = "1.12.0"
 zip = { version = "9.7.1", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+sha1 = "0.11.0"
+sha2 = "0.11.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_System_Memory"] }

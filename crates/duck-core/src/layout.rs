@@ -97,6 +97,16 @@ pub struct Layout {
     pub cond: Vec<crate::CfRule>,
     /// Hiperlinks, em ordem de linha depois de [`Layout::finish`].
     pub links: Vec<Hyperlink>,
+    /// Validação de dados, na ordem do arquivo.
+    pub validations: Vec<crate::DataValidation>,
+    /// Notas e conversas, em ordem de linha e coluna.
+    pub notes: Vec<crate::Note>,
+    /// `r:id` do `<legacyDrawing>` (o VML das notas e dos controles).
+    pub legacy_drawing: Option<String>,
+    /// Proteção da planilha.
+    pub protection: Option<crate::SheetProtection>,
+    /// Intervalos que podem ser editados com a planilha protegida.
+    pub protected_ranges: Vec<crate::ProtectedRange>,
     /// Filtro automático da aba (`<autoFilter>`).
     pub autofilter: Option<AutoFilter>,
     /// Tabelas do Excel (`xl/tables/tableN.xml`) desta aba.
@@ -279,6 +289,11 @@ impl Layout {
         self.merges.extend(other.merges);
         self.cond.extend(other.cond);
         self.links.extend(other.links);
+        self.validations.extend(other.validations);
+        self.notes.extend(other.notes);
+        self.legacy_drawing = self.legacy_drawing.take().or(other.legacy_drawing);
+        self.protection = self.protection.take().or(other.protection);
+        self.protected_ranges.extend(other.protected_ranges);
         self.autofilter = self.autofilter.take().or(other.autofilter);
         self.tables.extend(other.tables);
         self.controls.extend(other.controls);
@@ -302,6 +317,7 @@ impl Layout {
         crate::cond::join_extensions(&mut self.cond);
         self.cond.sort_by_key(|r| r.priority);
         self.links.sort_by_key(|l| (l.range.first_row, l.range.first_col));
+        crate::notes::sort(&mut self.notes);
     }
 
     /// Hiperlink que cobre a célula, se houver.

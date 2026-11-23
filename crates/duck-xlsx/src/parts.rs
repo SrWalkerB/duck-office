@@ -1,8 +1,8 @@
 //! Partes pequenas do pacote: relacionamentos, workbook, strings e estilos.
 
 use duck_core::{
-    Alignment, Border, BorderSide, BorderStyle, CellXf, Color, Dxf, Fill, Font, HAlign, RichRun, RunFont,
-    StringTable, Styles, Theme, VAlign,
+    Border, BorderSide, BorderStyle, CellXf, Color, Dxf, Fill, Font, HAlign, RichRun, RunFont, StringTable,
+    Styles, Theme, VAlign,
 };
 use rayon::prelude::*;
 
@@ -122,7 +122,7 @@ pub(crate) fn link_targets(pkg: &Package, part: &str) -> std::collections::HashM
 }
 
 /// Junta `dir` + `target`, tratando caminhos absolutos e `..`.
-fn resolve(dir: &str, target: &str) -> String {
+pub(crate) fn resolve(dir: &str, target: &str) -> String {
     let joined = if let Some(abs) = target.strip_prefix('/') {
         abs.to_string()
     } else if dir.is_empty() {
@@ -426,8 +426,12 @@ pub(crate) fn parse_styles(buf: &[u8]) -> Styles {
             font: num(b"fontId"),
             fill: num(b"fillId"),
             border: num(b"borderId"),
-            alignment: Alignment::default(),
+            ..Default::default()
         };
+        if let Some(t) = find_tag(c, 0, b"protection") {
+            xf.unlocked = matches!(attr(t.attrs, b"locked"), Some(b"0") | Some(b"false"));
+            xf.hide_formula = matches!(attr(t.attrs, b"hidden"), Some(b"1") | Some(b"true"));
+        }
         if let Some(t) = find_tag(c, 0, b"alignment") {
             let al = &mut xf.alignment;
             al.horizontal = match attr(t.attrs, b"horizontal") {

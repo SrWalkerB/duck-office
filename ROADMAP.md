@@ -203,6 +203,19 @@ Tudo o que as duas planilhas reais de teste usam, com os mesmos resultados do Ex
 - [ ] Clicar ou arrastar dentro do texto do editor para mover o cursor e selecionar.
 - [ ] Tema do sistema no Linux onde o compositor não informa (X11): hoje "seguir o sistema" fica no claro.
 
+## ✅ Depois da F6 · Validação, notas e proteção
+
+O que antes só era preservado no arquivo agora aparece e é respeitado, com desfazer e ajuste ao inserir e apagar linhas e colunas:
+
+- [x] **Validação de dados** (`dataValidations` e `x14:dataValidations`): lista suspensa (itens escritos, intervalo, outra aba, nome definido, fórmula como INDIRETO), recusa, aviso ou informação para valores inválidos, mensagem de entrada; criar, editar e tirar pela aba Dados. `INDIRETO` passou a aceitar nomes definidos.
+- [x] **Notas** (`comments` + VML): marca no canto, texto ao passar o mouse, notas sempre à vista; criar, editar e excluir. **Conversas** (`threadedComments`) só para leitura.
+- [x] **Proteção** de planilha e de pasta: células bloqueadas, o que a proteção permite (formatar, inserir, classificar, filtrar, dinâmicas, notas), intervalos liberados, fórmulas ocultas e aviso claro. Desproteger confere a senha com o resumo do arquivo (o antigo de 16 bits e SHA-1/256/384/512); sem ela a proteção fica. As macros seguem as mesmas regras (`Protect`, `Unprotect`, `UserInterfaceOnly`).
+- [x] Gravação no lugar que o esquema pede, com partes, relacionamentos e tipos de conteúdo novos quando a aba não tinha notas. Round-trip com 0 divergências na vitrine, num arquivo do openpyxl (que relê as mesmas regras, notas e proteção) e nas planilhas reais (que não têm esses recursos: neles, só o que a edição acrescenta); cópias relidas pelo conversor do OnlyOffice.
+- [ ] Responder e resolver conversas.
+- [ ] Colar e preencher levando a validação e as notas da origem; "Circular dados inválidos".
+- [ ] Pedir a senha de um intervalo protegido por senha própria (hoje ele fica bloqueado).
+- [ ] Teste manual de teclado e mouse na janela, e das cópias no Excel.
+
 ## ⏳ F7+ · O resto da suíte
 
 - [ ] Formato de arquivo nativo (ADR-013, em discussão).

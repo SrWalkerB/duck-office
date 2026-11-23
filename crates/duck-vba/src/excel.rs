@@ -40,6 +40,16 @@ pub struct Table {
 type R<T> = Result<T, String>;
 
 /// A planilha aberta.
+/// Os argumentos de `Protect`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Protect {
+    pub password: String,
+    /// Bits de [`duck_core::protect::deny`].
+    pub deny: u32,
+    /// As macros continuam podendo mudar (`UserInterfaceOnly`).
+    pub ui_only: bool,
+}
+
 pub trait Backend {
     fn workbook_name(&self) -> String;
     fn sheets(&self) -> Vec<String>;
@@ -74,6 +84,17 @@ pub trait Backend {
     /// Aplica as mudanças de dinâmicas pendentes.
     fn flush(&mut self) -> R<()>;
     fn calculate(&mut self);
+    /// Protege a planilha (`None` = a estrutura da pasta).
+    fn protect(&mut self, _sheet: Option<usize>, _p: Protect) -> R<()> {
+        Ok(())
+    }
+    /// Desprotege, conferindo a senha que o arquivo guarda.
+    fn unprotect(&mut self, _sheet: Option<usize>, _password: &str) -> R<()> {
+        Ok(())
+    }
+    fn protected(&self, _sheet: Option<usize>) -> bool {
+        false
+    }
     /// Caixa de mensagem; devolve o botão (`vbYes` = 6, `vbNo` = 7, `vbOK` = 1).
     fn msgbox(&mut self, text: &str, buttons: i32, title: &str) -> i32;
     fn status(&mut self, text: Option<&str>);
@@ -110,6 +131,51 @@ pub enum Obj {
 
 type V = Val<Obj>;
 type A = Args<Obj>;
+
+fn text_arg(a: &A, i: usize, name: &str) -> Res<String> {
+    match a.get(i, name) {
+        None | Some(Val::Empty | Val::Missing) => Ok(String::new()),
+        Some(v) => to_str(v),
+    }
+}
+
+/// Os argumentos de `Worksheet.Protect`, na ordem do Excel.
+fn protect_args(a: &A) -> Res<Protect> {
+    use duck_core::protect::deny;
+    let flag = |i: usize, name: &str, default: bool| match a.get(i, name) {
+        None | Some(Val::Empty | Val::Missing) => Ok(default),
+        Some(v) => truth(v),
+    };
+    let mut p = Protect { password: text_arg(a, 0, "password")?, deny: 0, ui_only: false };
+    if flag(1, "drawingobjects", true)? {
+        p.deny |= deny::OBJECTS;
+    }
+    if flag(3, "scenarios", true)? {
+        p.deny |= deny::SCENARIOS;
+    }
+    p.ui_only = flag(4, "userinterfaceonly", false)?;
+    for (k, (bit, name)) in [
+        (deny::FORMAT_CELLS, "allowformattingcells"),
+        (deny::FORMAT_COLUMNS, "allowformattingcolumns"),
+        (deny::FORMAT_ROWS, "allowformattingrows"),
+        (deny::INSERT_COLUMNS, "allowinsertingcolumns"),
+        (deny::INSERT_ROWS, "allowinsertingrows"),
+        (deny::INSERT_LINKS, "allowinsertinghyperlinks"),
+        (deny::DELETE_COLUMNS, "allowdeletingcolumns"),
+        (deny::DELETE_ROWS, "allowdeletingrows"),
+        (deny::SORT, "allowsorting"),
+        (deny::AUTO_FILTER, "allowfiltering"),
+        (deny::PIVOTS, "allowusingpivottables"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if !flag(5 + k, name, false)? {
+            p.deny |= bit;
+        }
+    }
+    Ok(p)
+}
 
 pub struct Excel<'b, B: Backend> {
     pub b: &'b mut B,
@@ -758,6 +824,17 @@ impl<B: Backend> Host for Excel<'_, B> {
                     Some(v) => obj(Obj::Sheet(self.sheet_by(v)?)),
                 },
                 "name" => Ok(Val::Str(self.b.workbook_name())),
+                "protect" => {
+                    let password = text_arg(a, 0, "password")?;
+                    self.b.protect(None, Protect { password, ..Default::default() }).map_err(fail)?;
+                    Ok(Val::Empty)
+                }
+                "unprotect" => {
+                    let pass = text_arg(a, 0, "password")?;
+                    self.b.unprotect(None, &pass).map_err(fail)?;
+                    Ok(Val::Empty)
+                }
+                "protectstructure" => Ok(Val::Bool(self.b.protected(None))),
                 "activesheet" => obj(Obj::Sheet(self.b.active_sheet())),
                 "refreshall" => {
                     for s in 0..self.b.sheets().len() {
@@ -812,7 +889,19 @@ impl<B: Backend> Host for Excel<'_, B> {
                         Ok(Val::Empty)
                     }
                     "visible" => Ok(Val::Num(-1.0)),
-                    "protect" | "unprotect" => Ok(Val::Empty),
+                    "protect" => {
+                        self.b.flush().map_err(fail)?;
+                        let p = protect_args(a)?;
+                        self.b.protect(Some(s), p).map_err(fail)?;
+                        Ok(Val::Empty)
+                    }
+                    "unprotect" => {
+                        self.b.flush().map_err(fail)?;
+                        let pass = text_arg(a, 0, "password")?;
+                        self.b.unprotect(Some(s), &pass).map_err(fail)?;
+                        Ok(Val::Empty)
+                    }
+                    "protectcontents" => Ok(Val::Bool(self.b.protected(Some(s)))),
                     _ => Err(VbErr::unsupported(&format!("Worksheet.{name}"))),
                 }
             }
@@ -1166,6 +1255,7 @@ mod tests {
         flushed: u32,
         table_rows: u32,
         sorted: Option<(CellRange, u32, bool)>,
+        lock: Option<Protect>,
     }
 
     impl Backend for Book {
@@ -1280,6 +1370,20 @@ mod tests {
             Ok(())
         }
         fn calculate(&mut self) {}
+        fn protect(&mut self, _: Option<usize>, p: Protect) -> R<()> {
+            self.lock = Some(p);
+            Ok(())
+        }
+        fn unprotect(&mut self, _: Option<usize>, password: &str) -> R<()> {
+            if self.lock.as_ref().is_some_and(|l| l.password != password) {
+                return Err("senha incorreta".into());
+            }
+            self.lock = None;
+            Ok(())
+        }
+        fn protected(&self, _: Option<usize>) -> bool {
+            self.lock.is_some()
+        }
         fn msgbox(&mut self, t: &str, _: i32, _: &str) -> i32 {
             self.msgs.push(t.into());
             6
@@ -1290,6 +1394,31 @@ mod tests {
     fn run(b: &mut Book, src: &str) -> Result<(), VbErr> {
         let mut x = Excel::new(b);
         Interp::new(&mut x, vec![parse_module("M", src)]).run("main")
+    }
+
+    /// `Protect` e `Unprotect` chegam ao app com a senha e o que é permitido.
+    #[test]
+    fn protect_and_unprotect() {
+        use duck_core::protect::deny;
+        let mut b = Book::default();
+        let src = "Sub Main()
+With ThisWorkbook.Sheets(1)
+.Protect \"abc\", UserInterfaceOnly:=True, AllowSorting:=True
+End With
+End Sub";
+        run(&mut b, src).unwrap();
+        let l = b.lock.clone().unwrap();
+        assert!(l.password == "abc" && l.ui_only);
+        assert!(l.deny & deny::SORT == 0 && l.deny & (deny::FORMAT_CELLS | deny::OBJECTS) != 0);
+        let wrong = "Sub Main()
+ThisWorkbook.Sheets(1).Unprotect \"x\"
+End Sub";
+        assert!(run(&mut b, wrong).is_err());
+        let right = "Sub Main()
+If ThisWorkbook.Sheets(1).ProtectContents Then ThisWorkbook.Sheets(1).Unprotect Password:=\"abc\"
+End Sub";
+        run(&mut b, right).unwrap();
+        assert_eq!(b.lock, None);
     }
 
     /// Trocar o campo de linha conforme a célula ligada aos botões de opção.

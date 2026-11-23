@@ -66,6 +66,19 @@ pub enum Act {
     Filter,
     ClearFilter,
     Reapply,
+    /// Regra de validação da seleção; abrir a lista da célula ativa.
+    Validation,
+    OpenList,
+    /// Criar ou editar a nota da célula; excluir; deixar à vista; todas.
+    Note,
+    DeleteNotes,
+    ShowNote,
+    ShowNotes,
+    /// Próxima nota (`true` = anterior).
+    NextNote(bool),
+    /// Proteger (`true`) ou desproteger a planilha ou a pasta.
+    ProtectSheet(bool),
+    ProtectBook(bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +128,7 @@ pub enum Tab {
     Home,
     Insert,
     Data,
+    Review,
     View,
 }
 
@@ -334,36 +348,101 @@ const QUICK: &[Item] = &[
     b(Act::Redo, "Refazer", "Refazer (Ctrl+Y)"),
 ];
 
-const TAB_NAMES: [(&str, Option<Tab>); 5] = [
+const TAB_NAMES: [(&str, Option<Tab>); 6] = [
     ("Arquivo", None),
     ("Página Inicial", Some(Tab::Home)),
     ("Inserir", Some(Tab::Insert)),
     ("Dados", Some(Tab::Data)),
+    ("Revisão", Some(Tab::Review)),
     ("Exibir", Some(Tab::View)),
 ];
 
-const DATA: &[Group] = &[Group {
-    title: "Classificar e filtrar",
-    rows: [
-        &[
-            b(
-                Act::Sort(false),
-                "Classificar A→Z",
-                "Classificar pela coluna da célula ativa, do menor ao maior",
-            ),
-            b(
-                Act::Sort(true),
-                "Classificar Z→A",
-                "Classificar pela coluna da célula ativa, do maior ao menor",
-            ),
+const DATA: &[Group] = &[
+    Group {
+        title: "Classificar e filtrar",
+        rows: [
+            &[
+                b(
+                    Act::Sort(false),
+                    "Classificar A→Z",
+                    "Classificar pela coluna da célula ativa, do menor ao maior",
+                ),
+                b(
+                    Act::Sort(true),
+                    "Classificar Z→A",
+                    "Classificar pela coluna da célula ativa, do maior ao menor",
+                ),
+            ],
+            &[
+                b(Act::Filter, "Filtro", "Ligar ou desligar o filtro (setas nos cabeçalhos)"),
+                b(Act::ClearFilter, "Limpar", "Tirar os critérios do filtro e mostrar todas as linhas"),
+                b(Act::Reapply, "Reaplicar", "Aplicar o filtro de novo depois de editar os dados"),
+            ],
         ],
-        &[
-            b(Act::Filter, "Filtro", "Ligar ou desligar o filtro (setas nos cabeçalhos)"),
-            b(Act::ClearFilter, "Limpar", "Tirar os critérios do filtro e mostrar todas as linhas"),
-            b(Act::Reapply, "Reaplicar", "Aplicar o filtro de novo depois de editar os dados"),
+    },
+    Group {
+        title: "Validação",
+        rows: [
+            &[b(
+                Act::Validation,
+                "Validação de dados",
+                "Definir o que as células da seleção aceitam (lista, números, datas, fórmula)",
+            )],
+            &[b(Act::OpenList, "Abrir a lista", "Abrir a lista suspensa da célula ativa (Alt+↓)")],
         ],
-    ],
-}];
+    },
+];
+
+const REVIEW: &[Group] = &[
+    Group {
+        title: "Notas",
+        rows: [
+            &[
+                b(Act::Note, "Nova nota", "Criar ou editar a nota da célula ativa (Shift+F2)"),
+                b(Act::DeleteNotes, "Excluir", "Excluir as notas da seleção"),
+                b(Act::NextNote(true), "Anterior", "Ir para a nota anterior"),
+                b(Act::NextNote(false), "Próxima", "Ir para a próxima nota"),
+            ],
+            &[
+                b(
+                    Act::ShowNote,
+                    "Mostrar ou ocultar",
+                    "Deixar a nota da célula sempre à vista, ou escondê-la",
+                ),
+                b(Act::ShowNotes, "Mostrar todas", "Mostrar todas as notas da aba"),
+            ],
+        ],
+    },
+    Group {
+        title: "Proteção",
+        rows: [
+            &[
+                b(
+                    Act::ProtectSheet(true),
+                    "Proteger planilha",
+                    "Impedir mudanças nas células bloqueadas desta planilha",
+                ),
+                b(
+                    Act::ProtectSheet(false),
+                    "Desproteger planilha",
+                    "Tirar a proteção desta planilha (pede a senha, se houver)",
+                ),
+            ],
+            &[
+                b(
+                    Act::ProtectBook(true),
+                    "Proteger pasta",
+                    "Impedir criar, excluir, renomear, mover e ocultar abas",
+                ),
+                b(
+                    Act::ProtectBook(false),
+                    "Desproteger pasta",
+                    "Tirar a proteção da pasta (pede a senha, se houver)",
+                ),
+            ],
+        ],
+    },
+];
 
 /// Um botão posicionado.
 pub struct Laid {
@@ -393,6 +472,7 @@ fn groups(tab: Tab) -> &'static [Group] {
         Tab::Home => HOME,
         Tab::Insert => INSERT,
         Tab::Data => DATA,
+        Tab::Review => REVIEW,
         Tab::View => VIEW,
     }
 }
@@ -494,6 +574,9 @@ pub struct State<'a> {
     pub colors: (u32, u32),
     pub num_fmt_name: &'a str,
     pub mode: Mode,
+    pub show_notes: bool,
+    /// A planilha e a pasta estão protegidas.
+    pub protected: (bool, bool),
 }
 
 fn rgba(rgb: u32) -> Rgba {
@@ -566,6 +649,8 @@ pub fn draw(
                 Act::Grid => st.grid,
                 Act::Headers => st.headers,
                 Act::Theme(m) => m == st.mode,
+                Act::ShowNotes => st.show_notes,
+                Act::ProtectBook(true) => st.protected.1,
                 _ => false,
             };
         };
@@ -580,6 +665,9 @@ pub fn draw(
             Act::Grid => st.grid,
             Act::Headers => st.headers,
             Act::Theme(m) => m == st.mode,
+            Act::ShowNotes => st.show_notes,
+            Act::ProtectSheet(true) => st.protected.0,
+            Act::ProtectBook(true) => st.protected.1,
             _ => false,
         }
     };

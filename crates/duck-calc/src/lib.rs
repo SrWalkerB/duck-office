@@ -16,6 +16,9 @@
 //! - [`funcs`]: as funções de planilha.
 //! - [`index`]: índices de busca (PROCV, SOMASES...) e critérios.
 //! - [`recalc`]: grafo de dependências e recálculo em paralelo.
+//! - [`valid`]: validação de dados (listas e valores aceitos).
+
+pub mod valid;
 
 pub mod chartdata;
 pub mod dynarr;

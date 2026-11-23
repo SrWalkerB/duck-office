@@ -160,7 +160,23 @@ impl Ctx<'_> {
                 .into_iter()
                 .map(|(s, m)| (s, Command::SetCells(m.into_values().collect()))),
         );
-        if self.app.run_step(step) { Ok(()) } else { Err("A planilha não pode ser editada agora".into()) }
+        self.run(step, "A planilha não pode ser editada agora")
+    }
+
+    /// Aplica um passo; o aviso da proteção vira o erro da macro. As abas
+    /// protegidas com `UserInterfaceOnly` deixam as macros mudarem.
+    fn run(&mut self, step: crate::edit::Step, why: &str) -> R<()> {
+        let free = self.doc().is_some_and(|d| step.iter().all(|(i, _)| d.macro_free.contains(i)));
+        self.app.unchecked = free;
+        let ok = self.app.run_step(step);
+        self.app.unchecked = false;
+        if ok {
+            return Ok(());
+        }
+        match self.app.dialog.take() {
+            Some(_) => Err(self.app.message.clone()),
+            None => Err(why.into()),
+        }
     }
 
     /// A dinâmica para mudar (a pendente, se já foi mudada).
@@ -193,6 +209,46 @@ impl Ctx<'_> {
 }
 
 impl Backend for Ctx<'_> {
+    fn protect(&mut self, sheet: Option<usize>, p: duck_vba::excel::Protect) -> R<()> {
+        let password = duck_xlsx::protect::new_password(&p.password);
+        match sheet {
+            Some(i) => {
+                if self.protected(sheet) {
+                    return Ok(());
+                }
+                let new = duck_core::SheetProtection { enabled: true, deny: p.deny, password };
+                self.run(vec![(i, Command::Protect(Some(Box::new(new))))], "Não foi possível proteger")?;
+                if let Some(d) = self.app.doc.as_mut() {
+                    if p.ui_only {
+                        d.macro_free.insert(i);
+                    } else {
+                        d.macro_free.remove(&i);
+                    }
+                }
+            }
+            None if !self.protected(None) => {
+                self.app.set_book_protection(Some(duck_core::BookProtection {
+                    structure: true,
+                    password,
+                    ..Default::default()
+                }));
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn unprotect(&mut self, sheet: Option<usize>, password: &str) -> R<()> {
+        self.app.unprotect_with(sheet, password)
+    }
+
+    fn protected(&self, sheet: Option<usize>) -> bool {
+        match sheet {
+            Some(i) => self.sheet(i).is_ok_and(|s| s.protected().is_some()),
+            None => self.app.book_protected(),
+        }
+    }
+
     fn workbook_name(&self) -> String {
         self.doc().map(|d| self.app.file_label(&d.path)).unwrap_or_default()
     }
@@ -346,7 +402,7 @@ impl Backend for Ctx<'_> {
             if desc { o.reverse() } else { o }
         });
         let cmd = Command::SortRows { r0: r.first_row, c0: r.first_col, c1: r.last_col, perm };
-        if self.app.run_step(vec![(s, cmd)]) { Ok(()) } else { Err("Não foi possível classificar".into()) }
+        self.run(vec![(s, cmd)], "Não foi possível classificar")
     }
 
     fn freeze_values(&mut self, s: usize, r: CellRange) -> R<()> {
@@ -372,7 +428,7 @@ impl Backend for Ctx<'_> {
             }
         }
         if !list.is_empty() {
-            self.app.run_step(vec![(s, Command::SetCells(list))]);
+            self.run(vec![(s, Command::SetCells(list))], "A planilha não pode ser editada agora")?;
         }
         Ok(())
     }
@@ -390,7 +446,7 @@ impl Backend for Ctx<'_> {
             return Ok(());
         }
         let cmd = if rows { Command::RowsHidden(list) } else { Command::ColsHidden(list) };
-        self.app.run_step(vec![(s, cmd)]);
+        self.run(vec![(s, cmd)], "A planilha não pode ser editada agora")?;
         Ok(())
     }
 

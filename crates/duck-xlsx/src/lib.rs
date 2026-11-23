@@ -26,6 +26,10 @@ pub mod sheet;
 pub mod write;
 pub mod xml;
 
+pub mod notes;
+pub mod protect;
+mod valid;
+
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -142,6 +146,8 @@ pub struct Book {
     meta: parts::WorkbookMeta,
     /// Caches das segmentações de dados (lidos uma vez, na primeira aba que tiver).
     slicer_caches: std::sync::OnceLock<drawing::SlicerCaches>,
+    /// Pessoas das conversas (idem).
+    persons: std::sync::OnceLock<notes::Persons>,
 }
 
 impl Book {
@@ -149,7 +155,7 @@ impl Book {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         let pkg = Package::open(path.as_ref())?;
         let meta = parts::read_workbook(&pkg)?;
-        Ok(Self { pkg, meta, slicer_caches: Default::default() })
+        Ok(Self { pkg, meta, slicer_caches: Default::default(), persons: Default::default() })
     }
 
     pub fn sheets(&self) -> Vec<SheetInfo> {
@@ -285,6 +291,15 @@ impl Book {
                                 drawing::read_objects(&self.pkg, &m.path, caches);
                             drawing::attach_controls(&self.pkg, &m.path, &mut sh.layout);
                             sh.layout.pivots = pivot::read_pivot_tables(&self.pkg, &m.path);
+                            sh.layout.notes = notes::read_notes(
+                                &self.pkg,
+                                &m.path,
+                                sh.layout.legacy_drawing.as_deref(),
+                                &|| {
+                                    let read = || notes::read_persons(&self.pkg, &self.meta.path);
+                                    self.persons.get_or_init(read).clone()
+                                },
+                            );
                             (sh, rep)
                         })
                     }

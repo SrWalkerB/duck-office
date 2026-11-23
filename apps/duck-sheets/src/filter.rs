@@ -547,9 +547,12 @@ impl SheetsApp {
         let Some(range) = range else { return };
         let changes = self.filter_changes(range, af.as_ref());
         let n = changes.iter().filter(|c| c.1).count();
+        // Esconder as linhas é parte do filtro: a proteção já deixou filtrar.
+        self.unchecked = true;
         if !changes.is_empty() && self.run_command(Command::RowsHidden(changes)) {
             self.merge_last_steps();
         }
+        self.unchecked = false;
         if af.as_ref().is_some_and(|f| !f.columns.is_empty()) {
             self.message =
                 format!("Filtro aplicado ({} linhas escondidas agora)", crate::app::fmt_int(n as u64));

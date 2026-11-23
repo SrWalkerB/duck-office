@@ -35,6 +35,7 @@ pub fn read_extras(pkg: &Package, meta: &WorkbookMeta) -> BookExtras {
         out.externals.push(book);
     });
 
+    out.protection = crate::protect::parse_book(&wb);
     out.saved_at = pkg.read("docProps/core.xml").ok().and_then(|x| saved_at(&x));
     out
 }

@@ -370,6 +370,8 @@ impl SheetsApp {
         self.formula_text(&mut formula);
         let active = self.active_format();
         let filter_buttons = self.filter_buttons(&geom);
+        let (dv_arrow, dv_prompt) = (self.dv_arrow(&geom), self.dv_prompt(&geom));
+        let protected = (self.sheet_protected(), self.book_protected());
         // Referências da fórmula em edição: no texto e na grade.
         let (refs, ref_colors) = self.editor_refs();
         let spans = crate::pointing::spans(&refs, &ref_colors, th);
@@ -416,6 +418,7 @@ impl SheetsApp {
                 for q in geom.quads.iter().rev() {
                     if !q.rect.is_empty() {
                         draw_cells(&mut p, &cx, q, &mut buf, &mut buf2);
+                        crate::notes::draw_marks(&mut p, &sheet.layout.notes, view, q, geom.g, th);
                         let (images, today) = (&self.images.uv, self.today);
                         let mut live = |p: &mut Painter, range: &str, r: Rect, clip: &Rect| {
                             draw_camera(p, doc, images, today, px, range, r, clip, th)
@@ -453,6 +456,25 @@ impl SheetsApp {
                     p.stroke(r.inset(-px), &Rect::everything(), 2.0 * px, th.selection);
                 }
                 draw_scrollbars(&mut p, vthumb, &geom, self.drag, th);
+                // Notas, seta da lista e mensagem de entrada.
+                let notes = &sheet.layout.notes;
+                let body = self.font_styles.first().copied().unwrap_or(ui);
+                crate::notes::draw_visible(&mut p, &geom, body, notes, view, self.show_notes, th);
+                if let Some(r) = dv_arrow {
+                    crate::valid::draw_arrow(&mut p, r, &geom, th);
+                }
+                if self.dv_list.is_none()
+                    && self.dialog.is_none()
+                    && let Some((cell, title, text)) = &dv_prompt
+                {
+                    crate::valid::draw_tip(&mut p, &geom, ui, *cell, title, text, th);
+                }
+                if let Some((r, c)) = self.hover_note
+                    && let Some(n) = duck_core::notes::at(notes, r, c)
+                    && let Some(cell) = cell_screen_rect(&geom, view, r, c)
+                {
+                    crate::notes::draw_hover(&mut p, &geom, ui, cell, n, th);
+                }
             }
             None => {
                 p.fill(
@@ -632,6 +654,8 @@ impl SheetsApp {
             colors: self.colors,
             num_fmt_name,
             mode: self.mode,
+            show_notes: self.show_notes,
+            protected,
         };
         let file_open = self
             .popup
@@ -662,6 +686,12 @@ impl SheetsApp {
         }
         if let Some(pr) = &self.prompt {
             pr.draw(&mut p, &geom, ui, th);
+        }
+        if let Some(l) = &self.dv_list {
+            l.draw(&mut p, &geom, ui, self.mouse, th);
+        }
+        if let Some(d) = &self.dialog {
+            d.draw(&mut p, &geom, ui, self.mouse, th);
         }
 
         self.instances = out;

@@ -41,6 +41,10 @@ pub enum Fmt {
     /// RGB; `None` = sem preenchimento.
     FillColor(Option<u32>),
     Borders(Borders),
+    /// Célula bloqueada (só vale com a planilha protegida).
+    Lock,
+    /// Fórmula oculta na barra (idem).
+    HideFormula,
 }
 
 /// Bordas aplicadas pela lista de bordas.
@@ -169,6 +173,8 @@ pub fn by_name(name: &str) -> Option<Fmt> {
         "bordas" => Fmt::Borders(Borders::All),
         "contorno" => Fmt::Borders(Borders::Outline),
         "sembordas" => Fmt::Borders(Borders::None),
+        "bloquear" => Fmt::Lock,
+        "ocultar-formula" => Fmt::HideFormula,
         _ => match name.split_once('=') {
             Some(("cor", v)) => Fmt::FontColor(Some(hex(v)?)),
             Some(("fundo", v)) => Fmt::FillColor(Some(hex(v)?)),
@@ -287,6 +293,9 @@ pub struct Active {
     pub font: String,
     pub size: f32,
     pub num_fmt: u16,
+    /// Bloqueada e com a fórmula oculta (só valem com a planilha protegida).
+    pub locked: bool,
+    pub hide_formula: bool,
     /// A célula ativa está numa mesclagem.
     pub merged: bool,
 }
@@ -342,6 +351,8 @@ fn restyle(st: &mut Styles, base: u16, f: Fmt, on: bool, edges: [bool; 4]) -> u1
             }
         }
         Fmt::Number(id) => xf.num_fmt = id,
+        Fmt::Lock => xf.unlocked = !on,
+        Fmt::HideFormula => xf.hide_formula = on,
         Fmt::Decimals(d) => {
             let code = st.num_fmt_code(xf.num_fmt).to_string();
             if let Some(new) = adjust_decimals(&code, d) {
@@ -420,6 +431,8 @@ impl SheetsApp {
             font: if f.name.is_empty() { "Calibri".into() } else { f.name },
             size: if f.size > 0.0 { f.size } else { 11.0 },
             num_fmt: xf.num_fmt,
+            locked: !xf.unlocked,
+            hide_formula: xf.hide_formula,
             merged: v.merges.at(r, c).is_some(),
         })
     }
@@ -436,6 +449,8 @@ impl SheetsApp {
             Fmt::Strike => !active.strike,
             Fmt::Align(h) => active.align != h,
             Fmt::Wrap => !active.wrap,
+            Fmt::Lock => !active.locked,
+            Fmt::HideFormula => !active.hide_formula,
             _ => true,
         };
         let Some(range) = self.sel_cells(2_000_000) else { return };

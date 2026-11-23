@@ -168,6 +168,7 @@ fn xf_xml(element: Option<&[u8]>, base: &CellXf, xf: &CellXf) -> Vec<u8> {
         (b"borderId", xf.border, b"applyBorder", xf.border != base.border),
     ];
     let align_changed = xf.alignment != base.alignment;
+    let lock_changed = (xf.unlocked, xf.hide_formula) != (base.unlocked, base.hide_formula);
     let (attrs, children) = match element {
         Some(e) => {
             let gt = crate::xml::tag_end(e, 0).unwrap_or(e.len());
@@ -182,6 +183,7 @@ fn xf_xml(element: Option<&[u8]>, base: &CellXf, xf: &CellXf) -> Vec<u8> {
         .iter()
         .flat_map(|(k, _, apply, changed)| if *changed { vec![*k, *apply] } else { vec![*k] })
         .chain(align_changed.then_some(&b"applyAlignment"[..]))
+        .chain(lock_changed.then_some(&b"applyProtection"[..]))
         .collect();
     for (k, v, _, _) in ids {
         out.push(b' ');
@@ -206,7 +208,17 @@ fn xf_xml(element: Option<&[u8]>, base: &CellXf, xf: &CellXf) -> Vec<u8> {
     if align_changed {
         out.extend_from_slice(b" applyAlignment=\"1\"");
     }
-    // Filhos: `<alignment>` trocado se mudou; `<protection>` e o resto como estão.
+    if lock_changed {
+        out.extend_from_slice(b" applyProtection=\"1\"");
+    }
+    // Filhos: `<alignment>` e `<protection>` trocados se mudaram; o resto como está.
+    let swapped;
+    let children = if lock_changed {
+        swapped = swap_protection(children, xf);
+        &swapped[..]
+    } else {
+        children
+    };
     let mut kids = Vec::new();
     if align_changed {
         alignment_xml(&xf.alignment, &mut kids);
@@ -230,6 +242,41 @@ fn xf_xml(element: Option<&[u8]>, base: &CellXf, xf: &CellXf) -> Vec<u8> {
         out.extend_from_slice(&kids);
         out.extend_from_slice(b"</xf>");
     }
+    out
+}
+
+/// Os filhos do `<xf>` com o `<protection>` de `xf` (que vem depois do
+/// `<alignment>`).
+fn swap_protection(children: &[u8], xf: &CellXf) -> Vec<u8> {
+    let mut new = Vec::new();
+    if xf.unlocked || xf.hide_formula {
+        new.extend_from_slice(b"<protection");
+        if xf.unlocked {
+            new.extend_from_slice(b" locked=\"0\"");
+        }
+        if xf.hide_formula {
+            new.extend_from_slice(b" hidden=\"1\"");
+        }
+        new.extend_from_slice(b"/>");
+    }
+    let mut out = children.to_vec();
+    if let Some(t) = find_tag(children, 0, b"protection") {
+        let end = if t.self_closing {
+            t.end
+        } else {
+            memchr::memmem::find(&children[t.end..], b"</protection>").map_or(t.end, |x| t.end + x + 13)
+        };
+        out.splice(t.start..end, new);
+        return out;
+    }
+    let at = match find_tag(children, 0, b"alignment") {
+        Some(t) if t.self_closing => t.end,
+        Some(t) => {
+            memchr::memmem::find(&children[t.end..], b"</alignment>").map_or(t.end, |x| t.end + x + 12)
+        }
+        None => 0,
+    };
+    out.splice(at..at, new);
     out
 }
 

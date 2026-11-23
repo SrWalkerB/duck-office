@@ -116,6 +116,19 @@ impl SheetsApp {
             Act::Filter => self.toggle_filter(),
             Act::ClearFilter => self.clear_filters(),
             Act::Reapply => self.reapply_filter(),
+            Act::Validation => self.ask_validation(),
+            Act::OpenList => {
+                if !self.open_list() {
+                    self.message = "A célula ativa não tem lista".into();
+                }
+            }
+            Act::Note => self.ask_note(),
+            Act::DeleteNotes => self.delete_notes(),
+            Act::ShowNote => self.toggle_note(),
+            Act::ShowNotes => self.show_notes = !self.show_notes,
+            Act::NextNote(back) => self.next_note(back),
+            Act::ProtectSheet(on) => self.protect_button(on, true),
+            Act::ProtectBook(on) => self.protect_button(on, false),
             Act::Autofit => {
                 let Some((_, v)) = self.doc.as_ref().and_then(|d| d.current()) else { return };
                 let (_, c0, _, c1) = v.sel();
@@ -227,11 +240,17 @@ impl SheetsApp {
                 Item::new("Ocultar colunas", Act::Hide { rows: false, hide: true }),
                 Item::new("Reexibir linhas", Act::Hide { rows: true, hide: false }),
                 Item::new("Reexibir colunas", Act::Hide { rows: false, hide: false }),
+                Item::sep(),
+                Item::new("Bloquear célula", Act::Fmt(Fmt::Lock))
+                    .checked(active.as_ref().is_some_and(|a| a.locked)),
+                Item::new("Ocultar fórmula", Act::Fmt(Fmt::HideFormula))
+                    .checked(active.as_ref().is_some_and(|a| a.hide_formula)),
             ],
             Drop::Clear => vec![
                 Item::new("Limpar tudo", Act::Clear(Clear::All)),
                 Item::new("Limpar formatos", Act::Clear(Clear::Formats)),
                 Item::new("Limpar conteúdo", Act::Clear(Clear::Contents)).key("Delete"),
+                Item::new("Limpar notas", Act::DeleteNotes),
             ],
             // As paletas abrem por `open_drop`.
             Drop::TextColor | Drop::FillColor => Vec::new(),
@@ -291,6 +310,7 @@ impl SheetsApp {
             return;
         }
         let merged = self.active_format().is_some_and(|a| a.merged);
+        let note = self.has_note();
         let mut items = vec![
             Item::new("Recortar", Act::Cut).key("Ctrl+X"),
             Item::new("Copiar", Act::Copy).key("Ctrl+C"),
@@ -308,7 +328,14 @@ impl SheetsApp {
             Item::new("Classificar Z→A", Act::Sort(true)),
             Item::new("Filtro", Act::Filter),
             Item::sep(),
+            Item::new(if note { "Editar nota…" } else { "Nova nota…" }, Act::Note).key("Shift+F2"),
         ];
+        if note {
+            items.push(Item::new("Excluir nota", Act::DeleteNotes));
+            items.push(Item::new("Mostrar ou ocultar a nota", Act::ShowNote));
+        }
+        items.push(Item::new("Validação de dados…", Act::Validation));
+        items.push(Item::sep());
         items.push(if merged {
             Item::new("Desfazer mesclagem", Act::Merge(Merge::Unmerge))
         } else {
@@ -408,6 +435,20 @@ impl SheetsApp {
         }
         let Some((r0, c0, r1, c1)) = self.sel_cells(2_000_000) else { return };
         let Some((sheet, _)) = self.doc.as_ref().and_then(|d| d.current()) else { return };
+        let mut more = Vec::new();
+        if c == Clear::All {
+            // Como no Excel: notas e validação saem junto.
+            let range = CellRange { first_row: r0, first_col: c0, last_row: r1, last_col: c1 };
+            let mut notes = sheet.layout.notes.clone();
+            notes.retain(|n| !range.contains(n.row, n.col) || n.thread.is_some());
+            if notes.len() != sheet.layout.notes.len() {
+                more.push(Command::Notes(notes));
+            }
+            let rules = crate::valid::with_rule(sheet, range, None, (r0, c0));
+            if rules != sheet.layout.validations {
+                more.push(Command::Validations(rules));
+            }
+        }
         let cmd = match c {
             Clear::All => {
                 let mut v = Vec::new();
@@ -438,7 +479,8 @@ impl SheetsApp {
                 Command::SetStyles(v)
             }
         };
-        self.run_command(cmd);
+        more.insert(0, cmd);
+        self.run_command(Command::Group(more));
     }
 
     pub(crate) fn hide(&mut self, rows: bool, hide: bool) {
@@ -606,6 +648,7 @@ impl SheetsApp {
             self.ribbon_tab = match t.as_str() {
                 "inserir" => Tab::Insert,
                 "dados" => Tab::Data,
+                "revisao" => Tab::Review,
                 "exibir" => Tab::View,
                 _ => Tab::Home,
             };
@@ -614,6 +657,9 @@ impl SheetsApp {
             self.scripted_typing(&t);
         }
         let Some(m) = self.opts.menu.take() else { return };
+        if self.scripted_dialog(&m) {
+            return;
+        }
         let g = self.geom();
         if m == "filtro" {
             let cur = self.doc.as_ref().and_then(|d| d.current()).map(|(_, v)| v.cur);

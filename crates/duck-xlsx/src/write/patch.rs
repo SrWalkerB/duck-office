@@ -208,6 +208,12 @@ impl<'a> Patcher<'a> {
             self.last_row = Some(r);
             pos = end;
         }
+        // Validação, proteção e notas, no fim da aba (que vem num trecho só:
+        // o que sobra depois do último `</row>` espera o fim do documento).
+        let last = if self.phase == Phase::Tail { &seg[pos..] } else { &[] };
+        let patched = super::tail::apply(last, self.sheet, self.rewrite_all);
+        let (seg, pos) = patched.as_deref().map_or((seg, pos), |t| (t, 0));
+
         // Depois de `</sheetData>`: copia o resto (com mesclagens e filtro novos).
         let e = self.sheet.edits();
         if self.phase == Phase::Tail && (e.merges || e.filter) {

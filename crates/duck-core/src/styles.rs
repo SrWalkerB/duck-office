@@ -119,6 +119,10 @@ pub struct CellXf {
     pub fill: u16,
     pub border: u16,
     pub alignment: Alignment,
+    /// `<protection locked="0">`: pode ser editada com a planilha protegida.
+    pub unlocked: bool,
+    /// `<protection hidden="1">`: com a planilha protegida, a fórmula não aparece.
+    pub hide_formula: bool,
 }
 
 #[derive(Clone, Debug, Default)]

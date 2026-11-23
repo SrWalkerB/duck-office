@@ -38,13 +38,20 @@ use zipw::ZipWriter;
 pub use blank::write_blank;
 pub use deflate::compress_chunk;
 
+pub(crate) use cellxml::{cell_ref, escape_attr, escape_text, push_u32};
+pub(crate) mod notes;
+mod tail;
+
 #[derive(Clone, Debug)]
 pub struct SaveOptions {
+    /// Proteção nova da pasta (`Some(None)` = tirar; `None` = como está).
+    pub book_protection: Option<Option<duck_core::BookProtection>>,
     /// Nível do deflate nas partes regravadas (1 = rápido, 6 = padrão do zlib).
     pub level: u32,
     /// Tamanho dos pedaços comprimidos em paralelo.
     pub chunk_bytes: usize,
-    /// Escreve toda célula de toda aba a partir do modelo (teste do gravador).
+    /// Escreve toda célula de toda aba a partir do modelo, e também a
+    /// validação, as notas e a proteção (teste do gravador).
     pub rewrite_all: bool,
     /// [`save_file`]: relê e confere as abas regravadas antes de substituir.
     pub verify: bool,
@@ -52,7 +59,7 @@ pub struct SaveOptions {
 
 impl Default for SaveOptions {
     fn default() -> Self {
-        Self { level: 6, chunk_bytes: 4 << 20, rewrite_all: false, verify: true }
+        Self { level: 6, chunk_bytes: 4 << 20, rewrite_all: false, verify: true, book_protection: None }
     }
 }
 
@@ -296,6 +303,42 @@ impl Book {
             small.insert(rels, insert_before(&r, b"</Relationships>", rel));
         }
 
+        if let Some(p) = &opts.book_protection {
+            let wb = match small.get(&self.meta.path) {
+                Some(b) => b.clone(),
+                None => self.pkg.read(&self.meta.path)?,
+            };
+            small.insert(self.meta.path.clone(), crate::protect::patch_book(&wb, p.as_ref()));
+        }
+        // Notas: as partes delas e, numa aba que não tinha, as ligações.
+        let mut added: Vec<(String, Vec<u8>)> = Vec::new();
+        for (m, s) in self.meta.sheets.iter().zip(sheets) {
+            let Some(s) = *s else { continue };
+            if !(s.edits().notes || opts.rewrite_all) {
+                continue;
+            }
+            let o = notes::build(
+                &m.path,
+                s,
+                &|part| small.get(part).map_or_else(|| self.pkg.read(part), |b| Ok(b.clone())),
+                &|part| self.pkg.entry(part).is_some() || added.iter().any(|a| a.0 == part),
+            )?;
+            for (name, bytes) in o.parts.into_iter().chain(o.rels.map(|r| (rels_path(&m.path), r))) {
+                if self.pkg.entry(&name).is_some() {
+                    small.insert(name, bytes);
+                } else {
+                    added.push((name, bytes));
+                }
+            }
+            if !o.types.is_empty() {
+                let ct = match small.get("[Content_Types].xml") {
+                    Some(b) => b.clone(),
+                    None => self.pkg.read("[Content_Types].xml")?,
+                };
+                small.insert("[Content_Types].xml".into(), notes::add_types(&ct, &o.types));
+            }
+        }
+
         let file = File::create(out)?;
         let mut zip = ZipWriter::new(BufWriter::with_capacity(1 << 20, file));
         for e in self.pkg.entries_in_order() {
@@ -329,6 +372,7 @@ impl Book {
             zip.copy_raw(meta, zipw::DEFLATED, h.finalize(), bytes.len() as u64, &z)?;
             rep.parts_rewritten += 1;
         }
+        rep.parts_rewritten += notes::write_added(&mut zip, &added, opts.level)?;
         let (w, len) = zip.finish()?;
         let file = w.into_inner().map_err(|e| Error::Io(e.into_error()))?;
         file.set_len(len)?;
@@ -614,7 +658,7 @@ fn insert_before(xml: &[u8], before: &[u8], ins: &[u8]) -> Vec<u8> {
     }
 }
 
-fn rels_path(part: &str) -> String {
+pub(crate) fn rels_path(part: &str) -> String {
     match part.rfind('/') {
         Some(i) => format!("{}/_rels/{}.rels", &part[..i], &part[i + 1..]),
         None => format!("_rels/{part}.rels"),
@@ -743,6 +787,31 @@ pub fn compare_sheets(a: &Sheet, sa: &StringTable, b: &Sheet, sb: &StringTable) 
     if la.rows != lb.rows {
         return Err("alturas de linha diferentes".into());
     }
+    // A extensão é um bloco à parte: a ordem entre ela e o resto não importa.
+    let rules = |l: &duck_core::Layout| {
+        let mut v: Vec<duck_core::DataValidation> = l.validations.clone();
+        v.sort_by_key(|x| x.ext);
+        v
+    };
+    if rules(la) != rules(lb) {
+        return Err(format!("validação de dados: {} × {}", la.validations.len(), lb.validations.len()));
+    }
+    if la.protection != lb.protection || la.protected_ranges != lb.protected_ranges {
+        return Err("proteção diferente".into());
+    }
+    let key = |n: &duck_core::Note| {
+        (
+            n.row,
+            n.col,
+            n.author.clone(),
+            n.text.clone(),
+            n.visible,
+            n.thread.as_ref().map(|t| t.messages.len()),
+        )
+    };
+    if !la.notes.iter().map(key).eq(lb.notes.iter().map(key)) {
+        return Err(format!("notas: {} × {}", la.notes.len(), lb.notes.len()));
+    }
     Ok(())
 }
 
@@ -844,6 +913,119 @@ pub fn verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Numa planilha em branco (sem notas, sem relacionamentos na aba): notas,
+    /// validação e proteção novas, salvas e relidas; depois mudadas de novo
+    /// por cima do arquivo salvo, e tiradas.
+    #[test]
+    fn notes_rules_and_protection_from_scratch() {
+        use duck_core::{
+            BookProtection, CellRange, Command, DataValidation, DvKind, Note, ProtectedRange, SheetProtection,
+        };
+        let dir = std::env::temp_dir().join(format!("duck-regras-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.xlsx"), dir.join("b.xlsx"));
+        write_blank(&a).unwrap();
+        let open = |p: &Path| crate::open(p, &crate::Options::default()).unwrap().0;
+        let save = |src: &Path, dest: &Path, wb: &duck_core::Workbook, o: &SaveOptions| {
+            let refs: Vec<Option<&Sheet>> = wb.sheets.iter().map(Some).collect();
+            save_file(src, dest, &refs, &wb.shared_strings, &wb.styles, o).unwrap()
+        };
+        let mut wb = open(&a);
+        let mut rule = DataValidation {
+            ranges: vec![CellRange { first_row: 0, first_col: 0, last_row: 4, last_col: 0 }],
+            kind: DvKind::List,
+            error: "Não <pode> & \"pronto\"
+segunda linha"
+                .into(),
+            ..Default::default()
+        };
+        rule.set_literal_items(&["a".into(), "b, c".into()]);
+        let mut shown = Note::new(3, 2, "Beto", "à vista");
+        shown.visible = true;
+        let protection = SheetProtection {
+            password: crate::protect::new_password("abc"),
+            deny: duck_core::protect::deny::DEFAULT,
+            ..Default::default()
+        };
+        let s = &mut wb.sheets[0];
+        s.layout.protected_ranges = vec![ProtectedRange {
+            name: "Livre & solto".into(),
+            ranges: vec![CellRange { first_row: 9, first_col: 0, last_row: 9, last_col: 3 }],
+            password: Default::default(),
+        }];
+        Command::Group(vec![
+            Command::Validations(vec![rule]),
+            Command::Notes(vec![
+                shown,
+                Note::new(
+                    0,
+                    0,
+                    "Ana",
+                    "linha 1
+linha <2>",
+                ),
+            ]),
+            Command::Protect(Some(Box::new(protection))),
+        ])
+        .apply(s);
+        let book = BookProtection { structure: true, ..Default::default() };
+        let opts = SaveOptions { book_protection: Some(Some(book.clone())), ..Default::default() };
+        save(&a, &b, &wb, &opts);
+        let back = open(&b);
+        let l = &back.sheets[0].layout;
+        assert_eq!(l.validations, wb.sheets[0].layout.validations);
+        assert_eq!(l.protection, wb.sheets[0].layout.protection);
+        assert_eq!(l.protected_ranges, wb.sheets[0].layout.protected_ranges);
+        assert_eq!(l.notes.len(), 2);
+        assert_eq!(
+            (l.notes[0].text.as_str(), l.notes[0].author.as_str()),
+            (
+                "linha 1
+linha <2>",
+                "Ana"
+            )
+        );
+        assert!(l.notes[1].visible && !l.notes[0].visible);
+        assert_eq!(l.notes[1].anchor, duck_core::notes::default_anchor(3, 2));
+        assert_eq!(back.extras.protection, Some(book));
+        let pkg = crate::Package::open(&b).unwrap();
+        let ct = String::from_utf8(pkg.read("[Content_Types].xml").unwrap()).unwrap();
+        assert!(ct.contains("Extension=\"vml\"") && ct.contains("/xl/comments1.xml"), "{ct}");
+        drop(pkg);
+
+        // O modelo de antes (sem reler) salva de novo por cima: as mesmas partes.
+        wb.sheets[0].clear_edits();
+        let mut notes = wb.sheets[0].layout.notes.clone();
+        notes.push(Note::new(7, 1, "Ana", "terceira"));
+        Command::Notes(notes).apply(&mut wb.sheets[0]);
+        save(&b, &b, &wb, &SaveOptions::default());
+        let back = open(&b);
+        assert_eq!(back.sheets[0].layout.notes.len(), 3);
+        assert!(back.sheets[0].layout.protection.is_some() && back.extras.protection.is_some());
+        let pkg = crate::Package::open(&b).unwrap();
+        assert!(
+            pkg.entry("xl/comments2.xml").is_none() && pkg.entry("xl/drawings/vmlDrawing2.vml").is_none()
+        );
+        drop(pkg);
+
+        // Tirar tudo.
+        let mut wb = back;
+        Command::Group(vec![
+            Command::Validations(Vec::new()),
+            Command::Notes(Vec::new()),
+            Command::Protect(None),
+        ])
+        .apply(&mut wb.sheets[0]);
+        save(&b, &a, &wb, &SaveOptions { book_protection: Some(None), ..Default::default() });
+        let back = open(&a);
+        let l = &back.sheets[0].layout;
+        assert!(l.validations.is_empty() && l.notes.is_empty() && l.protection.is_none());
+        assert_eq!(back.extras.protection, None);
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+        let _ = std::fs::remove_dir(&dir);
+    }
 
     #[test]
     fn workbook_patches() {

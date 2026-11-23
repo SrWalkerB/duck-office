@@ -81,6 +81,17 @@ pub struct Theme {
     pub outline_box: Rgba,
     pub outline_line: Rgba,
     pub outline_text: Rgba,
+
+    // Notas, conversas e mensagens de entrada.
+    /// Marca no canto da célula: nota e conversa.
+    pub note: Rgba,
+    pub thread: Rgba,
+    pub note_bg: Rgba,
+    pub note_line: Rgba,
+    pub note_text: Rgba,
+    pub note_muted: Rgba,
+    /// Texto de erro numa caixa de diálogo.
+    pub danger: Rgba,
 }
 
 pub static LIGHT: Theme = Theme {
@@ -143,6 +154,13 @@ pub static LIGHT: Theme = Theme {
     outline_box: rgb(0xFFFFFF),
     outline_line: rgb(0x7F7F7F),
     outline_text: rgb(0x404040),
+    note: rgb(0xD93025),
+    thread: rgb(0x8430CE),
+    note_bg: rgb(0xFFFBE0),
+    note_line: rgb(0xB8AF7A),
+    note_text: rgb(0x202124),
+    note_muted: rgb(0x6B6546),
+    danger: rgb(0xC5221F),
 };
 
 pub static DARK: Theme = Theme {
@@ -205,6 +223,13 @@ pub static DARK: Theme = Theme {
     outline_box: rgb(0x2B2D31),
     outline_line: rgb(0x8A9099),
     outline_text: rgb(0xC9CDD2),
+    note: rgb(0xFF6B5E),
+    thread: rgb(0xC58AF9),
+    note_bg: rgb(0x3A3726),
+    note_line: rgb(0x7C7452),
+    note_text: rgb(0xF1EEDD),
+    note_muted: rgb(0xBDB694),
+    danger: rgb(0xF28B82),
 };
 
 // ---------------------------------------------------------------------------
