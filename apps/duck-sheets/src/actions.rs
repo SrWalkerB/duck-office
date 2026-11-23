@@ -136,9 +136,7 @@ impl SheetsApp {
             Act::Autofit => {
                 let Some((_, v)) = self.doc.as_ref().and_then(|d| d.current()) else { return };
                 let (_, c0, _, c1) = v.sel();
-                for c in c0..=c1.min(c0 + 200) {
-                    self.autofit_col(c);
-                }
+                self.autofit_cols(&(c0..=c1.min(c0 + 200)).collect::<Vec<_>>());
             }
         }
     }

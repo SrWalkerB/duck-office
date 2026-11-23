@@ -162,7 +162,7 @@ mod mouse {
 
     fn press(a: &mut SheetsApp, p: (f32, f32), mods: Modifiers, clicks: u8) {
         let g = a.geom();
-        if !a.press_handle(&g, p.0, p.1, mods, clicks) {
+        if !a.press_headers(&g, p.0, p.1, mods, clicks) && !a.press_handle(&g, p.0, p.1, mods, clicks) {
             a.press_cell(&g, p.0, p.1, mods, clicks);
         }
     }
@@ -178,6 +178,31 @@ mod mouse {
         let g = a.geom();
         let r = crate::fill::handle(&g, a.doc.as_ref().unwrap().current().unwrap().1).unwrap();
         ((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0)
+    }
+
+    /// 13 arrastado: 14, 15… (com Ctrl, 13 de novo).
+    #[test]
+    fn fill_a_lone_number() {
+        for (to, cells) in [("D12", ["D11", "D12"]), ("F10", ["E10", "F10"])] {
+            let mut a = app(&[("P", &[("D10", "13")])]);
+            a.go_to(9, 3);
+            let h = handle(&mut a);
+            drag(&mut a, h, to, NONE);
+            assert_eq!(cells.map(|c| get(&a, 0, c)), ["14", "15"]);
+            a.undo();
+            assert_eq!(cells.map(|c| get(&a, 0, c)), ["", ""]);
+            a.go_to(9, 3);
+            let h = handle(&mut a);
+            drag(&mut a, h, to, CTRL);
+            assert_eq!(cells.map(|c| get(&a, 0, c)), ["13", "13"]);
+        }
+        // Moeda também conta; para cima, desce.
+        let mut a = app(&[("P", &[("D10", "R$ 13,00")])]);
+        a.go_to(9, 3);
+        let h = handle(&mut a);
+        drag(&mut a, h, "D8", NONE);
+        assert_eq!((get(&a, 0, "D9"), get(&a, 0, "D8")), ("12".into(), "11".into()));
+        assert_eq!(style(&a, 0, "D8").num_fmt, style(&a, 0, "D10").num_fmt);
     }
 
     #[test]
@@ -214,6 +239,118 @@ mod mouse {
         let h = handle(&mut a);
         drag(&mut a, h, "B2", NONE);
         assert!(a.doc.as_ref().unwrap().history.undo.is_empty());
+    }
+
+    /// Um ponto no cabeçalho, a `d` pixels da borda direita da coluna.
+    fn col_edge(a: &mut SheetsApp, c: u32, d: f32) -> (f32, f32) {
+        let g = a.geom();
+        let v = a.doc.as_ref().unwrap().current().unwrap().1;
+        let q = &g.quads[1];
+        let x = crate::draw::pos(&v.cols, q.ox, c + 1, q.rect.x0, g.g);
+        (x + d, (g.colhdr.y0 + g.colhdr.y1) / 2.0)
+    }
+
+    fn row_edge(a: &mut SheetsApp, r: u32, d: f32) -> (f32, f32) {
+        let g = a.geom();
+        let v = a.doc.as_ref().unwrap().current().unwrap().1;
+        let q = &g.quads[2];
+        let y = crate::draw::pos(&v.rows, q.oy, r + 1, q.rect.y0, g.g);
+        ((g.rowhdr.x0 + g.rowhdr.x1) / 2.0, y + d)
+    }
+
+    fn col_px(a: &SheetsApp, c: u32) -> u32 {
+        a.doc.as_ref().unwrap().current().unwrap().1.cols.size(c)
+    }
+
+    fn row_px(a: &SheetsApp, r: u32) -> u32 {
+        a.doc.as_ref().unwrap().current().unwrap().1.rows.size(r)
+    }
+
+    fn pull(a: &mut SheetsApp, from: (f32, f32), dx: f32, dy: f32) {
+        press(a, from, NONE, 1);
+        a.mouse_move(from.0 + dx / 2.0, from.1 + dy / 2.0);
+        a.mouse_move(from.0 + dx, from.1 + dy);
+        a.mouse_up(NONE);
+    }
+
+    #[test]
+    fn widen_by_the_header_edge() {
+        for (scale, zoom, frozen) in
+            [(1.0, 100, 0), (1.0, 100, 2), (1.25, 100, 0), (1.5, 90, 0), (2.0, 150, 1)]
+        {
+            let mut a = app(&[("P", &[("D10", "13")])]);
+            let pane = duck_core::Pane { frozen_rows: frozen, frozen_cols: frozen };
+            if frozen > 0 {
+                a.run_command(duck_core::Command::Pane(Some(pane)));
+                a.doc.as_mut().unwrap().history = Default::default();
+            }
+            a.scale = scale;
+            a.set_zoom(zoom);
+            let before = col_px(&a, 3);
+            let g = a.geom().g;
+            // De qualquer lado da borda.
+            for d in [-4.0, 0.0, 4.0] {
+                let p = col_edge(&mut a, 3, d * scale);
+                pull(&mut a, p, 40.0 * g, 0.0);
+                assert_eq!(col_px(&a, 3), before + 40, "escala {scale}, zoom {zoom}, folga {d}");
+                assert!(a.doc.as_ref().unwrap().current().unwrap().0.col_width(3).is_some());
+                a.undo();
+                assert_eq!(col_px(&a, 3), before);
+            }
+            let before = row_px(&a, 4);
+            let p = row_edge(&mut a, 4, 0.0);
+            pull(&mut a, p, 0.0, 25.0 * g);
+            assert_eq!(row_px(&a, 4), before + 25);
+            a.undo();
+            assert_eq!(row_px(&a, 4), before);
+            // Longe da borda, seleciona a coluna (e não muda nada).
+            let p = col_edge(&mut a, 3, -(before as f32) * g / 2.0 - 8.0 * scale);
+            pull(&mut a, p, 0.0, 0.0);
+            let v = a.doc.as_ref().unwrap().current().unwrap().1;
+            assert_eq!((v.anchor, v.cur.1), ((0, 3), 3));
+            assert!(a.doc.as_ref().unwrap().history.undo.is_empty());
+        }
+    }
+
+    #[test]
+    fn widen_all_selected() {
+        let mut a = app(&[("P", &[("B1", "um texto bem mais largo que a coluna"), ("C1", "1")])]);
+        let before = col_px(&a, 1);
+        // De B a D, e depois a borda da C.
+        let (b, d) = (col_edge(&mut a, 1, -20.0), col_edge(&mut a, 3, -20.0));
+        press(&mut a, b, NONE, 1);
+        a.mouse_move(d.0, d.1);
+        a.mouse_up(NONE);
+        let p = col_edge(&mut a, 2, 0.0);
+        // Só um clique na borda não iguala as outras.
+        pull(&mut a, p, 0.0, 0.0);
+        assert!(a.doc.as_ref().unwrap().history.undo.is_empty());
+        pull(&mut a, p, 30.0, 0.0);
+        let all: Vec<u32> = (0..5).map(|c| col_px(&a, c)).collect();
+        assert_eq!(all, [before, before + 30, before + 30, before + 30, before]);
+        a.undo();
+        assert_eq!(col_px(&a, 1), before);
+        // Duplo clique ajusta cada uma ao que mostra.
+        let p = col_edge(&mut a, 2, 0.0);
+        press(&mut a, p, NONE, 2);
+        a.mouse_up(NONE);
+        assert!(col_px(&a, 1) > before && col_px(&a, 2) < before, "{:?}", (col_px(&a, 1), col_px(&a, 2)));
+        a.undo();
+        assert_eq!((col_px(&a, 1), col_px(&a, 2)), (before, before));
+        // Fora da seleção, só a própria.
+        let p = col_edge(&mut a, 5, 0.0);
+        pull(&mut a, p, 30.0, 0.0);
+        assert_eq!((col_px(&a, 1), col_px(&a, 5)), (before, before + 30));
+        // Linhas 2 a 4.
+        let before = row_px(&a, 1);
+        let (b, d) = (row_edge(&mut a, 1, -10.0), row_edge(&mut a, 3, -10.0));
+        press(&mut a, b, NONE, 1);
+        a.mouse_move(d.0, d.1);
+        a.mouse_up(NONE);
+        let p = row_edge(&mut a, 3, 0.0);
+        pull(&mut a, p, 0.0, 12.0);
+        let all: Vec<u32> = (0..5).map(|r| row_px(&a, r)).collect();
+        assert_eq!(all, [before, before + 12, before + 12, before + 12, before]);
     }
 
     #[test]

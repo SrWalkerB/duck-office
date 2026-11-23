@@ -424,6 +424,9 @@ impl SheetsApp {
                     }
                 }
                 crate::pointing::draw_outlines(&mut p, &geom, view, &outlines, px);
+                if let Some(m) = self.marked.as_ref().filter(|m| m.sheet == doc.active) {
+                    crate::pointing::draw_marked(&mut p, &geom, view, &m.areas, px, th);
+                }
                 if let Some(a) = self.drag_area {
                     crate::pointing::draw_outlines(&mut p, &geom, view, &[(a, th.selection, true)], px);
                 } else if self.editor.is_none() {
@@ -448,6 +451,22 @@ impl SheetsApp {
                 }
                 if view.headers {
                     draw_headers(&mut p, &cx, &geom, header_style, &mut buf);
+                    // Borda que dá para arrastar; no arraste, até o fim da grade.
+                    use crate::app::{Drag, Edge, edge_rects};
+                    let dragged = match self.drag {
+                        Some(Drag::ResizeCol { col, .. }) => Some(Edge::Col(col)),
+                        Some(Drag::ResizeRow { row, .. }) => Some(Edge::Row(row)),
+                        _ => None,
+                    };
+                    let hover = self.hover_edge.filter(|_| self.drag.is_none());
+                    if let Some((bar, line)) =
+                        dragged.or(hover).and_then(|e| edge_rects(&geom, view, e, 3.0 * px))
+                    {
+                        p.fill(bar, &Rect::everything(), th.selection);
+                        if dragged.is_some() {
+                            p.fill(line, &geom.grid, th.selection);
+                        }
+                    }
                 }
                 // Editor sobre a célula.
                 if let Some(ed) = &self.editor

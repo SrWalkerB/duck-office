@@ -17,7 +17,7 @@ use duck_core::CellRange;
 use duck_platform::Modifiers;
 use duck_ui::{Painter, Rect, Rgba};
 
-use crate::app::{Drag, Geom, MAX_COLS, MAX_ROWS, Merges, SheetsApp, View, cell_name, col_name};
+use crate::app::{Drag, Geom, MAX_COLS, MAX_ROWS, Merges, Quad, SheetsApp, View, cell_name, col_name};
 use crate::complete::analyze;
 use crate::edit::Editor;
 use crate::theme::Theme;
@@ -427,43 +427,67 @@ pub fn spans(list: &[Ref], color: &[usize], th: &Theme) -> Vec<(Range<usize>, Rg
     list.iter().zip(color).map(|(r, &c)| (r.range.clone(), th.refs[c % th.refs.len()])).collect()
 }
 
+/// O retângulo da área em cada painel, com o recorte dele.
+fn on_panes(g: &Geom, v: &View, a: &CellRange, px: f32) -> Vec<(Rect, Rect)> {
+    let (nr, nc) = (v.rows.len(), v.cols.len());
+    if a.first_row >= nr || a.first_col >= nc {
+        return Vec::new();
+    }
+    // Uma célula mesclada: o contorno da mesclagem.
+    let single = (a.first_row, a.first_col) == (a.last_row, a.last_col);
+    let a = v.merges.at(a.first_row, a.first_col).filter(|_| single).unwrap_or(*a);
+    let pane = |q: &Quad| {
+        let x = |c: u32| crate::draw::pos(&v.cols, q.ox, c.min(nc), q.rect.x0, g.g);
+        let y = |r: u32| crate::draw::pos(&v.rows, q.oy, r.min(nr), q.rect.y0, g.g);
+        let r = Rect::new(
+            x(a.first_col) - px,
+            y(a.first_row) - px,
+            x(a.last_col.saturating_add(1)),
+            y(a.last_row.saturating_add(1)),
+        );
+        (!r.intersect(&q.rect).is_empty()).then_some((r, q.rect))
+    };
+    g.quads.iter().filter(|q| !q.rect.is_empty()).filter_map(pane).collect()
+}
+
+fn sides(r: &Rect, w: f32) -> [Rect; 4] {
+    [
+        Rect::new(r.x0, r.y0, r.x1, r.y0 + w),
+        Rect::new(r.x0, r.y1 - w, r.x1, r.y1),
+        Rect::new(r.x0, r.y0, r.x0 + w, r.y1),
+        Rect::new(r.x1 - w, r.y0, r.x1, r.y1),
+    ]
+}
+
 /// Contornos na grade das referências que ficam na aba à vista.
 /// `shown` = (área, cor, é a apontada).
 pub fn draw_outlines(p: &mut Painter, g: &Geom, v: &View, shown: &[(CellRange, Rgba, bool)], px: f32) {
-    let (nr, nc) = (v.rows.len(), v.cols.len());
     for (a, color, dashed) in shown {
-        if a.first_row >= nr || a.first_col >= nc {
-            continue;
-        }
-        // Uma célula mesclada: o contorno da mesclagem.
-        let single = (a.first_row, a.first_col) == (a.last_row, a.last_col);
-        let a = &v.merges.at(a.first_row, a.first_col).filter(|_| single).unwrap_or(*a);
-        for q in g.quads.iter().filter(|q| !q.rect.is_empty()) {
-            let x = |c: u32| crate::draw::pos(&v.cols, q.ox, c.min(nc), q.rect.x0, g.g);
-            let y = |r: u32| crate::draw::pos(&v.rows, q.oy, r.min(nr), q.rect.y0, g.g);
-            let r = Rect::new(
-                x(a.first_col) - px,
-                y(a.first_row) - px,
-                x(a.last_col.saturating_add(1)),
-                y(a.last_row.saturating_add(1)),
-            );
-            let clip = q.rect;
-            if r.intersect(&clip).is_empty() {
-                continue;
-            }
+        for (r, clip) in on_panes(g, v, a, px) {
             p.fill(r, &clip, [color[0], color[1], color[2], 28]);
             let w = 2.0 * px;
             if *dashed {
-                for side in [
-                    Rect::new(r.x0, r.y0, r.x1, r.y0 + w),
-                    Rect::new(r.x0, r.y1 - w, r.x1, r.y1),
-                    Rect::new(r.x0, r.y0, r.x0 + w, r.y1),
-                    Rect::new(r.x1 - w, r.y0, r.x1, r.y1),
-                ] {
+                for side in sides(&r, w) {
                     p.dashed(side, &clip, *color, 8.0 * px, 5.0 * px);
                 }
             } else {
                 p.stroke(r, &clip, w, *color);
+            }
+        }
+    }
+}
+
+/// Borda tracejada do que está copiado ou recortado. O fundo do traço tampa o
+/// contorno da seleção, que costuma estar no mesmo lugar.
+pub fn draw_marked(p: &mut Painter, g: &Geom, v: &View, areas: &[CellRange], px: f32, th: &Theme) {
+    let w = 2.0 * px;
+    for a in areas {
+        for (r, clip) in on_panes(g, v, a, px) {
+            // Como o contorno da seleção: um pixel para cada lado da linha.
+            let r = Rect::new(r.x0, r.y0, r.x1 + px, r.y1 + px);
+            for side in sides(&r, w) {
+                p.fill(side, &clip, th.paper);
+                p.dashed(side, &clip, th.selection, 8.0 * px, 5.0 * px);
             }
         }
     }

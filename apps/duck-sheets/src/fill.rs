@@ -128,6 +128,9 @@ fn num_kind(doc: &Doc, style: u16) -> NumKind {
     let id = doc.styles.xfs.get(style as usize).map_or(0, |x| x.num_fmt);
     let code = doc.styles.num_fmt_code(id);
     let f = NumFmt::parse(code);
+    if f.is_percent() {
+        return NumKind::Percent;
+    }
     if !f.is_date() {
         return NumKind::Number;
     }
@@ -204,6 +207,7 @@ impl SheetsApp {
         let cfx = CfCtx { sheet, shared: &doc.strings, today };
         let mut raws: Vec<(u32, u32, RawCell)> = Vec::new();
         let mut changes: Vec<CellChange> = Vec::new();
+        let mut series = false;
         for &line in &lines {
             let items: Vec<Item> = along[start..start + n]
                 .iter()
@@ -228,6 +232,7 @@ impl SheetsApp {
                 let style = if raw.style == 0 { v.blank_style(sr, sc) } else { raw.style };
                 match (out, duck_calc::cell_formula(sheet, sr, sc)) {
                     (Out::Value(value), _) => {
+                        series = true;
                         changes.push(CellChange { row: r, col: c, value, formula: None, style: Some(style) })
                     }
                     (Out::Copy, Some(f)) => {
@@ -298,6 +303,9 @@ impl SheetsApp {
             v.cur = (target.last_row, target.last_col);
         }
         self.message = format!("{} células preenchidas", crate::app::fmt_int(grown));
+        if series && mode == Mode::Auto && !toggle {
+            self.message.push_str(" (com Ctrl, só copia)");
+        }
         true
     }
 
@@ -438,14 +446,19 @@ mod tests {
         assert_eq!(col(&a, "B", 1..=3), ["jan", "fev", "mar"]);
         assert_eq!(col(&a, "C", 1..=3), ["=A1*2", "=A2*2", "=A3*2"]);
         assert_eq!(col(&a, "D", 1..=3), ["46387", "46388", "46389"]);
-        assert_eq!(col(&a, "E", 1..=3), ["5", "5", "5"]);
+        assert_eq!(col(&a, "E", 1..=3), ["5", "6", "7"]);
         a.undo();
         assert_eq!(col(&a, "B", 1..=3), ["jan", "", ""]);
         a.redo();
         assert_eq!(col(&a, "C", 1..=3), ["=A1*2", "=A2*2", "=A3*2"]);
-        // Ctrl: o número sozinho vira série, e a série vira cópia.
+        // Ctrl: a série vira cópia, e a porcentagem sozinha vira série.
         assert!(a.fill_to(rg("E1"), rg("E1:E3"), Mode::Auto, true));
-        assert_eq!(col(&a, "E", 1..=3), ["5", "6", "7"]);
+        assert_eq!(col(&a, "E", 1..=3), ["5", "5", "5"]);
+        crate::testing::type_in(&mut a, "F1", "10%");
+        assert!(a.fill_to(rg("F1"), rg("F1:F2"), Mode::Auto, false));
+        assert_eq!(col(&a, "F", 1..=2), ["0,1", "0,1"]);
+        assert!(a.fill_to(rg("F1"), rg("F1:F2"), Mode::Auto, true));
+        assert_eq!(col(&a, "F", 1..=2), ["0,1", "1,1"]);
         assert!(a.fill_to(rg("A1:A2"), rg("A1:A5"), Mode::Auto, true));
         assert_eq!(col(&a, "A", 1..=5), ["1", "3", "1", "3", "1"]);
     }

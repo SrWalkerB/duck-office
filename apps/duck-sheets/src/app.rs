@@ -459,7 +459,7 @@ pub enum Drag {
 }
 
 /// Distância (pixels de interface) da borda do cabeçalho que pega o redimensionamento.
-const RESIZE_GRAB: f32 = 4.0;
+const RESIZE_GRAB: f32 = 6.0;
 
 pub struct Find {
     pub input: TextInput,
@@ -546,6 +546,8 @@ pub struct SheetsApp {
     pub today: f64,
     /// Destino do hiperlink sob o mouse (barra de status).
     pub hover_link: Option<String>,
+    /// Borda de cabeçalho sob o mouse (dá para arrastar).
+    pub hover_edge: Option<Edge>,
     /// Célula sendo editada (F3).
     pub editor: Option<crate::edit::Editor>,
     /// Caixa de diálogo aberta.
@@ -564,6 +566,8 @@ pub struct SheetsApp {
     pub saving: Option<crate::edit::SaveJob>,
     /// Última cópia feita no app (fórmulas e estilos para colar).
     pub clip: Option<crate::paste::Clip>,
+    /// O que está copiado ou recortado (borda tracejada).
+    pub marked: Option<crate::paste::Marked>,
     /// Menu aberto (lista, paleta ou clique direito).
     pub popup: Option<crate::menu::Popup>,
     /// Caixa de diálogo aberta (largura, altura).
@@ -660,6 +664,7 @@ impl SheetsApp {
             trace: std::env::var_os("DUCK_TRACE").is_some(),
             today: duck_core::cond::today_serial(),
             hover_link: None,
+            hover_edge: None,
             editor: None,
             form: None,
             paste_source: String::new(),
@@ -670,6 +675,7 @@ impl SheetsApp {
             painter: None,
             saving: None,
             clip: None,
+            marked: None,
             popup: None,
             prompt: None,
             colors: (0xFF0000, 0xFFFF00),
@@ -732,6 +738,7 @@ impl SheetsApp {
         self.painter = None;
         self.tab_edit = None;
         self.clip = None;
+        self.marked = None;
         self.drag = None;
         self.drag_area = None;
         if let Some(l) = self.loader.take() {
@@ -1567,31 +1574,41 @@ impl SheetsApp {
             }
             return;
         }
-        let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) else { return };
+        if self.press_headers(&g, x, y, mods, clicks) || self.press_handle(&g, x, y, mods, clicks) {
+            return;
+        }
+        self.press_cell(&g, x, y, mods, clicks);
+    }
+
+    /// Botão nos cabeçalhos: seleciona linhas e colunas inteiras, muda o
+    /// tamanho pela borda. `true` = era neles.
+    pub(crate) fn press_headers(&mut self, g: &Geom, x: f32, y: f32, mods: Modifiers, clicks: u8) -> bool {
+        let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) else { return true };
         let (nr, nc) = (v.rows.len(), v.cols.len());
         // Canto: seleciona tudo.
         if x < g.rowhdr.x0 || (y >= g.fbar.y1 && y < g.colhdr.y0) {
             self.commit_edit();
-            self.outline_click(&g, x, y);
-            return;
+            self.outline_click(g, x, y);
+            return true;
         }
         // Ctrl soma uma área à seleção; um clique comum começa outra.
         let add = (mods.ctrl || mods.logo) && !mods.shift;
         let in_headers = g.corner.contains(x, y) || g.colhdr.contains(x, y) || g.rowhdr.contains(x, y);
-        if in_headers && resize_target(&g, v, x, y).is_none() {
+        if in_headers && resize_target(g, v, x, y).is_none() {
             v.begin_area(add, mods.shift);
         }
         if g.corner.contains(x, y) {
             v.anchor = (0, 0);
             v.cur = (nr - 1, nc - 1);
-            return;
+            return true;
         }
         // Borda de coluna ou linha nos cabeçalhos: redimensionar (duplo clique: ajustar).
-        if let Some(edge) = resize_target(&g, v, x, y) {
+        if let Some(edge) = resize_target(g, v, x, y) {
             match edge {
                 Edge::Col(col) => {
                     if clicks >= 2 {
-                        self.autofit_col(col);
+                        let list = self.cols_with(col);
+                        self.autofit_cols(&list);
                     } else {
                         self.drag = Some(Drag::ResizeCol { col, size: v.cols.size(col), x });
                     }
@@ -1600,13 +1617,14 @@ impl SheetsApp {
                     if clicks >= 2 {
                         let d = v.rows.default_size();
                         v.resize_row(row, d);
-                        self.commit_row_size(row, true);
+                        let list = self.rows_with(row);
+                        self.commit_rows(&list, None);
                     } else {
                         self.drag = Some(Drag::ResizeRow { row, size: v.rows.size(row), y });
                     }
                 }
             }
-            return;
+            return true;
         }
         // Cabeçalho de colunas.
         if g.colhdr.contains(x, y) {
@@ -1621,7 +1639,7 @@ impl SheetsApp {
             }
             v.extra_anchor = v.anchor;
             self.drag = Some(Drag::Cols);
-            return;
+            return true;
         }
         if g.rowhdr.contains(x, y) {
             let q = if y < g.grid.y0 + g.fh { &g.quads[0] } else { &g.quads[2] };
@@ -1635,12 +1653,9 @@ impl SheetsApp {
             }
             v.extra_anchor = v.anchor;
             self.drag = Some(Drag::Rows);
-            return;
+            return true;
         }
-        if self.press_handle(&g, x, y, mods, clicks) {
-            return;
-        }
-        self.press_cell(&g, x, y, mods, clicks);
+        false
     }
 
     /// Botão na alça de preenchimento ou na borda da seleção. `true` = era nelas.
@@ -1785,7 +1800,8 @@ impl SheetsApp {
             if let Some(w) = &self.window {
                 w.set_cursor(cursor);
             }
-            let changed = link != self.hover_link;
+            let changed = link != self.hover_link || edge != self.hover_edge;
+            self.hover_edge = edge;
             self.hover_link = link;
             return changed;
         };
@@ -1795,15 +1811,19 @@ impl SheetsApp {
             return true;
         }
         let (thumb_v, thumb_h) = (self.vthumb(&g), self.hthumb(&g));
-        let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) else { return false };
+        let Some(doc) = self.doc.as_mut() else { return false };
+        let mdw = doc.mdw;
+        let Some(v) = doc.view_mut() else { return false };
         match drag {
             Drag::ResizeCol { col, size, x: x0 } => {
                 let s = (size as f32 + (x - x0) / g.g).round().max(0.0) as u32;
                 v.resize_col(col, s);
+                self.message = size_text("Largura", crate::edit::px_to_width(s, mdw), s);
             }
             Drag::ResizeRow { row, size, y: y0 } => {
                 let s = (size as f32 + (y - y0) / g.g).round().max(0.0) as u32;
                 v.resize_row(row, s);
+                self.message = size_text("Altura", s as f32 * 0.75, s);
             }
             Drag::VThumb { grab } => {
                 let track = g.vscroll.h() - thumb_v.1;
@@ -1887,12 +1907,14 @@ impl SheetsApp {
                 }
                 true
             }
-            Some(Drag::ResizeCol { col, .. }) => {
-                self.commit_col_size(col);
+            Some(Drag::ResizeCol { col, size, .. }) => {
+                self.message.clear();
+                self.commit_col_size(col, size);
                 true
             }
-            Some(Drag::ResizeRow { row, .. }) => {
-                self.commit_row_size(row, false);
+            Some(Drag::ResizeRow { row, size, .. }) => {
+                self.message.clear();
+                self.commit_row_size(row, size);
                 true
             }
             d => d.is_some(),
@@ -1970,12 +1992,18 @@ impl SheetsApp {
     }
 
     /// Ajusta a largura da coluna ao texto mais largo dela (até 20 mil células).
-    pub(crate) fn autofit_col(&mut self, col: u32) {
-        let Some(doc) = &self.doc else { return };
-        let Some((sheet, view)) = doc.current() else { return };
+    pub(crate) fn autofit_cols(&mut self, cols: &[u32]) {
+        let list: Vec<(u32, u32)> = cols.iter().filter_map(|&c| Some((c, self.autofit_size(c)?))).collect();
+        self.commit_cols(&list);
+    }
+
+    /// Largura (pixels a 100%) em que cabe o que a coluna mostra.
+    fn autofit_size(&mut self, col: u32) -> Option<u32> {
+        let doc = self.doc.as_ref()?;
+        let (sheet, view) = doc.current()?;
         let (sheet, looks, strings, date1904, mdw) =
             (sheet.clone(), doc.looks.clone(), doc.strings.clone(), doc.date1904, doc.mdw);
-        let Some(text) = self.text.as_mut() else { return };
+        let text = self.text.as_mut()?;
         let mut widest = 0.0f32;
         let mut buf = String::new();
         let mut n = 0;
@@ -1994,15 +2022,11 @@ impl SheetsApp {
             n += 1;
             n < 20_000
         });
-        let size = if widest > 0.0 {
+        Some(if widest > 0.0 {
             (widest + 2.0 * 3.0 + 2.0).ceil() as u32
         } else {
             (8.43 * mdw).round() as u32 + 5
-        };
-        if let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) {
-            v.resize_col(col, size);
-        }
-        self.commit_col_size(col);
+        })
     }
 
     /// Índices (no workbook) das abas visíveis, na ordem das guias.
@@ -2211,6 +2235,10 @@ impl SheetsApp {
             }
             Key::Escape if self.painter.is_some() => {
                 self.painter = None;
+                self.message.clear();
+            }
+            Key::Escape if self.marked.is_some() => {
+                self.unmark();
                 self.message.clear();
             }
             Key::Escape => {
@@ -2673,28 +2701,61 @@ impl App for SheetsApp {
 
 /// Borda de cabeçalho que pode ser arrastada.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Edge {
+pub enum Edge {
     Col(u32),
     Row(u32),
 }
 
+/// `Largura: 12,29 (91 pixels)`.
+fn size_text(what: &str, size: f32, px: u32) -> String {
+    format!("{what}: {:.2} ({px} pixels)", size).replace('.', ",")
+}
+
+/// Onde a borda aparece: a faixa no cabeçalho e, até o fim da grade, a linha
+/// que acompanha o arraste.
+pub fn edge_rects(g: &Geom, v: &View, e: Edge, w: f32) -> Option<(Rect, Rect)> {
+    let half = (w / 2.0).floor();
+    match e {
+        Edge::Col(c) => {
+            let q = &g.quads[if c < v.frozen_cols { 0 } else { 1 }];
+            let x = crate::draw::pos(&v.cols, q.ox, c + 1, q.rect.x0, g.g);
+            (x >= q.rect.x0 - 1.0 && x <= q.rect.x1 + 1.0).then(|| {
+                let (a, b) = (x - half, x - half + w);
+                (Rect::new(a, g.colhdr.y0, b, g.colhdr.y1), Rect::new(a, g.colhdr.y1, a + 1.0, g.grid.y1))
+            })
+        }
+        Edge::Row(r) => {
+            let q = &g.quads[if r < v.frozen_rows { 0 } else { 2 }];
+            let y = crate::draw::pos(&v.rows, q.oy, r + 1, q.rect.y0, g.g);
+            (y >= q.rect.y0 - 1.0 && y <= q.rect.y1 + 1.0).then(|| {
+                let (a, b) = (y - half, y - half + w);
+                (Rect::new(g.rowhdr.x0, a, g.rowhdr.x1, b), Rect::new(g.rowhdr.x1, a, g.grid.x1, a + 1.0))
+            })
+        }
+    }
+}
+
 /// Borda (direita de uma coluna, de baixo de uma linha) perto do ponto, nos cabeçalhos.
-fn resize_target(g: &Geom, v: &View, x: f32, y: f32) -> Option<Edge> {
-    let grab = RESIZE_GRAB * g.s;
+/// Colunas e linhas estreitas guardam o meio para o clique que seleciona.
+pub fn resize_target(g: &Geom, v: &View, x: f32, y: f32) -> Option<Edge> {
+    let grab = |size: u32| (RESIZE_GRAB * g.s).min((size as f32 * g.g / 4.0).max(3.0 * g.s));
+    let most = RESIZE_GRAB * g.s;
     if g.colhdr.contains(x, y) {
         for q in [&g.quads[0], &g.quads[1]] {
-            if x < q.rect.x0 - grab || x > q.rect.x1 + grab || q.rect.is_empty() {
+            // Sem painéis congelados, o de cima tem altura 0 (mas tem a largura).
+            if x < q.rect.x0 - most || x > q.rect.x1 + most || q.rect.w() <= 0.0 {
                 continue;
             }
             let (_, c) = g.cell_in(v, q, x.clamp(q.rect.x0, q.rect.x1 - 1.0), q.rect.y0);
             // A borda mais próxima: a da coluna sob o mouse ou a da anterior.
             let right = |c: u32| q.rect.x0 + ((v.cols.offset(c + 1) as f64 - q.ox) * g.g as f64) as f32;
-            if (right(c) - x).abs() <= grab {
+            let near = grab(v.cols.size(c));
+            if (right(c) - x).abs() <= near {
                 return Some(Edge::Col(c));
             }
             if c > 0 {
                 let prev = v.cols.prev_visible(c);
-                if prev < c && (right(prev) - x).abs() <= grab {
+                if prev < c && (right(prev) - x).abs() <= near {
                     return Some(Edge::Col(prev));
                 }
             }
@@ -2702,17 +2763,19 @@ fn resize_target(g: &Geom, v: &View, x: f32, y: f32) -> Option<Edge> {
     }
     if g.rowhdr.contains(x, y) {
         for q in [&g.quads[0], &g.quads[2]] {
-            if y < q.rect.y0 - grab || y > q.rect.y1 + grab || q.rect.is_empty() {
+            // E o da esquerda, largura 0.
+            if y < q.rect.y0 - most || y > q.rect.y1 + most || q.rect.h() <= 0.0 {
                 continue;
             }
             let (r, _) = g.cell_in(v, q, q.rect.x0, y.clamp(q.rect.y0, q.rect.y1 - 1.0));
             let bottom = |r: u32| q.rect.y0 + ((v.rows.offset(r + 1) as f64 - q.oy) * g.g as f64) as f32;
-            if (bottom(r) - y).abs() <= grab {
+            let near = grab(v.rows.size(r));
+            if (bottom(r) - y).abs() <= near {
                 return Some(Edge::Row(r));
             }
             if r > 0 {
                 let prev = v.rows.prev_visible(r);
-                if prev < r && (bottom(prev) - y).abs() <= grab {
+                if prev < r && (bottom(prev) - y).abs() <= near {
                     return Some(Edge::Row(prev));
                 }
             }

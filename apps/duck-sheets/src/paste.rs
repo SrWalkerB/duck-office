@@ -35,6 +35,14 @@ pub struct Clip {
     pub cut: bool,
 }
 
+/// O que está copiado ou recortado, com a borda tracejada na tela. Sai com Esc,
+/// com qualquer mudança na pasta e ao mover o que foi recortado.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Marked {
+    pub sheet: usize,
+    pub areas: Vec<CellRange>,
+}
+
 #[derive(Clone)]
 pub struct ClipCell {
     pub value: CellValue,
@@ -254,6 +262,8 @@ impl SheetsApp {
     pub(crate) fn copy_text(&mut self, cut: bool) -> Option<String> {
         let doc = self.doc.as_ref()?;
         let (sheet, v) = doc.current()?;
+        let active = doc.active;
+        let selected: Vec<CellRange> = v.areas().into_iter().map(range_of).collect();
         // Linhas e colunas inteiras: só até onde há dados.
         let areas: Vec<CellRange> = v
             .areas()
@@ -302,6 +312,7 @@ impl SheetsApp {
             areas.iter().map(part).collect::<String>()
         };
         self.clip = if total <= MAX_CLIP { self.capture(&areas, side, text.clone(), cut) } else { None };
+        self.marked = Some(Marked { sheet: active, areas: selected });
         self.message = if cut {
             "Recortado: cole com Ctrl+V".into()
         } else {
@@ -389,18 +400,31 @@ impl SheetsApp {
         }
         let (r0, c0, r1, c1) = v.sel();
         let clip = self.clip.take();
+        let marked = self.marked.take();
         match clip {
             Some(clip) if clip.text == text => {
                 let done = self.paste_clip(&clip, range_of((r0, c0, r1, c1)), opts);
-                // Depois de recortar, a origem já foi movida.
+                // Depois de recortar, a origem já foi movida. Uma cópia pode
+                // ser colada de novo: continua marcada.
                 if !(done && clip.cut) {
                     self.clip = Some(clip);
+                    self.marked = marked;
                 }
             }
+            // Veio de outro programa: o que estava marcado não vale mais.
             clip => {
-                self.clip = clip;
+                self.clip = clip.filter(|c| !c.cut);
                 self.paste_foreign(&text, range_of((r0, c0, r1, c1)), opts);
             }
+        }
+    }
+
+    /// Tira a marca do que está copiado. Um recorte é desfeito: a origem fica
+    /// onde está.
+    pub fn unmark(&mut self) {
+        self.marked = None;
+        if self.clip.as_ref().is_some_and(|c| c.cut) {
+            self.clip = None;
         }
     }
 
@@ -929,6 +953,60 @@ mod tests {
         assert!(a.clip.is_none());
         a.undo();
         assert_eq!((get(&a, 0, "A1"), get(&a, 0, "B2")), ("1".into(), "=A1+B1".into()));
+    }
+
+    #[test]
+    fn marks_what_is_copied() {
+        let mark = |a: &SheetsApp| a.marked.as_ref().map(|m| m.areas.clone());
+        let a1a2 = || Some(vec![range_of((0, 0, 1, 0))]);
+        let mut a = sample();
+        select(&mut a, "A1:A2");
+        let t = a.copy_text(false).unwrap();
+        assert_eq!(mark(&a), a1a2());
+        // Colar não tira a marca: dá para colar de novo.
+        for cell in ["F1", "G1"] {
+            select(&mut a, cell);
+            a.paste_text(t.clone(), PasteOpts::default());
+            assert_eq!(get(&a, 0, cell), "1");
+            assert_eq!(mark(&a), a1a2());
+        }
+        // Qualquer mudança tira, e a cópia continua valendo.
+        crate::testing::type_in(&mut a, "H1", "x");
+        assert!(a.marked.is_none() && a.clip.is_some());
+        // A marca é a seleção toda, mesmo onde não há dados.
+        select(&mut a, "A1:K30");
+        a.copy_text(false).unwrap();
+        assert_eq!(mark(&a), Some(vec![range_of((0, 0, 29, 10))]));
+        // Texto de outro programa no clipboard: a marca sai.
+        select(&mut a, "J1");
+        a.paste_text("de fora".into(), PasteOpts::default());
+        assert!(a.marked.is_none());
+    }
+
+    #[test]
+    fn marks_what_is_cut() {
+        let mut a = sample();
+        select(&mut a, "A1:A2");
+        let t = a.copy_text(true).unwrap();
+        assert!(a.marked.is_some());
+        // Esc: nada se move; o texto do clipboard ainda pode ser colado.
+        a.unmark();
+        assert!(a.marked.is_none() && a.clip.is_none());
+        select(&mut a, "F1");
+        a.paste_text(t, PasteOpts::default());
+        assert_eq!((get(&a, 0, "A1"), get(&a, 0, "F1")), ("1".into(), "1".into()));
+        // Uma mudança no meio também cancela: a origem pode ter andado.
+        select(&mut a, "A1:A2");
+        a.copy_text(true).unwrap();
+        crate::testing::type_in(&mut a, "H1", "x");
+        assert!(a.marked.is_none() && a.clip.is_none());
+        // Colado: a marca sai com a origem.
+        select(&mut a, "A1:A2");
+        let t = a.copy_text(true).unwrap();
+        select(&mut a, "F5");
+        a.paste_text(t, PasteOpts::default());
+        assert_eq!((get(&a, 0, "A1"), get(&a, 0, "F5")), ("".into(), "1".into()));
+        assert!(a.marked.is_none());
     }
 
     #[test]

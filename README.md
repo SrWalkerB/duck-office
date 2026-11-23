@@ -64,7 +64,7 @@ Com a fórmula aberta, clicar numa célula escreve a referência dela onde cabe 
 
 Abas: o `+` no fim das guias (ou Shift+F11) cria, o duplo clique renomeia, arrastar move (com Ctrl, duplica) e o clique direito tem excluir, duplicar, mover, cor, ocultar e reexibir. As fórmulas, nomes definidos, gráficos, dinâmicas e segmentações acompanham, e tudo se desfaz com Ctrl+Z.
 
-Preencher: arraste a alça no canto da seleção (com Ctrl, alterna entre copiar e série) ou dê duplo clique nela para ir até o fim da coluna vizinha; Ctrl+D e Ctrl+R preenchem para baixo e para a direita. As séries são as do Excel em português: números, datas, `jan`, `segunda-feira`, `Item 1`. Arrastar a borda da seleção move as células (com Ctrl, copia).
+Preencher: arraste a alça no canto da seleção (13 vira 14, 15…; com Ctrl, só copia) ou dê duplo clique nela para ir até o fim da coluna vizinha; Ctrl+D e Ctrl+R preenchem para baixo e para a direita. As séries são as do Excel em português: números, datas, `jan`, `segunda-feira`, `Item 1`. Arrastar a borda da seleção move as células (com Ctrl, copia).
 
 Colar especial (Ctrl+Alt+V): valores, fórmulas, formatos, larguras, sem bordas, transpor e operações; Ctrl+Shift+V cola só os valores. O pincel da Página Inicial copia o formato (duplo clique: várias vezes). Ctrl+H substitui na aba ou na pasta inteira, em fórmulas ou valores; Ctrl+1 abre Formatar células (número, alinhamento, fonte, borda e preenchimento).
 

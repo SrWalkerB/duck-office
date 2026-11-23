@@ -411,6 +411,7 @@ impl SheetsApp {
     /// Depois de mudar a aba `idx`: tamanhos na tela, formatação condicional
     /// (os dados calculados das regras ficam velhos), estatísticas e título.
     fn after_change(&mut self, idx: usize, aff: Affected) {
+        self.unmark();
         self.stats = None;
         let Some(doc) = &mut self.doc else { return };
         let mdw = doc.mdw;
@@ -472,28 +473,82 @@ impl SheetsApp {
         w.set_title(&format!("{dot}{name} — duck-sheets"));
     }
 
-    /// Largura da coluna como está na tela vira comando (fim do arraste, ajuste).
-    pub fn commit_col_size(&mut self, col: u32) {
+    /// As colunas que mudam junto com `col`: se ela está numa seleção de
+    /// colunas inteiras, todas as selecionadas (menos as ocultas).
+    pub fn cols_with(&self, col: u32) -> Vec<u32> {
+        let Some((sheet, v)) = self.doc.as_ref().and_then(|d| d.current()) else { return vec![col] };
+        let last = v.rows.len() - 1;
+        let whole: Vec<_> = v.areas().into_iter().filter(|a| a.0 == 0 && a.2 == last).collect();
+        if !whole.iter().any(|a| (a.1..=a.3).contains(&col)) {
+            return vec![col];
+        }
+        let mut list: Vec<u32> = whole.iter().flat_map(|a| a.1..=a.3).collect();
+        list.sort_unstable();
+        list.dedup();
+        list.retain(|&c| c == col || !sheet.col_hidden(c));
+        list
+    }
+
+    /// As linhas que mudam junto com `row` (ver [`Self::cols_with`]).
+    pub fn rows_with(&self, row: u32) -> Vec<u32> {
+        let Some((sheet, v)) = self.doc.as_ref().and_then(|d| d.current()) else { return vec![row] };
+        let last = v.cols.len() - 1;
+        let whole: Vec<_> = v.areas().into_iter().filter(|a| a.1 == 0 && a.3 == last).collect();
+        if !whole.iter().any(|a| (a.0..=a.2).contains(&row)) {
+            return vec![row];
+        }
+        let mut list: Vec<u32> = whole.iter().flat_map(|a| a.0..=a.2.min(a.0 + 100_000)).collect();
+        list.push(row);
+        list.sort_unstable();
+        list.dedup();
+        list.retain(|&r| r == row || !sheet.row_hidden(r));
+        list
+    }
+
+    /// Larguras (em pixels a 100%) viram comando, num passo de desfazer só.
+    pub fn commit_cols(&mut self, list: &[(u32, u32)]) {
         let Some(doc) = &self.doc else { return };
         let Some((sheet, v)) = doc.current() else { return };
-        let px = v.cols.size(col);
-        let w = if px == v.cols.default_size() && sheet.col_width(col).is_none() {
-            return;
-        } else {
-            Some(px_to_width(px, doc.mdw))
-        };
-        if w != sheet.col_width(col) {
-            self.run_command(Command::ColWidths(vec![(col, w)]));
+        let default = v.cols.default_size();
+        let changes: Vec<(u32, Option<f32>)> = list
+            .iter()
+            .filter(|(c, px)| *px != default || sheet.col_width(*c).is_some())
+            .map(|(c, px)| (*c, Some(px_to_width(*px, doc.mdw))))
+            .filter(|(c, w)| *w != sheet.col_width(*c))
+            .collect();
+        if !changes.is_empty() {
+            self.run_command(Command::ColWidths(changes));
         }
     }
 
-    /// Altura da linha como está na tela vira comando. `reset` = automática.
-    pub fn commit_row_size(&mut self, row: u32, reset: bool) {
-        let Some(doc) = &self.doc else { return };
-        let Some((sheet, v)) = doc.current() else { return };
-        let h = if reset { None } else { Some(v.rows.size(row) as f32 * 0.75) };
-        if h != sheet.row_height(row) {
-            self.run_command(Command::RowHeights(vec![(row, h)]));
+    /// Fim do arraste da borda de uma coluna, que tinha `before` pixels.
+    pub fn commit_col_size(&mut self, col: u32, before: u32) {
+        let Some((_, v)) = self.doc.as_ref().and_then(|d| d.current()) else { return };
+        let px = v.cols.size(col);
+        // Só um clique na borda: nada muda.
+        if px != before {
+            let list: Vec<(u32, u32)> = self.cols_with(col).into_iter().map(|c| (c, px)).collect();
+            self.commit_cols(&list);
+        }
+    }
+
+    /// Fim do arraste da borda de uma linha, que tinha `before` pixels.
+    pub fn commit_row_size(&mut self, row: u32, before: u32) {
+        let Some((_, v)) = self.doc.as_ref().and_then(|d| d.current()) else { return };
+        let px = v.rows.size(row);
+        if px != before {
+            let list = self.rows_with(row);
+            self.commit_rows(&list, Some(px as f32 * 0.75));
+        }
+    }
+
+    /// Altura das linhas (`None` = automática), num passo de desfazer só.
+    pub fn commit_rows(&mut self, rows: &[u32], height: Option<f32>) {
+        let Some((sheet, _)) = self.doc.as_ref().and_then(|d| d.current()) else { return };
+        let list: Vec<(u32, Option<f32>)> =
+            rows.iter().filter(|&&r| sheet.row_height(r) != height).map(|&r| (r, height)).collect();
+        if !list.is_empty() {
+            self.run_command(Command::RowHeights(list));
         }
     }
 

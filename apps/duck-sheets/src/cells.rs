@@ -199,7 +199,8 @@ impl SheetsApp {
             if let Some(clip) = self.capture(&[src], false, String::new(), false) {
                 let keep = self.clip.take();
                 self.paste_clip(&clip, target, PasteOpts::default());
-                self.clip = keep;
+                // A mudança cancelou um recorte que estivesse esperando.
+                self.clip = keep.filter(|c| !c.cut);
             }
             return;
         }
