@@ -176,6 +176,11 @@ pub fn read_workbook(pkg: &Package) -> Result<WorkbookMeta, Error> {
         .find(|r| r.kind.ends_with("/officeDocument"))
         .map(|r| r.target.clone())
         .unwrap_or_else(|| "xl/workbook.xml".into());
+    if wb_path.to_ascii_lowercase().ends_with(".bin") {
+        return Err(Error::Unsupported(
+            "Pasta de trabalho binária (.xlsb), que o duck-sheets ainda não lê. No Excel, salve como .xlsx (ou .xlsm, se tiver macros).",
+        ));
+    }
     let buf = pkg.read(&wb_path)?;
     let rels = read_rels(pkg, &wb_path)?;
     let by_id = |id: &str| rels.iter().find(|r| r.id == id);
@@ -210,6 +215,9 @@ pub fn read_workbook(pkg: &Package) -> Result<WorkbookMeta, Error> {
             sheets.push(SheetMeta { name, hidden, id, path: rel.target.clone(), tab: this_tab, very_hidden });
         }
     });
+    if sheets.is_empty() {
+        return Err(Error::Format("nenhuma aba de planilha no arquivo".into()));
+    }
     // Aba ativa escondida ou de gráfico: a primeira visível.
     let active = active.or_else(|| sheets.iter().position(|s| !s.hidden)).unwrap_or(0);
     let find = |suffix: &str| rels.iter().find(|r| r.kind.ends_with(suffix)).map(|r| r.target.clone());
@@ -662,5 +670,46 @@ mod tests {
         assert_eq!(t.colors[5], Theme::default().colors[5]);
         assert_eq!(t.minor_font, "Aptos Narrow");
         assert_eq!(t.major_font, "Aptos Display");
+    }
+
+    /// Formatos que não são lidos: um aviso, e não um documento sem abas.
+    #[test]
+    fn formats_that_are_not_read() {
+        let dir = std::env::temp_dir().join(format!("duck-fmt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rels = |target: &str, kind: &str| {
+            format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="{target}"/></Relationships>"#
+            )
+        };
+        let write = |name: &str, parts: &[(&str, &str)]| {
+            let path = dir.join(name);
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            for (n, body) in parts {
+                zip.start_file(*n, zip::write::SimpleFileOptions::default()).unwrap();
+                std::io::Write::write_all(&mut zip, body.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+            path
+        };
+        let error =
+            |p: &std::path::Path| crate::Book::open(p).err().map(|e| e.to_string()).unwrap_or_default();
+        let xlsb = write(
+            "a.xlsb",
+            &[("_rels/.rels", &rels("xl/workbook.bin", "officeDocument")), ("xl/workbook.bin", "x")],
+        );
+        assert!(error(&xlsb).contains(".xlsb"), "{}", error(&xlsb));
+        let empty = write(
+            "b.xlsx",
+            &[
+                ("_rels/.rels", &rels("xl/workbook.xml", "officeDocument")),
+                ("xl/workbook.xml", "<workbook/>"),
+            ],
+        );
+        assert!(error(&empty).contains("nenhuma aba"), "{}", error(&empty));
+        let old = dir.join("c.xls");
+        std::fs::write(&old, [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 0]).unwrap();
+        assert!(error(&old).contains(".xls"), "{}", error(&old));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

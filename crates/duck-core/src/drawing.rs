@@ -64,7 +64,13 @@ pub struct DrawingAnchor {
     /// Parte do desenho (`xl/drawings/drawingN.xml`).
     pub part: String,
     pub anchor: Anchor,
+    /// Cópia para programas antigos (`mc:Fallback`) da âncora anterior: anda
+    /// junto com ela.
+    pub fallback: bool,
 }
+
+/// O objeto não tem âncora em `drawing_anchors`.
+pub const NO_SLOT: u32 = u32::MAX;
 
 /// Cor de gráfico: direta ou do tema, com os ajustes do DrawingML.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -401,6 +407,9 @@ pub enum ObjectKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Object {
     pub anchor: Anchor,
+    /// Índice da âncora em `Layout::drawing_anchors` (ou [`NO_SLOT`]). Os
+    /// objetos de um grupo têm a mesma.
+    pub slot: u32,
     /// Parte da âncora que o objeto ocupa (x, y, largura, altura em frações):
     /// objetos dentro de grupos.
     pub frac: [f32; 4],
@@ -419,6 +428,7 @@ impl Object {
     pub fn new(anchor: Anchor, kind: ObjectKind) -> Self {
         Self {
             anchor,
+            slot: NO_SLOT,
             frac: [0.0, 0.0, 1.0, 1.0],
             kind,
             id: 0,

@@ -666,20 +666,18 @@ impl SheetsApp {
         }
         if sheet.layout.autofilter.is_some() {
             self.set_filter(Target::Sheet, None, None);
+            self.message = "Filtro retirado".into();
             return;
         }
-        // Várias células selecionadas: o filtro vale para a seleção.
-        let (r0, c0, r1, c1) = v.sel();
-        let reg = if (r0, c0) != (r1, c1) && r1 - r0 + 1 < v.rows.len() {
-            Some(CellRange { first_row: r0, first_col: c0, last_row: r1, last_col: c1 })
-        } else {
-            current_region(sheet, r, c)
-        };
-        let Some(reg) = reg else {
+        let Some(reg) = filter_range(sheet, v.sel(), (r, c), v.rows.len(), v.cols.len()) else {
             self.message = "Selecione uma célula dentro dos dados".into();
             return;
         };
         self.set_filter(Target::Sheet, Some(AutoFilter { range: reg, columns: Vec::new() }), None);
+        let (mut a, mut b) = (String::new(), String::new());
+        crate::app::cell_name(reg.first_row, reg.first_col, &mut a);
+        crate::app::cell_name(reg.last_row, reg.last_col, &mut b);
+        self.message = format!("Filtro em {a}:{b}: use as setas dos cabeçalhos");
     }
 
     /// Tira os critérios (do filtro que contém a célula ativa) e mostra as linhas.
@@ -711,6 +709,81 @@ impl SheetsApp {
         };
         self.set_filter(f.target, Some(f.filter), None);
     }
+}
+
+/// O intervalo do filtro para a seleção (`r0`, `c0`, `r1`, `c1`), numa grade de
+/// `nr` × `nc`:
+///
+/// - uma célula: os dados em volta dela;
+/// - colunas inteiras: só elas, do cabeçalho ao último valor;
+/// - uma linha (inteira ou parte): ela é o cabeçalho, e o filtro desce até o
+///   fim dos dados;
+/// - um bloco: ele mesmo.
+fn filter_range(
+    sheet: &Sheet,
+    (r0, c0, r1, c1): (u32, u32, u32, u32),
+    cur: (u32, u32),
+    nr: u32,
+    nc: u32,
+) -> Option<CellRange> {
+    let (rows, cols) = (sheet.rows(), sheet.cols());
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+    let (all_rows, all_cols) = (r0 == 0 && r1 + 1 >= nr, c0 == 0 && c1 + 1 >= nc);
+    if (r0, c0) == (r1, c1) || (all_rows && all_cols) {
+        let reg = current_region(sheet, cur.0.min(rows - 1), cur.1.min(cols - 1))?;
+        return Some(CellRange { first_row: header_row(sheet, &reg), ..reg });
+    }
+    let (r1, c1) = (r1.min(rows - 1), c1.min(cols - 1));
+    if r0 > r1 || c0 > c1 {
+        return None;
+    }
+    let none = duck_core::StringTable::new();
+    // Linhas com valor nas colunas selecionadas: a primeira e a última.
+    let span = |c: u32| {
+        let mut s: Option<(u32, u32)> = None;
+        sheet.for_each_value(c, 0..rows, &none, |r, _| {
+            s = Some((s.map_or(r, |s| s.0), r));
+            true
+        });
+        s
+    };
+    if all_rows {
+        let spans: Vec<(u32, (u32, u32))> = (c0..=c1).filter_map(|c| Some((c, span(c)?))).collect();
+        let (c, first) = spans.iter().map(|s| (s.0, s.1.0)).min_by_key(|s| s.1)?;
+        let last_row = spans.iter().map(|s| s.1.1).max()?;
+        let top = current_region(sheet, first, c).map_or(first, |reg| header_row(sheet, &reg));
+        return Some(CellRange {
+            first_row: top.min(last_row),
+            first_col: spans.first()?.0,
+            last_row,
+            last_col: spans.last()?.0,
+        });
+    }
+    let (c0, c1) = if all_cols {
+        // Da primeira à última coluna com cabeçalho.
+        let mut with = (c0..=c1).filter(|&c| sheet.has_value(r0, c));
+        let a = with.next()?;
+        (a, with.next_back().unwrap_or(a))
+    } else {
+        (c0, c1)
+    };
+    let last_row = if r0 == r1 {
+        (c0..=c1).filter_map(|c| current_region(sheet, r0, c)).map(|reg| reg.last_row).max().unwrap_or(r1)
+    } else {
+        r1
+    };
+    Some(CellRange { first_row: r0, first_col: c0, last_row, last_col: c1 })
+}
+
+/// A linha do cabeçalho da região: as de cima com um valor só são títulos.
+fn header_row(sheet: &Sheet, reg: &CellRange) -> u32 {
+    let filled = |r: u32| (reg.first_col..=reg.last_col).filter(|&c| sheet.has_value(r, c)).take(2).count();
+    if reg.first_col == reg.last_col {
+        return reg.first_row;
+    }
+    (reg.first_row..reg.last_row).find(|&r| filled(r) > 1).unwrap_or(reg.first_row)
 }
 
 /// A região contínua de dados em volta de (`r`, `c`), como a "região atual"
@@ -758,4 +831,76 @@ pub fn current_region(sheet: &Sheet, r: u32, c: u32) -> Option<CellRange> {
         }
     }
     (g.first_row != g.last_row || g.first_col != g.last_col || has(r, c)).then_some(g)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Título em cima, cabeçalho na linha 3, dados até a 6, total separado.
+    fn sales() -> crate::app::SheetsApp {
+        crate::testing::app(&[(
+            "Vendas",
+            &[
+                ("A1", "Vendas 2026"),
+                ("A2", "Janeiro a outubro"),
+                ("A3", "Região"),
+                ("B3", "Loja"),
+                ("C3", "Pedidos"),
+                ("A4", "Sul"),
+                ("B4", "x"),
+                ("C4", "10"),
+                ("A5", "Norte"),
+                ("B5", "y"),
+                ("C5", "20"),
+                ("A6", "Sul"),
+                ("B6", "z"),
+                ("C6", "30"),
+            ],
+        )])
+    }
+
+    /// O filtro que fica ao ligar com a seleção dada.
+    fn filter_for(sel: impl Fn(&mut crate::app::SheetsApp)) -> Option<String> {
+        let mut a = sales();
+        sel(&mut a);
+        a.toggle_filter();
+        let (s, _) = a.doc.as_ref().unwrap().current().unwrap();
+        let g = s.layout.autofilter.as_ref()?.range;
+        let (mut x, mut y) = (String::new(), String::new());
+        crate::app::cell_name(g.first_row, g.first_col, &mut x);
+        crate::app::cell_name(g.last_row, g.last_col, &mut y);
+        Some(format!("{x}:{y}"))
+    }
+
+    fn whole(a: &mut crate::app::SheetsApp, rows: Option<(u32, u32)>, cols: Option<(u32, u32)>) {
+        let v = a.doc.as_mut().unwrap().view_mut().unwrap();
+        let (nr, nc) = (v.rows.len(), v.cols.len());
+        let (r, c) = (rows.unwrap_or((0, nr - 1)), cols.unwrap_or((0, nc - 1)));
+        v.single();
+        (v.anchor, v.cur) = ((r.0, c.0), (r.1, c.1));
+    }
+
+    #[test]
+    fn where_the_filter_goes() {
+        let is = |got: Option<String>, want: &str| assert_eq!(got.as_deref(), Some(want));
+        // Uma célula: a tabela toda, sem os títulos de cima.
+        is(filter_for(|a| a.go_to(4, 1)), "A3:C6");
+        is(filter_for(|a| a.go_to(0, 0)), "A3:C6");
+        // A linha do cabeçalho inteira: só as colunas com cabeçalho, até o fim.
+        is(filter_for(|a| whole(a, Some((2, 2)), None)), "A3:C6");
+        is(filter_for(|a| crate::testing::select(a, "A3:C3")), "A3:C6");
+        // Uma coluna: só ela.
+        is(filter_for(|a| whole(a, None, Some((1, 1)))), "B3:B6");
+        is(filter_for(|a| whole(a, None, Some((1, 2)))), "B3:C6");
+        is(filter_for(|a| crate::testing::select(a, "C3:C6")), "C3:C6");
+        is(filter_for(|a| whole(a, None, None)), "A3:C6");
+        // Nada a filtrar.
+        assert_eq!(filter_for(|a| whole(a, None, Some((8, 8)))), None);
+        assert_eq!(filter_for(|a| whole(a, Some((20, 20)), None)), None);
+        // De novo: desliga.
+        let mut a = sales();
+        whole(&mut a, None, Some((1, 1)));
+        a.toggle_filter();
+        a.toggle_filter();
+        assert!(a.doc.as_ref().unwrap().current().unwrap().0.layout.autofilter.is_none());
+    }
 }

@@ -21,10 +21,20 @@ const GRIDLINE: Rgba = rgb(0xD9D9D9);
 const FRAME_LINE: Rgba = rgb(0xD9D9D9);
 
 /// Retângulo do objeto em pixels lógicos da aba (100%).
-pub fn object_rect(o: &Object, v: &View) -> [f64; 4] {
+pub fn object_rect(o: &Object, v: &View, moving: Option<crate::objects::Moving>) -> [f64; 4] {
+    let [x, y, w, h] = match moving {
+        Some(m) if m.slot == o.slot => m.rect,
+        _ => anchor_rect(&o.anchor, v),
+    };
+    let f = o.frac;
+    [x + f[0] as f64 * w, y + f[1] as f64 * h, f[2] as f64 * w, f[3] as f64 * h]
+}
+
+/// Retângulo da âncora (o grupo inteiro, se for um).
+pub fn anchor_rect(anchor: &Anchor, v: &View) -> [f64; 4] {
     let x = |c: u32, off: i64| v.cols.offset(c.min(v.cols.len())) as f64 + off as f64 / EMU_PER_PX;
     let y = |r: u32, off: i64| v.rows.offset(r.min(v.rows.len())) as f64 + off as f64 / EMU_PER_PX;
-    let (x0, y0, x1, y1) = match o.anchor {
+    let (x0, y0, x1, y1) = match *anchor {
         Anchor::Two { from, to } => (
             x(from.col, from.col_off),
             y(from.row, from.row_off),
@@ -40,9 +50,7 @@ pub fn object_rect(o: &Object, v: &View) -> [f64; 4] {
             (a, b, a + cx as f64 / EMU_PER_PX, b + cy as f64 / EMU_PER_PX)
         }
     };
-    let (w, h) = (x1 - x0, y1 - y0);
-    let f = o.frac;
-    [x0 + f[0] as f64 * w, y0 + f[1] as f64 * h, f[2] as f64 * w, f[3] as f64 * h]
+    [x0, y0, x1 - x0, y1 - y0]
 }
 
 /// Cor final (tema e ajustes do DrawingML).
@@ -80,6 +88,8 @@ pub struct ObjCtx<'a> {
     pub images: &'a std::collections::HashMap<String, [f32; 4]>,
     /// Tema (no escuro, o que o objeto desenha é adaptado).
     pub th: &'static crate::theme::Theme,
+    /// Objeto sendo arrastado: aparece na posição provisória.
+    pub moving: Option<crate::objects::Moving>,
 }
 
 /// Desenha o intervalo de uma câmera num retângulo, recortado; `false` = usar
@@ -97,7 +107,7 @@ pub fn draw_objects(p: &mut Painter, cx: &ObjCtx, objects: &[Object], v: &View, 
         if o.hidden {
             continue;
         }
-        let [x, y, w, h] = object_rect(o, v);
+        let [x, y, w, h] = object_rect(o, v, cx.moving);
         let r = Rect::new(
             q.rect.x0 + ((x - q.ox) * cx.g as f64) as f32,
             q.rect.y0 + ((y - q.oy) * cx.g as f64) as f32,
@@ -1187,7 +1197,7 @@ impl crate::app::SheetsApp {
                 if !matches!(o.kind, ObjectKind::Slicer(_) | ObjectKind::Timeline(_)) {
                     continue;
                 }
-                let [ox, oy, w, h] = object_rect(o, v);
+                let [ox, oy, w, h] = object_rect(o, v, None);
                 let r = Rect::new(
                     q.rect.x0 + ((ox - q.ox) * g.g as f64) as f32,
                     q.rect.y0 + ((oy - q.oy) * g.g as f64) as f32,

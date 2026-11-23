@@ -75,6 +75,12 @@ impl Package {
     }
 
     fn from_mmap(mmap: Mmap) -> Result<Self, Error> {
+        // Contêiner OLE: o Excel antigo e os arquivos com senha.
+        if mmap.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
+            return Err(Error::Unsupported(
+                "Arquivo do Excel antigo (.xls) ou protegido com senha, que o duck-sheets ainda não lê. No Excel, tire a senha e salve como .xlsx ou .xlsm.",
+            ));
+        }
         let mut archive =
             zip::ZipArchive::new(Cursor::new(&mmap[..])).map_err(|e| Error::Zip(e.to_string()))?;
         let mut entries = HashMap::with_capacity(archive.len());

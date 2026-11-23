@@ -941,6 +941,15 @@ Conferido na vitrine, nos dois temas: células, formatação condicional, gráfi
 
 Conferência: `duck-bench roundtrip --abas --celulas` (cria, copia, renomeia, move, oculta e exclui abas; move e desloca células) com 0 divergências na vitrine e nas planilhas reais que o duck-sheets lê, e `duck-bench conferir-pacote`, que procura no pacote salvo relações sem alvo, tipos faltando, ids repetidos e nomes inválidos. Não foi aberto no Excel.
 
+### Objetos arrastáveis (23/11/2026)
+
+- **Âncora, não objeto**: `Object.slot` aponta para `Layout::drawing_anchors`. `Command::Anchors` muda a âncora e todos os objetos dela (um grupo anda inteiro) e a cópia `mc:Fallback`, e devolve o inverso.
+- **Arraste** (`apps/duck-sheets/src/objects.rs`): só a tela muda (`Moving`, que o `object_rect` consulta); o comando sai ao soltar. O tipo da âncora do arquivo (dois cantos, um canto, absoluta) fica.
+- **Gravação**: `Edits::drawings` não regrava o XML da aba; `patch_anchors` remenda `from`, `to`, `ext` e `pos` na parte do desenho. Controles de formulário não se movem: a posição deles também está no VML e na aba.
+- **Cliques**: formas sem preenchimento e linhas só pegam perto do traço, e o que está atrás continua clicável.
+
+Conferência: `duck-bench regress` move todos os objetos de todas as abas, grava e relê ("mover objetos").
+
 ### Funções e LAMBDA (23/11/2026)
 
 - **Tabela**: cada assunto tem a sua lista (`duck-calc/src/fns/*.rs`, `DEFS`); `funcs.rs` junta todas numa tabela estática montada na compilação, então achar a função de um nó continua sendo um índice. Nomes em português que mudaram entre versões entram em `PT_ALIASES` (aceitos ao digitar; na tela aparece o da tabela).

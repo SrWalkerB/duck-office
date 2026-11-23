@@ -44,6 +44,8 @@ pub enum Error {
     Zip(String),
     Missing(String),
     Format(String),
+    /// Formato reconhecido, mas que não é lido (a mensagem diz o que fazer).
+    Unsupported(&'static str),
 }
 
 impl std::fmt::Display for Error {
@@ -53,6 +55,7 @@ impl std::fmt::Display for Error {
             Error::Zip(e) => write!(f, "zip inválido: {e}"),
             Error::Missing(p) => write!(f, "parte ausente no pacote: {p}"),
             Error::Format(e) => write!(f, "conteúdo inválido: {e}"),
+            Error::Unsupported(e) => f.write_str(e),
         }
     }
 }

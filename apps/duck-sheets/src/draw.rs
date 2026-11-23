@@ -349,6 +349,7 @@ fn draw_camera(
         date1904: doc.date1904,
         images,
         th,
+        moving: None,
     };
     // Uma câmera dentro de outra fica com a imagem guardada.
     crate::chart::draw_objects(p, &octx, &sheet.layout.objects, view, &quad, &mut |_, _, _, _| false);
@@ -376,6 +377,7 @@ impl SheetsApp {
         let outlines = self.outlines(&refs, &ref_colors, th);
 
         let (vthumb, hthumb) = (self.vthumb(&geom), self.hthumb(&geom));
+        let selected = self.selected_object().map(|o| o.2);
         let text = self.text.as_mut().expect("texto");
         let ui = text.default_style();
         let mut p = Painter::new(&mut out, text);
@@ -412,6 +414,7 @@ impl SheetsApp {
                     date1904: doc.date1904,
                     images: &self.images.uv,
                     th,
+                    moving: self.moving,
                 };
                 for q in geom.quads.iter().rev() {
                     if !q.rect.is_empty() {
@@ -422,6 +425,9 @@ impl SheetsApp {
                         };
                         crate::chart::draw_objects(&mut p, &octx, &sheet.layout.objects, view, q, &mut live);
                     }
+                }
+                if let Some(rect) = selected {
+                    crate::objects::draw_selection(&mut p, &geom, rect, th);
                 }
                 crate::pointing::draw_outlines(&mut p, &geom, view, &outlines, px);
                 if let Some(m) = self.marked.as_ref().filter(|m| m.sheet == doc.active) {

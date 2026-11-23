@@ -214,6 +214,13 @@ Tudo o que as duas planilhas reais de teste usam, com os mesmos resultados do Ex
 - [ ] Recortar e colar entre abas como mover (hoje cola uma cópia).
 - [ ] Ctrl+clique para somar outra referência com `;`; arrastar o contorno colorido para mudar a referência; cores para nomes e tabelas.
 - [ ] Recusar (ou perguntar sobre) uma fórmula que não dá para ler, como `=SOMA(`: hoje ela é gravada como foi digitada.
+- [x] **Objetos**: selecionar, arrastar e redimensionar gráficos, imagens, formas, grupos e segmentações; desfaz, e o arquivo salvo só muda o desenho.
+- [x] **Largura e altura pela borda** em abas sem painéis congelados (não funcionava), para todas as colunas ou linhas selecionadas.
+- [x] **Marca do que está copiado** (borda tracejada).
+- [x] **Filtro** só na coluna selecionada, ou pela linha do cabeçalho; botão na Página Inicial e Ctrl+Shift+L.
+- [x] Arquivos `.xlsb`, `.xls` e com senha: um aviso claro (antes o programa fechava).
+- [ ] Excluir objetos; mover controles de formulário.
+- [ ] Ler `.xlsb`.
 - [x] Clicar dentro do texto do editor para mover o cursor.
 - [ ] Arrastar dentro do texto do editor para selecionar.
 - [ ] Tema do sistema no Linux onde o compositor não informa (X11): hoje "seguir o sistema" fica no claro.

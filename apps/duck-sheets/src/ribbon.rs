@@ -280,6 +280,7 @@ const HOME: &[Group] = &[
             &[
                 b(Act::GoTo, "Ir para", "Ir para uma célula (Ctrl+G)"),
                 b(Act::Replace, "Substituir", "Localizar e substituir (Ctrl+H)"),
+                b(Act::Filter, "Filtro", "Ligar ou desligar o filtro da seleção (Ctrl+Shift+L)"),
             ],
         ],
     },
@@ -393,7 +394,7 @@ const DATA: &[Group] = &[Group {
             ),
         ],
         &[
-            b(Act::Filter, "Filtro", "Ligar ou desligar o filtro (setas nos cabeçalhos)"),
+            b(Act::Filter, "Filtro", "Ligar ou desligar o filtro da seleção (Ctrl+Shift+L)"),
             b(Act::ClearFilter, "Limpar", "Tirar os critérios do filtro e mostrar todas as linhas"),
             b(Act::Reapply, "Reaplicar", "Aplicar o filtro de novo depois de editar os dados"),
         ],

@@ -87,6 +87,9 @@ pub enum Cursor {
     Cross,
     /// Mover.
     Move,
+    /// Redimensionar pelos cantos (↖↘ e ↗↙).
+    ResizeNwse,
+    ResizeNesw,
 }
 
 mod clock;
@@ -158,6 +161,8 @@ impl Window {
             Cursor::ResizeRow => CursorIcon::RowResize,
             Cursor::Cross => CursorIcon::Crosshair,
             Cursor::Move => CursorIcon::Move,
+            Cursor::ResizeNwse => CursorIcon::NwseResize,
+            Cursor::ResizeNesw => CursorIcon::NeswResize,
         };
         self.inner.set_cursor(icon);
     }

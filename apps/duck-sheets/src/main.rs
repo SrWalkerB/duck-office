@@ -47,6 +47,7 @@ mod loader;
 mod look;
 mod macros;
 mod menu;
+mod objects;
 mod outline;
 mod paste;
 mod pivot;
