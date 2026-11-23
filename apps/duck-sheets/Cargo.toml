@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 duck-calc = { path = "../../crates/duck-calc" }
 duck-core = { path = "../../crates/duck-core" }
+duck-emf = { path = "../../crates/duck-emf" }
 duck-gfx = { path = "../../platform/duck-gfx" }
 duck-par = { path = "../../crates/duck-par" }
 duck-platform = { path = "../../platform/duck-platform" }

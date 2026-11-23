@@ -17,6 +17,7 @@
 //! - [`index`]: índices de busca (PROCV, SOMASES...) e critérios.
 //! - [`recalc`]: grafo de dependências e recálculo em paralelo.
 
+pub mod dynarr;
 pub mod eval;
 pub mod funcs;
 pub mod index;

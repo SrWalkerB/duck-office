@@ -599,6 +599,11 @@ impl TextSystem {
         }
     }
 
+    /// Distância do topo da linha até a linha de base (pixels).
+    pub fn ascent(&mut self, style: TextStyle) -> f32 {
+        self.baseline(style) as f32
+    }
+
     fn baseline(&mut self, style: TextStyle) -> i32 {
         if let Some(&b) = self.baselines.get(&style) {
             return b;
@@ -739,6 +744,76 @@ fn is_numeric_like(text: &str) -> bool {
         && text
             .bytes()
             .all(|b| b.is_ascii_digit() || matches!(b, b'.' | b',' | b'-' | b'+' | b'%' | b'/' | b':' | b' '))
+}
+
+/// Glifos desenhados na CPU (imagens rasterizadas fora da GPU, como os
+/// metarquivos EMF): um [`TextSystem`] próprio e uma cópia do atlas em memória.
+pub struct CpuGlyphs {
+    ts: TextSystem,
+    atlas: Vec<u8>,
+    size: u32,
+}
+
+impl Default for CpuGlyphs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CpuGlyphs {
+    /// Com todas as fontes do sistema (centenas de ms na primeira vez).
+    pub fn new() -> Self {
+        let size = 2048;
+        Self { ts: TextSystem::new(16.0, size), atlas: vec![0; (size * size) as usize], size }
+    }
+
+    pub fn style(&mut self, family: &str, px: f32, bold: bool, italic: bool) -> TextStyle {
+        self.ts.style(family, px, bold, italic)
+    }
+
+    pub fn measure(&mut self, text: &str, style: TextStyle) -> f32 {
+        self.ts.measure_styled(text, style)
+    }
+
+    pub fn ascent(&mut self, style: TextStyle) -> f32 {
+        self.ts.ascent(style)
+    }
+
+    /// Pixels cobertos pelo texto com o topo-esquerdo em (x, y): (x, y, alfa 0..1).
+    pub fn coverage(&mut self, text: &str, style: TextStyle, x: f32, y: f32, out: &mut Vec<(i32, i32, f32)>) {
+        let mut quads = Vec::new();
+        let all = [f32::MIN, f32::MIN, f32::MAX, f32::MAX];
+        self.ts.draw_styled(text, style, x, y, all, |q| quads.push(q));
+        if self.ts.take_atlas_reset() {
+            self.atlas.iter_mut().for_each(|a| *a = 0);
+        }
+        for u in self.ts.take_uploads() {
+            for row in 0..u.h {
+                let src = (row * u.w) as usize;
+                let dst = ((u.y + row) * self.size + u.x) as usize;
+                if dst + u.w as usize <= self.atlas.len() && src + u.w as usize <= u.data.len() {
+                    self.atlas[dst..dst + u.w as usize].copy_from_slice(&u.data[src..src + u.w as usize]);
+                }
+            }
+        }
+        for q in quads {
+            let (x0, y0) = (q.rect[0].round() as i32, q.rect[1].round() as i32);
+            let (w, h) = (q.rect[2].round() as i32, q.rect[3].round() as i32);
+            let (u0, v0) = (q.uv[0].round() as i32, q.uv[1].round() as i32);
+            for dy in 0..h {
+                for dx in 0..w {
+                    let (u, v) = (u0 + dx, v0 + dy);
+                    if u < 0 || v < 0 || u as u32 >= self.size || v as u32 >= self.size {
+                        continue;
+                    }
+                    let a = self.atlas[(v as u32 * self.size + u as u32) as usize];
+                    if a > 0 {
+                        out.push((x0 + dx, y0 + dy, a as f32 / 255.0));
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

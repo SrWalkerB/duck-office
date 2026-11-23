@@ -494,8 +494,6 @@ pub struct SheetsApp {
     /// Arquivo temporário da planilha nova (salvar pede o lugar).
     pub untitled_path: Option<PathBuf>,
     pub new_count: u32,
-    /// O usuário já aceitou mexer na estrutura de abas com gráficos/tabelas.
-    pub objects_ok: bool,
     /// Imagens das abas no atlas da GPU.
     pub images: crate::images::Images,
 }
@@ -565,7 +563,6 @@ impl SheetsApp {
             untitled_path: None,
             new_count: 0,
             filter_panel: None,
-            objects_ok: false,
             images: Default::default(),
         }
     }
@@ -682,6 +679,7 @@ impl SheetsApp {
                     self.refresh_table_slicers();
                     self.refresh_charts();
                     self.load_images();
+                    self.init_spills();
                     self.scripted_edits();
                     self.calc_kick();
                 }
@@ -1379,7 +1377,7 @@ impl SheetsApp {
             && let Some((obj, item)) = self.slicer_hit(&g, x, y)
         {
             self.commit_edit();
-            self.slicer_click(obj, item, mods.ctrl || mods.logo);
+            self.slicer_click(obj, item, mods.ctrl || mods.logo || mods.shift);
             return;
         }
         // Botão de filtro num cabeçalho.

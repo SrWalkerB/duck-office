@@ -298,6 +298,12 @@ fn table_info(sheet: u32, t: &duck_core::Table) -> TableInfo<'_> {
 // Motor
 // ---------------------------------------------------------------------------
 
+/// Resultado de uma célula: um valor, ou a matriz que ela espalha.
+pub enum Full {
+    One(CellValue),
+    Many { rows: u32, cols: u32, v: Vec<CellValue> },
+}
+
 /// Fórmulas compiladas e índices de busca de um arquivo. Feito de novo
 /// quando a estrutura muda (linhas/colunas inseridas, abas renomeadas).
 pub struct Engine {
@@ -346,6 +352,53 @@ impl Engine {
         }))
     }
 
+    /// Como [`Engine::eval_cell`], com a matriz inteira quando o resultado é
+    /// uma matriz (fórmula que espalha, ou fórmula de matriz). `spill`: a
+    /// fórmula é avaliada como no Excel atual (referências viram matrizes);
+    /// sem ele, fórmulas comuns de arquivos antigos dão o primeiro valor.
+    pub fn eval_full(&self, book: &Book, sheet: u32, row: u32, col: u32, spill: bool) -> Option<Full> {
+        let f = self.formula(book, sheet, row, col)?;
+        if f.flags & parse::flag::OPAQUE != 0 {
+            return None;
+        }
+        let array = spill
+            || matches!(
+                book.sheets[sheet as usize].formula(row, col).map(|f| f.kind),
+                Some(FormulaKind::Array { .. })
+            );
+        let mut e = Eval {
+            book,
+            eng: self,
+            f: &f,
+            sheet,
+            row,
+            col,
+            array,
+            opaque: false,
+            depth: 0,
+            locals: Vec::new(),
+            local_base: 0,
+        };
+        let v = e.eval(f.root);
+        let arr = match &v {
+            V::Arr(a) if a.rows * a.cols > 1 => Some(a.clone()),
+            V::Ref(r) if array && !r.is_cell() => Some(e.to_arr(v.clone())),
+            _ => None,
+        };
+        if let Some(a) = arr.filter(|_| array) {
+            let vals: Vec<CellValue> = a.v.iter().map(|x| e.final_value(x.clone()).to_cell()).collect();
+            if e.opaque {
+                return None;
+            }
+            return Some(Full::Many { rows: a.rows, cols: a.cols, v: vals });
+        }
+        let v = e.final_value(v);
+        if e.opaque {
+            return None;
+        }
+        Some(Full::One(v.to_cell()))
+    }
+
     /// Calcula a célula. `None` = sem fórmula, ou com algo que o motor não
     /// sabe calcular (o valor guardado no arquivo fica).
     pub fn eval_cell(&self, book: &Book, sheet: u32, row: u32, col: u32) -> Option<CellValue> {
@@ -355,9 +408,21 @@ impl Engine {
         }
         let array = matches!(
             book.sheets[sheet as usize].formula(row, col).map(|f| f.kind),
-            Some(FormulaKind::Array(_))
+            Some(FormulaKind::Array { .. })
         );
-        let mut e = Eval { book, eng: self, f: &f, sheet, row, col, array, opaque: false, depth: 0 };
+        let mut e = Eval {
+            book,
+            eng: self,
+            f: &f,
+            sheet,
+            row,
+            col,
+            array,
+            opaque: false,
+            depth: 0,
+            locals: Vec::new(),
+            local_base: 0,
+        };
         let v = e.eval(f.root);
         let v = e.final_value(v);
         if e.opaque {
@@ -385,11 +450,27 @@ pub struct Eval<'e> {
     /// Passou por algo que o motor não calcula: o valor guardado fica.
     pub opaque: bool,
     depth: u32,
+    /// Variáveis de LET (pilha) e o início das da fórmula atual (nomes
+    /// definidos têm as próprias).
+    pub locals: Vec<V<'e>>,
+    local_base: usize,
 }
 
 impl<'e> Eval<'e> {
     pub fn new(book: &'e Book<'e>, eng: &'e Engine, f: &'e Formula, sheet: u32, row: u32, col: u32) -> Self {
-        Self { book, eng, f, sheet, row, col, array: false, opaque: false, depth: 0 }
+        Self {
+            book,
+            eng,
+            f,
+            sheet,
+            row,
+            col,
+            array: false,
+            opaque: false,
+            depth: 0,
+            locals: Vec::new(),
+            local_base: 0,
+        }
     }
 
     pub fn eval(&mut self, n: u32) -> V<'e> {
@@ -438,9 +519,11 @@ impl<'e> Eval<'e> {
                 }
                 let Some(nf) = self.eng.name_formula(self.book, *i) else { return V::Err(CellError::Name) };
                 let saved = std::mem::replace(&mut self.f, nf);
+                let base = std::mem::replace(&mut self.local_base, self.locals.len());
                 self.depth += 1;
                 let v = self.eval(nf.root);
                 self.depth -= 1;
+                self.local_base = base;
                 self.f = saved;
                 v
             }
@@ -448,6 +531,9 @@ impl<'e> Eval<'e> {
                 let ids = f.call_args(*start, rows * cols);
                 let v = ids.iter().map(|&i| self.eval(i)).collect();
                 V::Arr(Rc::new(Arr { rows: *rows, cols: *cols, v }))
+            }
+            Node::Local(k) => {
+                self.locals.get(self.local_base + *k as usize).cloned().unwrap_or(V::Err(CellError::Name))
             }
             Node::Range(a, b) => {
                 let (a, b) = (*a, *b);

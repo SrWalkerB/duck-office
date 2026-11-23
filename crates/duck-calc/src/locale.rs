@@ -79,8 +79,72 @@ pub fn from_pt(f: &str) -> String {
     translate(f, false)
 }
 
+/// Nomes das variáveis de LET da fórmula (minúsculas, sem `_xlpm.`): nos
+/// argumentos pares de LET, um nome seguido do separador.
+fn let_vars(s: &[char], sep: char) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let mut stack: Vec<(bool, usize)> = Vec::new();
+    let mut i = 0;
+    let mut scratch = String::new();
+    while i < s.len() {
+        let c = s[i];
+        match c {
+            '"' | '\'' => {
+                scratch.clear();
+                i = quoted(s, i, c, &mut scratch);
+            }
+            '[' => {
+                scratch.clear();
+                i = bracketed(s, i, &mut scratch);
+            }
+            '(' => {
+                stack.push((false, 0));
+                i += 1;
+            }
+            ')' => {
+                stack.pop();
+                i += 1;
+            }
+            _ if c == sep => {
+                if let Some(top) = stack.last_mut() {
+                    top.1 += 1;
+                }
+                i += 1;
+            }
+            _ if is_ident(c) && !c.is_ascii_digit() => {
+                let st = i;
+                while i < s.len() && is_ident(s[i]) {
+                    i += 1;
+                }
+                let word: String = s[st..i].iter().collect();
+                let mut j = i;
+                while j < s.len() && s[j] == ' ' {
+                    j += 1;
+                }
+                if s.get(j) == Some(&'(') {
+                    let name = word.to_uppercase();
+                    let bare = name.trim_start_matches("_XLFN.");
+                    stack.push((bare == "LET", 0));
+                    i = j + 1;
+                } else if stack.last().is_some_and(|t| t.0 && t.1 % 2 == 0) && s.get(j) == Some(&sep) {
+                    out.insert(local(&word));
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+/// Variável de LET sem o prefixo do arquivo, em minúsculas.
+fn local(w: &str) -> String {
+    let w = w.strip_prefix("_xlpm.").or_else(|| w.strip_prefix("_XLPM.")).unwrap_or(w);
+    w.to_lowercase()
+}
+
 fn translate(f: &str, to_pt: bool) -> String {
     let s: Vec<char> = f.chars().collect();
+    let vars = let_vars(&s, if to_pt { ',' } else { ';' });
     let mut out = String::with_capacity(f.len() + 8);
     let mut i = 0;
     // Dentro de `{...}` o separador de colunas também troca.
@@ -169,6 +233,14 @@ fn translate(f: &str, to_pt: bool) -> String {
                 }
                 if s.get(j) == Some(&'(') {
                     out.push_str(&func_name(&word, to_pt));
+                } else if !vars.is_empty() && vars.contains(&local(&word)) && s.get(i) != Some(&'!') {
+                    // Variável de LET: o arquivo grava `_xlpm.nome`.
+                    let bare =
+                        word.strip_prefix("_xlpm.").or_else(|| word.strip_prefix("_XLPM.")).unwrap_or(&word);
+                    if !to_pt {
+                        out.push_str("_xlpm.");
+                    }
+                    out.push_str(bare);
                 } else if s.get(i) != Some(&'!') && s.get(i) != Some(&'[') {
                     let up = word.to_uppercase();
                     let b = if to_pt {
@@ -216,7 +288,13 @@ fn func_name(word: &str, to_pt: bool) -> String {
         match funcs::lookup_pt(word).or_else(|| funcs::lookup(word)) {
             Some(f) => {
                 let name = funcs::def(f).name;
-                if NEW_FUNCS.contains(&name) { format!("_xlfn.{name}") } else { name.to_string() }
+                if matches!(name, "FILTER" | "SORT") {
+                    format!("_xlfn._xlws.{name}")
+                } else if NEW_FUNCS.contains(&name) {
+                    format!("_xlfn.{name}")
+                } else {
+                    name.to_string()
+                }
             }
             None => word.to_uppercase(),
         }
@@ -257,6 +335,16 @@ const NEW_FUNCS: &[&str] = &[
     "LET",
     "LAMBDA",
     "AGGREGATE",
+    "RANDARRAY",
+    "TAKE",
+    "DROP",
+    "CHOOSECOLS",
+    "CHOOSEROWS",
+    "VSTACK",
+    "HSTACK",
+    "TOCOL",
+    "TOROW",
+    "EXPAND",
 ];
 
 #[cfg(test)]
@@ -275,6 +363,13 @@ mod tests {
         assert_eq!(from_pt(&pt), en);
         assert_eq!(to_pt("_xlfn.XLOOKUP(1,A:A,B:B,#N/A)"), "PROCX(1;A:A;B:B;#N/D)");
         assert_eq!(from_pt("procx(1;A:A;B:B)"), "_xlfn.XLOOKUP(1,A:A,B:B)");
+        // Matrizes dinâmicas e LET.
+        assert_eq!(from_pt("FILTRO(A1:B9;B1:B9>2)"), "_xlfn._xlws.FILTER(A1:B9,B1:B9>2)");
+        assert_eq!(
+            from_pt("LET(x;2;total;x*3;total+x)"),
+            "_xlfn.LET(_xlpm.x,2,_xlpm.total,_xlpm.x*3,_xlpm.total+_xlpm.x)"
+        );
+        assert_eq!(to_pt("_xlfn.LET(_xlpm.x,1.5,_xlpm.x*2)"), "LET(x;1,5;x*2)");
         assert_eq!(from_pt("SOMA(A1:A3)*1,5"), "SUM(A1:A3)*1.5");
         assert_eq!(from_pt("SE(A1>0;\"sim\";\"não\")"), "IF(A1>0,\"sim\",\"não\")");
         assert_eq!(to_pt("1E+5*2"), "1E+5*2");

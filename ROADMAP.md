@@ -2,7 +2,7 @@
 
 Onde o projeto está, o que já foi feito e o que falta. Os detalhes de cada decisão e as medições completas ficam em [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-**Fase atual: F5** (gráficos e segmentações de dados, que aparecem em quase toda planilha real). O motor de cálculo (F4) está pronto: 100% das fórmulas das planilhas de teste iguais ao Excel, recálculo do arquivo de referência em 0,6 s. Gráficos, imagens, tabelas dinâmicas e segmentações de dados já funcionam (clicar na segmentação recalcula as dinâmicas). Falta o teste manual de teclado e mouse das fases anteriores.
+**Versão 1.0 do duck-sheets** (veja [Versão 1.0](#-versão-10-do-duck-sheets) abaixo): abre, calcula, edita e salva as planilhas de teste com fórmulas, matrizes dinâmicas, gráficos, imagens (PNG, JPEG e EMF), tabelas dinâmicas, segmentações e linhas do tempo. Falta o teste manual de teclado e mouse na janela (Windows, Linux e macOS) antes de publicar a versão.
 
 | Fase | Entrega | Status |
 |---|---|---|
@@ -11,8 +11,9 @@ Onde o projeto está, o que já foi feito e o que falta. Os detalhes de cada dec
 | **F2** | Visualizador `duck-sheets` | ✅ Concluída |
 | **F3** | Edição e salvar com round-trip | ✅ Concluída (teste manual pendente) |
 | **F3.5** | Casca do app: faixa de opções, menu Arquivo, clique direito, novo arquivo, "Abrir com"; filtro e classificação | ✅ Concluída (teste manual pendente) |
-| **F4** | Motor de cálculo | ✅ Concluída (matrizes dinâmicas pendentes) |
-| **F5+** | Gráficos, pivôs, slicers, VBA, formato nativo, docs e slides | 🔶 Em andamento (gráficos, imagens, tabelas dinâmicas e segmentações) |
+| **F4** | Motor de cálculo | ✅ Concluída (com matrizes dinâmicas) |
+| **F5** | Gráficos, imagens, tabelas dinâmicas, segmentações, linhas do tempo | ✅ Concluída (versão 1.0) |
+| **F6+** | Edição de gráficos, VBA, formato nativo, docs e slides | ⏳ Depois da versão 1.0 |
 
 ---
 
@@ -101,7 +102,7 @@ Resultado no arquivo de referência (Windows, 16 threads):
 Limites desta versão:
 
 - fórmulas novas só têm valor se o avaliador simples entender (sem intervalos como `SUM`); as que dependem da célula editada não mudam. O motor de cálculo vem na F4, e o arquivo salvo pede ao Excel para recalcular ao abrir;
-- inserir/apagar linhas não move gráficos, imagens, tabelas e tabelas dinâmicas (o app avisa antes); na aba regravada, `cm`/`vm` das células e níveis de agrupamento das linhas não voltam;
+- na aba regravada (linhas/colunas inseridas ou apagadas), `vm` das células e níveis de agrupamento das linhas não voltam (as matrizes dinâmicas mantêm o `cm`);
 - texto rico de células reescritas vira texto simples; quebra de linha dentro da célula (Alt+Enter) ainda não existe;
 - os nomes das funções são os do arquivo (inglês, separador `,`).
 
@@ -142,14 +143,15 @@ Critério de pronto: dá para abrir, editar, formatar, filtrar e salvar uma plan
 - [x] **Recálculo incremental em segundo plano**: ao abrir (voláteis, como o Excel) e a cada edição, só os dependentes e os voláteis. A janela continua respondendo; uma edição nova cancela o cálculo em andamento. F9 recalcula os voláteis, Shift+F9 tudo.
 - [x] **Fórmulas em português** na barra e ao digitar (`=SOMA(A1;1,5)`); o arquivo guarda como o Excel (`SUM(A1,1.5)`).
 - [x] **Conferência** (`duck-bench calc`): cada fórmula do arquivo é calculada com os valores guardados e comparada com o resultado do Excel.
-- [ ] Fórmulas de matriz dinâmica (FILTRO, ÚNICO, CLASSIFICAR, SEQUÊNCIA) e LET/LAMBDA.
+- [x] **Matrizes dinâmicas**: FILTRO, ÚNICO, CLASSIFICAR, CLASSIFICARPOR, SEQUÊNCIA, MATRIZALEATÓRIA, TOMAR, DESCARTAR, ESCOLHERCOLS, ESCOLHERLINS, EMPILHARV, EMPILHARH, PARACOL, PARALIN, EXPANDIR, TRANSPOR e LET. O resultado se espalha pelas células vizinhas e acompanha o tamanho (`#DESPEJAR!` se a área estiver ocupada); escrever na área bloqueia, apagar a fórmula limpa. Gravadas como o Excel (`t="array"`, `cm`, `metadata.xml`). Fórmulas comuns de arquivos antigos continuam com a interseção implícita.
+- [ ] LAMBDA e as funções que a usam (MAP, REDUCE, BYROW...).
 - [ ] Núcleos SIMD para blocos de fórmulas simples (hoje cada célula é avaliada pela árvore).
 
 Resultado: nas duas planilhas reais de teste, **100% das fórmulas iguais ao Excel** (10,1 milhões e 140 mil). O arquivo de referência inteiro é recalculado em **0,6 s** com 32 threads (grafo montado em 30 ms); só os voláteis (5 milhões de células com HOJE) em 0,2 s.
 
 Critério de pronto: recalcular o arquivo de referência sem travar a janela. ✅
 
-## 🔶 F5+ · O resto da suíte
+## ✅ F5 · Objetos da planilha
 
 - [x] **Gráficos na tela**: barras (verticais, horizontais, agrupadas, empilhadas, 100%), linhas (também empilhadas e tracejadas), área, pizza e rosca, combinações com eixo secundário, rótulos de dados (com caixa colorida), legenda, título, linhas de grade, escala fixa do eixo e as cores do tema com os ajustes do arquivo (`lumMod`, padrões, gradientes). Os valores vêm das células: o gráfico muda quando a fórmula de origem é recalculada.
 - [x] **Segmentações de dados na tela**: de tabela dinâmica (itens do cache, com o que está selecionado) e de tabela do Excel (valores da coluna, marcados pelo filtro da tabela), com o estilo do arquivo (`x14:slicerStyles`) ou os estilos prontos.
@@ -157,13 +159,30 @@ Critério de pronto: recalcular o arquivo de referência sem travar a janela. �
 - [x] **Imagens** PNG e JPEG (atlas RGBA na GPU, reduzidas se forem grandes). EMF/WMF ainda não.
 - [x] **Motor de tabelas dinâmicas** (`duck-calc/src/pivot.rs`): a partir do cache e dos registros, com itens escondidos, filtros de página, agrupamento de datas (mês, trimestre, ano) e de números, campos calculados, ordem manual/por rótulo/por valor, formas compacta, de tópicos e tabular, subtotais, totais gerais e vários campos de valores. O layout sai no mesmo formato que o Excel grava, o que permite conferir: nas planilhas de teste, 21 de 21 e 37 de 38 tabelas com o layout idêntico e 0 valores diferentes (as do Modelo de Dados/Power Pivot não têm registros no arquivo e não recalculam).
 - [x] **Segmentações interativas**: clicar filtra (Ctrl soma ou tira itens; o ícone limpa). As de tabela do Excel filtram a tabela; as de tabela dinâmica recalculam as dinâmicas ligadas e reescrevem as células, e fórmulas e gráficos que as leem acompanham. Ao salvar, as dinâmicas (itens escondidos, área, linhas e colunas) e a seleção da segmentação são gravadas.
+- [x] **Filtros das dinâmicas**: de rótulo (contém, começa com, maior que...), de data (entre, este mês, trimestre, ano até hoje...) e de valor ("10 maiores", percentual, soma, maior que...), em qualquer campo (também fora dos eixos). Nas planilhas de teste, **38 de 38** tabelas com registros saem idênticas ao Excel (94.065 valores iguais, 0 diferentes); a que faltava era uma ordenação por valor numa coluna específica.
+- [x] **Mostrar valores como**: % do total, da linha, da coluna, do pai (linha, coluna, campo), % de um item, diferença, % de diferença, acumulado, % do acumulado, posição (crescente e decrescente) e índice.
+- [x] **Linhas do tempo**: desenhadas (anos, trimestres, meses ou dias), clicar escolhe um período, Shift/Ctrl estende, o ícone limpa; as dinâmicas ligadas recalculam e a seleção é gravada (cache da linha do tempo e filtro da dinâmica).
+- [x] **Desfazer** o clique numa segmentação ou linha do tempo volta as células, as dinâmicas e a seleção.
+- [x] **Inserir/apagar linhas e colunas** move os objetos (gráficos, imagens, formas, segmentações, linhas do tempo, inclusive os que o app não desenha), as referências das séries dos gráficos (de qualquer aba), as dinâmicas e a fonte dos caches; dentro de uma dinâmica é bloqueado, como no Excel.
+- [x] **Imagens EMF** (as vetoriais do Windows que o Office cola): rasterizador próprio (`duck-emf`) com formas, curvas, preenchimentos, bitmaps, operações raster, recortes e texto (glifos do `duck-text`). SVG aparecem pela imagem reserva que o Office guarda junto.
 - [ ] Edição de gráficos, gráficos de dispersão completos.
-- [ ] Linhas do tempo (timelines), filtros de valor/rótulo das dinâmicas ("10 maiores"), mostrar valores como (% do total...).
-- [ ] Desfazer o clique numa segmentação de tabela dinâmica (hoje desfaz as células; a seleção da segmentação fica).
-- [ ] Inserir/apagar linhas e colunas move os objetos (hoje o app avisa e eles ficam onde estavam).
+- [ ] Imagens WMF; regiões de recorte não retangulares no EMF; registros EMF+ (os do Office têm a versão GDI junto).
+- [ ] Controles de formulário (botões, caixas de seleção) não andam ao inserir/apagar linhas.
+
+## ✅ Versão 1.0 do duck-sheets
+
+O que entra na primeira versão: tudo das fases F0 a F5. O que fica para depois: edição de gráficos, LAMBDA, VBA (preservado, não executado), formato nativo, impressão/PDF, `duck-docs` e `duck-slides`.
+
+- [x] Versão 1.0.0, "Sobre o duck-sheets" no menu Arquivo e `duck-sheets --version`.
+- [x] Pacotes (`scripts/package.sh`, fluxo `.github/workflows/release.yml` numa etiqueta `v*`): Windows (`.zip`), Linux (`.tar.gz` com `.desktop`) e macOS (`.app` com os tipos de arquivo, sem assinatura).
+- [ ] Teste manual de teclado e mouse na janela nos três sistemas.
+- [ ] Publicar a etiqueta `v1.0.0`.
+
+## ⏳ F6+ · O resto da suíte
+
 - [ ] VBA (hoje só preservado).
 - [ ] Formato de arquivo nativo (ADR-013, em discussão).
-- [x] macOS: compila, roda e passa no CI (Metal); o pacote `.app` assinado ainda não existe.
+- [ ] Assinatura e notarização do pacote do macOS; instalador do Windows.
 - [ ] `duck-docs` e `duck-slides` sobre a mesma camada `platform/`.
 
 ## Questões em aberto

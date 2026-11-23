@@ -1,7 +1,8 @@
 //! Imagens da aba (F5): PNG e JPEG das partes `xl/media/` são decodificadas
 //! numa thread depois de abrir, reduzidas se forem grandes e guardadas num
 //! atlas RGBA na GPU; o desenho é um retângulo com a região do atlas.
-//! Formatos vetoriais do Windows (EMF/WMF) ainda não são desenhados.
+//! Metarquivos EMF (vetoriais do Windows) são rasterizados pelo `duck-emf`;
+//! WMF ainda não.
 
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -29,6 +30,30 @@ pub struct Images {
     shelf: (u32, u32, u32),
 }
 
+/// Glifos do `duck-text` para o texto dos EMF.
+struct EmfText(duck_text::CpuGlyphs);
+
+impl duck_emf::Text for EmfText {
+    fn glyphs(&mut self, text: &str, f: &duck_emf::Font, x: f32, y: f32, out: &mut Vec<(i32, i32, f32)>) {
+        let st = self.0.style(&f.face, f.px, f.bold, f.italic);
+        self.0.coverage(text, st, x, y, out);
+    }
+    fn measure(&mut self, text: &str, f: &duck_emf::Font) -> f32 {
+        let st = self.0.style(&f.face, f.px, f.bold, f.italic);
+        self.0.measure(text, st)
+    }
+    fn ascent(&mut self, f: &duck_emf::Font) -> f32 {
+        let st = self.0.style(&f.face, f.px, f.bold, f.italic);
+        self.0.ascent(st)
+    }
+}
+
+// Glifos para os EMF: criados na primeira imagem com texto (carregam as
+// fontes do sistema), na thread das imagens.
+thread_local! {
+    static GLYPHS: std::cell::RefCell<Option<EmfText>> = const { std::cell::RefCell::new(None) };
+}
+
 fn decode(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     if bytes.starts_with(b"\x89PNG") {
         let mut d = png::Decoder::new(Cursor::new(bytes));
@@ -48,6 +73,14 @@ fn decode(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
             png::ColorType::Indexed => return None,
         };
         return Some((w, h, rgba));
+    }
+    if duck_emf::is_emf(bytes) {
+        let img = GLYPHS.with(|g| {
+            let mut g = g.borrow_mut();
+            let t = g.get_or_insert_with(|| EmfText(duck_text::CpuGlyphs::new()));
+            duck_emf::render_with(bytes, MAX_SIDE, Some(t))
+        })?;
+        return Some((img.w, img.h, img.rgba));
     }
     if bytes.starts_with(&[0xFF, 0xD8]) {
         use zune_jpeg::zune_core::colorspace::ColorSpace;

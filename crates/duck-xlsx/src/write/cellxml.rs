@@ -115,6 +115,10 @@ pub fn escape_attr(s: &str, out: &mut Vec<u8>) {
     }
 }
 
+/// Índice de metadados (`cm`) das matrizes dinâmicas no arquivo que está
+/// sendo gravado (0 = sem: a fórmula sai como matriz comum).
+pub static DYN_CM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Escreve a célula (linha, coluna) a partir do modelo. `extra` são
 /// atributos do `<c>` original a manter (ex.: ` cm="1"`), já formatados.
 /// Uma célula vazia e sem estilo não escreve nada.
@@ -164,6 +168,19 @@ pub fn write_cell_with(
         out.push(b'"');
     }
     out.extend_from_slice(extra);
+    // Matriz dinâmica nova: aponta para os metadados (`cm`).
+    if let Some(f) = formula
+        && matches!(f.kind, FormulaKind::Array { dynamic: true, .. })
+        && (row, col) == (f.anchor_row, f.anchor_col)
+        && memchr::memmem::find(extra, b"cm=").is_none()
+    {
+        let cm = DYN_CM.load(std::sync::atomic::Ordering::Relaxed);
+        if cm != 0 {
+            out.extend_from_slice(b" cm=\"");
+            push_u32(out, cm);
+            out.push(b'"');
+        }
+    }
     let body_start = out.len();
     out.push(b'>');
     let keep = orig_f.filter(|_| {
@@ -173,7 +190,7 @@ pub fn write_cell_with(
         out.extend_from_slice(orig);
     } else if let Some(f) = formula {
         match f.kind {
-            FormulaKind::Array(range) if (row, col) == (f.anchor_row, f.anchor_col) => {
+            FormulaKind::Array { range, .. } if (row, col) == (f.anchor_row, f.anchor_col) => {
                 out.extend_from_slice(b"<f t=\"array\" ref=\"");
                 cell_ref(range.first_row, range.first_col, out);
                 if (range.first_row, range.first_col) != (range.last_row, range.last_col) {

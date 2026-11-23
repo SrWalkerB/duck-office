@@ -409,7 +409,9 @@ impl Sheet {
                         },
                         (kind, _) => {
                             let kind = match kind {
-                                FormulaKind::Array(rg) => FormulaKind::Array(s.range(rg).unwrap_or(rg)),
+                                FormulaKind::Array { range, dynamic } => {
+                                    FormulaKind::Array { range: s.range(range).unwrap_or(range), dynamic }
+                                }
                                 k => k,
                             };
                             let text = self.formula_texts.push(&a1);
@@ -434,6 +436,19 @@ impl Sheet {
 
         // 3. Layout.
         shift_layout(&mut self.layout, s);
+        // Referências das séries dos gráficos (sempre com o nome da aba).
+        for o in &mut self.layout.objects {
+            if let crate::drawing::ObjectKind::Chart(c) = &mut o.kind {
+                for r in c.refs_mut() {
+                    if let Some((new, _)) = ops.adjust(r) {
+                        *r = new;
+                    }
+                }
+            }
+        }
+        if !self.layout.objects.is_empty() || !self.layout.pivots.is_empty() {
+            self.mark_pivots();
+        }
         // Colunas novas dentro de uma tabela: o cabeçalho recebe o nome da
         // coluna (o Excel exige o texto do cabeçalho igual ao nome).
         if s.axis == Axis::Cols && s.insert {
@@ -641,11 +656,46 @@ pub fn shift_layout(l: &mut Layout, s: Shift) {
         tables.push(t);
     }
     l.tables = tables;
+    // Desenhos, tabelas dinâmicas e as fontes dos caches.
+    for o in &mut l.objects {
+        o.anchor = o.anchor.shifted(s);
+    }
+    for a in &mut l.drawing_anchors {
+        a.anchor = a.anchor.shifted(s);
+    }
+    for p in &mut l.pivots {
+        if let Some(r) = s.range(p.range) {
+            p.range = r;
+        }
+    }
+    l.pivot_sources.retain_mut(|(_, r)| match s.range(*r) {
+        Some(n) => {
+            *r = n;
+            true
+        }
+        None => false,
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anchors_move() {
+        use crate::drawing::{Anchor, Marker};
+        let m = |row| Marker { col: 1, col_off: 5, row, row_off: 7 };
+        let a = Anchor::Two { from: m(3), to: m(8) };
+        // Inserir acima move; inserir dentro estica.
+        let ins = Shift { axis: Axis::Rows, at: 2, n: 2, insert: true };
+        assert_eq!(a.shifted(ins), Anchor::Two { from: m(5), to: m(10) });
+        let ins = Shift { axis: Axis::Rows, at: 5, n: 2, insert: true };
+        assert_eq!(a.shifted(ins), Anchor::Two { from: m(3), to: m(10) });
+        // Apagar o começo: o canto fica no começo do trecho apagado.
+        let del = Shift { axis: Axis::Rows, at: 2, n: 3, insert: false };
+        let Anchor::Two { from, to } = a.shifted(del) else { panic!() };
+        assert_eq!((from.row, from.row_off, to.row), (2, 0, 5));
+    }
 
     #[test]
     fn indexes_and_spans() {

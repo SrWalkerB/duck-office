@@ -7,5 +7,5 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-duck-core = { version = "0.1.0", path = "../duck-core" }
+duck-core = { version = "1.0.0", path = "../duck-core" }
 rayon = "1.12.0"

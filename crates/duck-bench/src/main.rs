@@ -15,6 +15,7 @@
 //! o arquivo de referência tem dados reais e nunca entra no repositório).
 
 mod calc;
+mod emf;
 mod generate;
 mod mem;
 mod roundtrip;
@@ -77,6 +78,7 @@ fn main() {
         "roundtrip" => roundtrip::cmd(rest),
         "calc" => calc::cmd(rest),
         "objetos" => calc::cmd_objects(rest),
+        "emf" => emf::cmd_emf(rest),
         "dinamicas" => calc::cmd_pivots(rest),
         "grupos" => calc::cmd_pivot_groups(rest),
         "celula" => calc::cmd_cell(rest),

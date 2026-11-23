@@ -543,6 +543,7 @@ pub fn cmd_objects(args: &[String]) -> Res {
                     sl.columns,
                     if sl.table.is_some() { " (de tabela)" } else { "" }
                 ),
+                ObjectKind::Timeline(t) => format!("linha do tempo (nível {})", t.level),
                 ObjectKind::Shape { .. } => "forma".into(),
                 ObjectKind::Picture { .. } => "imagem".into(),
             };
@@ -700,8 +701,9 @@ pub fn cmd_pivots(args: &[String]) -> Res {
                         println!(
                             "    empates: texto crescente {txt_asc}, decrescente {txt_desc}; posição crescente {pos_asc}, decrescente {pos_desc}"
                         );
-                        for k in i.saturating_sub(1)..(i + 6).min(t.row_items.len()) {
-                            let ex = t.row_items[k].x.first().copied().unwrap_or(0);
+                        let end = (i + 6).min(t.row_items.len());
+                        for (k, it) in t.row_items.iter().enumerate().take(end).skip(i.saturating_sub(1)) {
+                            let ex = it.x.first().copied().unwrap_or(0);
                             let ou = res.row_items.get(k).and_then(|a| a.x.first()).copied().unwrap_or(0);
                             println!(
                                 "      {k:>3}: Excel {:>4} {:<26} | nosso {:>4} {}",

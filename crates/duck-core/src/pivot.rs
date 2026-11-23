@@ -77,6 +77,8 @@ pub struct PivotCache {
     pub record_count: usize,
     /// Fonte externa (Modelo de Dados, conexão): sem registros, não recalcula.
     pub external: bool,
+    /// Fonte numa aba (`worksheetSource`): nome da aba e intervalo.
+    pub source: Option<(String, crate::CellRange)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -125,6 +127,9 @@ pub struct PivotField {
     pub sort: SortType,
     /// Ordem pelo valor de um campo de dados (`autoSortScope`): índice em `data_fields`.
     pub sort_by_data: Option<u32>,
+    /// Ordem por valor numa linha/coluna específica do outro eixo
+    /// (`autoSortScope` com referências): (campo, posição do item).
+    pub sort_refs: Vec<(u32, u32)>,
     pub items: Vec<FieldItem>,
     pub name: Option<String>,
     pub num_fmt: Option<u32>,
@@ -143,6 +148,7 @@ impl Default for PivotField {
             default_subtotal: true,
             sort: SortType::Manual,
             sort_by_data: None,
+            sort_refs: Vec::new(),
             items: Vec::new(),
             name: None,
             num_fmt: None,
@@ -151,14 +157,59 @@ impl Default for PivotField {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct DataField {
     pub name: String,
     pub fld: u32,
     /// sum, count, average, max, min, product, countNums, stdDev, stdDevp, var, varp.
     pub subtotal: String,
+    /// Mostrar valores como (`showDataAs`, ou o `pivotShowAs` do Excel 2010):
+    /// percentOfTotal, percentOfRow, percentOfCol, percentOfParentRow,
+    /// percentOfParentCol, percentOfParent, percent, difference,
+    /// percentDiff, runTotal, percentOfRunningTotal, rankAscending,
+    /// rankDescending, index. `None` = normal.
     pub show_as: Option<String>,
+    /// Campo e item base (`baseField`/`baseItem`; item 1048828 = anterior,
+    /// 1048829 = próximo).
+    pub base_field: i32,
+    pub base_item: u32,
     pub num_fmt: Option<u32>,
+}
+
+/// Item base "anterior" e "próximo" (`baseItem`).
+pub const BASE_PREVIOUS: u32 = 1_048_828;
+pub const BASE_NEXT: u32 = 1_048_829;
+
+/// Filtro de rótulo, data ou valor de um campo (`<filters><filter>`).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct PivotFilter {
+    pub fld: u32,
+    /// `type`: captionEqual, captionContains..., dateBetween, thisMonth...,
+    /// valueGreaterThan..., count, percent, sum (10 maiores).
+    pub kind: String,
+    /// Campo de dados avaliado (filtros de valor): índice em `data_fields`.
+    pub measure: u32,
+    pub eval_order: i32,
+    /// Critérios (`customFilter`): operador e valor, ligados por "e" (`and`) ou "ou".
+    pub custom: Vec<(String, String)>,
+    pub and: bool,
+    /// 10 maiores: (maiores?, valor).
+    pub top: Option<(bool, f64)>,
+    /// Datas: compara só o dia (`useWholeDay`).
+    pub whole_day: bool,
+    /// O elemento como estava no arquivo (`None` = criado ou mudado: o
+    /// gravador escreve a partir do modelo).
+    pub raw: Option<String>,
+    /// `id` e `name` do filtro no arquivo.
+    pub id: u32,
+    pub name: Option<String>,
+}
+
+impl PivotFilter {
+    /// Filtro pelo valor agregado (não pelo item).
+    pub fn by_value(&self) -> bool {
+        self.kind.starts_with("value") || matches!(self.kind.as_str(), "count" | "percent" | "sum")
+    }
 }
 
 /// Uma linha (ou coluna) do resultado como o Excel guarda (`rowItems/i`).
@@ -208,4 +259,6 @@ pub struct PivotTable {
     /// Erros aparecem como `error_caption` (`showError`).
     pub show_error: bool,
     pub error_caption: String,
+    /// Filtros de rótulo, data e valor.
+    pub filters: Vec<PivotFilter>,
 }

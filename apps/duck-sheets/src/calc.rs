@@ -12,8 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
+use duck_calc::recalc::{SpillOut, Spills};
 use duck_calc::{Book, Dirty, Engine, Graph, Overlay};
-use duck_core::{BookExtras, Command, Sheet, StringTable};
+use duck_core::{BookExtras, CellRange, CellValue, Command, FormulaKind, Sheet, StringTable};
 
 /// O que falta recalcular.
 #[derive(Clone, Debug, Default)]
@@ -54,6 +55,7 @@ pub struct Done {
     pub engine: Arc<Engine>,
     pub graph: Arc<Graph>,
     pub overlay: Overlay,
+    pub spills: Vec<SpillOut>,
     pub cells: u64,
     pub elapsed: Duration,
     pub cancelled: bool,
@@ -78,6 +80,10 @@ pub struct Calc {
     job: Option<Job>,
     /// Último cálculo (para a barra de status).
     pub last: Option<(Duration, u64, usize)>,
+    /// Matrizes dinâmicas: a área que cada uma ocupa (as células dela são do
+    /// resultado) e as que querem espalhar mas estão bloqueadas.
+    pub spills: Spills,
+    pub blocked: Spills,
 }
 
 impl Calc {
@@ -143,6 +149,9 @@ impl Calc {
         let reuse = if self.stale { None } else { self.engine.clone().zip(self.graph.clone()) };
         self.stale = false;
         let c = cancel.clone();
+        let owned = self.spills.clone();
+        let mut areas = owned.clone();
+        areas.extend(self.blocked.iter().map(|(k, v)| (*k, *v)));
         let handle = std::thread::Builder::new()
             .name("duck-calc".into())
             .spawn(move || {
@@ -161,15 +170,16 @@ impl Calc {
                         }
                         None => {
                             let e = Engine::new(&book);
-                            let g = Graph::build(&book, &e);
+                            let g = Graph::build_with(&book, &e, &areas);
                             (Arc::new(e), Arc::new(g))
                         }
                     };
-                    let out = graph.recalc(&book, &engine, &dirty, &c);
+                    let out = graph.recalc_with(&book, &engine, &dirty, &c, &owned);
                     Done {
                         engine,
                         graph,
                         overlay: out.overlay,
+                        spills: out.spills,
                         cells: out.cells,
                         elapsed: t.elapsed(),
                         cancelled: out.cancelled,
@@ -255,7 +265,162 @@ impl crate::app::SheetsApp {
         true
     }
 
+    /// As matrizes dinâmicas do arquivo, depois de carregar (ou de a
+    /// estrutura mudar): cada uma ocupa a área gravada.
+    pub fn init_spills(&mut self) {
+        let Some(doc) = &mut self.doc else { return };
+        let mut owned = Spills::new();
+        for (i, s) in doc.sheets.iter().enumerate() {
+            let Some(sh) = &s.data else { continue };
+            for (r, c, rg, dynamic) in sh.array_formulas() {
+                if dynamic {
+                    owned.insert((i as u32, r, c), rg);
+                }
+            }
+        }
+        doc.calc.spills = owned;
+        doc.calc.blocked.clear();
+        doc.calc.stale = true;
+    }
+
+    /// Depois de uma edição (`cells` = células mexidas pelo usuário):
+    /// matrizes que perderam a fórmula soltam a área (limpa); escrever na
+    /// área de uma matriz a bloqueia (`#DESPEJAR!`, como no Excel).
+    pub fn check_spills(&mut self, cells: &[(usize, u32, u32)]) {
+        let Some(doc) = &mut self.doc else { return };
+        if doc.calc.spills.is_empty() && doc.calc.blocked.is_empty() {
+            return;
+        }
+        // (aba, área, fórmula, célula escrita pelo usuário).
+        type Clear = (usize, CellRange, (u32, u32), Option<(u32, u32)>);
+        let mut clear: Vec<Clear> = Vec::new();
+        let mut gone = Vec::new();
+        for (&(s, r, c), &rg) in &doc.calc.spills {
+            let Some(sh) = doc.sheets.get(s as usize).and_then(|x| x.data.as_ref()) else { continue };
+            let alive =
+                matches!(sh.formula(r, c).map(|f| f.kind), Some(FormulaKind::Array { dynamic: true, .. }))
+                    || sh.formula(r, c).is_some() && sh.edits().has(r, c);
+            let hit = cells
+                .iter()
+                .find(|&&(i, rr, cc)| i == s as usize && rg.contains(rr, cc) && (rr, cc) != (r, c));
+            if !alive {
+                clear.push((s as usize, rg, (r, c), None));
+                gone.push(((s, r, c), None));
+            } else if let Some(&(_, rr, cc)) = hit {
+                clear.push((s as usize, rg, (r, c), Some((rr, cc))));
+                gone.push(((s, r, c), Some(rg)));
+            }
+        }
+        doc.calc.blocked.retain(|&(s, r, c), _| {
+            doc.sheets
+                .get(s as usize)
+                .and_then(|x| x.data.as_ref())
+                .is_some_and(|sh| sh.formula(r, c).is_some())
+        });
+        if clear.is_empty() {
+            return;
+        }
+        for (key, keep) in gone {
+            doc.calc.spills.remove(&key);
+            if let Some(rg) = keep {
+                doc.calc.blocked.insert(key, rg);
+            }
+        }
+        let mut dirty = Vec::new();
+        for (i, rg, master, user) in clear {
+            let Some(sheet) = doc.sheets.get_mut(i).and_then(crate::edit::sheet_mut) else { continue };
+            let mut vals = Vec::new();
+            for r in rg.first_row..=rg.last_row {
+                for c in rg.first_col..=rg.last_col {
+                    if (r, c) == master || Some((r, c)) == user || cells.contains(&(i, r, c)) {
+                        continue;
+                    }
+                    if sheet.raw(r, c).formula == 0 && sheet.has_value(r, c) {
+                        vals.push((r, c, CellValue::Empty));
+                        dirty.push((i as u32, r, c));
+                    }
+                }
+            }
+            sheet.set_spill_values(vals);
+            dirty.push((i as u32, master.0, master.1));
+        }
+        doc.calc.stale = true;
+        doc.calc.request(Pending::Cells(dirty));
+    }
+
+    /// Aplica o que as matrizes espalharam: valores nas vizinhas, área nova
+    /// da fórmula e limpeza do que sobrou da área antiga.
+    fn apply_spills(&mut self, spills: Vec<SpillOut>) {
+        let Some(doc) = &mut self.doc else { return };
+        let mut dirty: Vec<(u32, u32, u32)> = Vec::new();
+        let mut structural = false;
+        for sp in spills {
+            let key = (sp.sheet, sp.row, sp.col);
+            let old = doc.calc.spills.get(&key).copied();
+            let Some(sheet) = doc.sheets.get_mut(sp.sheet as usize).and_then(crate::edit::sheet_mut) else {
+                continue;
+            };
+            let mut vals: Vec<(u32, u32, CellValue)> = Vec::new();
+            // O que sobrou da área antiga.
+            if let Some(o) = old {
+                for r in o.first_row..=o.last_row {
+                    for c in o.first_col..=o.last_col {
+                        let inside = sp.range.is_some_and(|n| n.contains(r, c));
+                        if !inside
+                            && (r, c) != (sp.row, sp.col)
+                            && sheet.raw(r, c).formula == 0
+                            && sheet.has_value(r, c)
+                        {
+                            vals.push((r, c, CellValue::Empty));
+                        }
+                    }
+                }
+            }
+            for (r, c, v) in sp.values {
+                let same = match (&v, sheet.cell(r, c, &doc.strings).value) {
+                    (CellValue::Number(a), duck_core::Value::Number(b)) => *a == b,
+                    (CellValue::Text(a), duck_core::Value::Text(b)) => a == b,
+                    (CellValue::Bool(a), duck_core::Value::Bool(b)) => *a == b,
+                    (CellValue::Error(a), duck_core::Value::Error(b)) => *a == b,
+                    (CellValue::Empty, duck_core::Value::Empty) => true,
+                    _ => false,
+                };
+                if !same {
+                    vals.push((r, c, v));
+                }
+            }
+            dirty.extend(vals.iter().map(|v| (sp.sheet, v.0, v.1)));
+            sheet.set_spill_values(vals);
+            if sp.fixed {
+                continue;
+            }
+            // Área da fórmula: a nova, ou só a célula (bloqueada / valor único).
+            let single =
+                CellRange { first_row: sp.row, first_col: sp.col, last_row: sp.row, last_col: sp.col };
+            let area = sp.range.unwrap_or(single);
+            if sheet.set_formula_kind(sp.row, sp.col, FormulaKind::Array { range: area, dynamic: true }) {
+                structural |= old != sp.range;
+            }
+            match sp.range {
+                Some(rg) if rg != single => {
+                    doc.calc.spills.insert(key, rg);
+                    doc.calc.blocked.remove(&key);
+                }
+                _ => {
+                    doc.calc.spills.remove(&key);
+                }
+            }
+        }
+        if structural {
+            doc.calc.stale = true;
+        }
+        if !dirty.is_empty() {
+            doc.calc.request(Pending::Cells(dirty));
+        }
+    }
+
     fn apply_calc(&mut self, done: Done) {
+        let spills = done.spills;
         let Some(doc) = &mut self.doc else { return };
         let changed = done.overlay.len();
         let mut per_sheet: Vec<Vec<(u32, u32, duck_core::CellValue)>> = vec![Vec::new(); doc.sheets.len()];
@@ -281,6 +446,9 @@ impl crate::app::SheetsApp {
             }
         }
         self.stats = None;
+        if !spills.is_empty() {
+            self.apply_spills(spills);
+        }
         if changed > 0 {
             self.refresh_charts();
         }

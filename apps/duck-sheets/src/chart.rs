@@ -6,7 +6,8 @@
 //! triângulos e texto do `Painter`.
 
 use duck_core::drawing::{
-    Anchor, Chart, ChartColor, Grouping, LegendPos, Object, ObjectKind, Plot, PlotKind, Slicer, map_rgb,
+    Anchor, Chart, ChartColor, Grouping, LegendPos, Object, ObjectKind, Plot, PlotKind, Slicer, Timeline,
+    map_rgb,
 };
 use duck_core::{NumFmt, Styles};
 use duck_text::TextStyle;
@@ -99,6 +100,7 @@ pub fn draw_objects(p: &mut Painter, cx: &ObjCtx, objects: &[Object], v: &View, 
         match &o.kind {
             ObjectKind::Chart(c) => draw_chart(p, cx, c, r, &clip),
             ObjectKind::Slicer(s) => draw_slicer(p, cx, s, r, &clip),
+            ObjectKind::Timeline(t) => draw_timeline(p, cx, t, r, &clip),
             ObjectKind::Shape { text, fill, line } => {
                 if let Some(f) = fill {
                     p.fill(r, &clip, rgba(resolve(*f, cx.styles)));
@@ -1231,7 +1233,9 @@ impl crate::app::SheetsApp {
             }
             // De cima para baixo: o último desenhado é o de cima.
             for (oi, o) in sheet.layout.objects.iter().enumerate().rev() {
-                let ObjectKind::Slicer(s) = &o.kind else { continue };
+                if !matches!(o.kind, ObjectKind::Slicer(_) | ObjectKind::Timeline(_)) {
+                    continue;
+                }
                 let [ox, oy, w, h] = object_rect(o, v);
                 let r = Rect::new(
                     q.rect.x0 + ((ox - q.ox) * g.g as f64) as f32,
@@ -1242,6 +1246,20 @@ impl crate::app::SheetsApp {
                 if !r.contains(x, y) {
                     continue;
                 }
+                let s = match &o.kind {
+                    ObjectKind::Slicer(s) => s,
+                    ObjectKind::Timeline(t) => {
+                        let periods = timeline_periods(t);
+                        let geo = timeline_geom(t, &periods, r, g.g, lh);
+                        if t.show_header && geo.clear.inset(-2.0 * g.g).contains(x, y) {
+                            return Some((oi, None));
+                        }
+                        let hit =
+                            geo.bars.iter().find(|b| b.1.x0 <= x && x < b.1.x1 + g.g && y >= geo.label_y);
+                        return hit.map(|b| (oi, Some(b.0)));
+                    }
+                    _ => continue,
+                };
                 let geo = slicer_geom(s, r, g.g, lh);
                 if geo.clear.inset(-2.0 * g.g).contains(x, y) {
                     return Some((oi, None));
@@ -1260,6 +1278,11 @@ impl crate::app::SheetsApp {
         use duck_core::{AutoFilter, CellRange, FilterColumn, FilterKind};
         let Some(doc) = self.doc.as_ref() else { return };
         let Some((sheet, _)) = doc.current() else { return };
+        // Linha do tempo: Ctrl/Shift estende a seleção.
+        if matches!(sheet.layout.objects.get(obj).map(|o| &o.kind), Some(ObjectKind::Timeline(_))) {
+            self.timeline_click(obj, item, ctrl);
+            return;
+        }
         let Some(ObjectKind::Slicer(s)) = sheet.layout.objects.get(obj).map(|o| &o.kind) else { return };
         if s.pivot.is_some() {
             self.pivot_slicer_click(obj, item, ctrl);
@@ -1314,5 +1337,172 @@ impl crate::app::SheetsApp {
             af.columns.sort_by_key(|c| c.col);
         }
         self.set_filter(crate::filter::Target::Table(ti as u32), Some(af), None);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Linhas do tempo
+// ---------------------------------------------------------------------------
+
+/// Um período da linha do tempo: [início, fim) em seriais, o rótulo e o
+/// grupo de cima (o ano; nos dias, o mês e o ano).
+pub struct Period {
+    pub start: f64,
+    pub end: f64,
+    pub label: String,
+    pub group: String,
+}
+
+const MONTHS: [&str; 12] =
+    ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"];
+
+/// Os períodos do nível da linha do tempo, dentro do período dos dados.
+pub fn timeline_periods(t: &Timeline) -> Vec<Period> {
+    use duck_core::input::serial;
+    let (a, b) = t.bounds;
+    let Some(d0) = duck_core::numfmt::serial_to_datetime(a.max(1.0), false, 0) else { return Vec::new() };
+    let mut out = Vec::new();
+    let (mut y, mut m, mut d) = (d0.year, d0.month, d0.day);
+    while out.len() < 5000 {
+        let (start, end, label, group) = match t.level {
+            0 => (serial(y, 1, 1), serial(y + 1, 1, 1), y.to_string(), String::new()),
+            1 => {
+                let q = (m - 1) / 3;
+                let s = serial(y, q * 3 + 1, 1);
+                let e = if q == 3 { serial(y + 1, 1, 1) } else { serial(y, q * 3 + 4, 1) };
+                (s, e, format!("T{}", q + 1), y.to_string())
+            }
+            3 => {
+                let s = serial(y, m, d);
+                (s, s + 1.0, d.to_string(), format!("{} {y}", MONTHS[(m - 1) as usize]))
+            }
+            _ => {
+                let s = serial(y, m, 1);
+                let e = if m == 12 { serial(y + 1, 1, 1) } else { serial(y, m + 1, 1) };
+                (s, e, MONTHS[(m - 1) as usize].to_uppercase(), y.to_string())
+            }
+        };
+        if start >= b && !out.is_empty() {
+            break;
+        }
+        out.push(Period { start, end, label, group });
+        let Some(n) = duck_core::numfmt::serial_to_datetime(end, false, 0) else { break };
+        (y, m, d) = (n.year, n.month, n.day);
+    }
+    out
+}
+
+/// Texto da seleção ("mai 2025 - nov 2026").
+fn timeline_label(t: &Timeline) -> String {
+    let Some((a, b)) = t.selection else { return "Todos os Períodos".into() };
+    let part = |s: f64| -> String {
+        let Some(d) = duck_core::numfmt::serial_to_datetime(s, false, 0) else { return String::new() };
+        match t.level {
+            0 => d.year.to_string(),
+            1 => format!("T{} {}", (d.month - 1) / 3 + 1, d.year),
+            3 => format!("{:02}/{:02}/{}", d.day, d.month, d.year),
+            _ => format!("{} {}", MONTHS[(d.month - 1) as usize], d.year),
+        }
+    };
+    let (x, y) = (part(a), part(b));
+    if x == y { x } else { format!("{x} - {y}") }
+}
+
+/// Onde ficam as partes de uma linha do tempo na tela.
+pub struct TimelineGeom {
+    pub caption: Option<(f32, f32)>,
+    pub clear: Rect,
+    /// Linha do texto da seleção e do nível.
+    pub info_y: Option<f32>,
+    pub group_y: f32,
+    pub label_y: f32,
+    /// Barra de cada período visível: (índice em `timeline_periods`, retângulo).
+    pub bars: Vec<(usize, Rect)>,
+}
+
+pub fn timeline_geom(t: &Timeline, periods: &[Period], r: Rect, g: f32, lh: f32) -> TimelineGeom {
+    let pad = 6.0 * g;
+    let mut y = r.y0 + pad;
+    let x = r.x1 - pad - 14.0 * g;
+    let clear = Rect::new(x, y + lh / 2.0 - 6.0 * g, x + 12.0 * g, y + lh / 2.0 + 6.0 * g);
+    let caption = if t.show_header {
+        let c = (r.x0 + pad, y);
+        y += lh + 4.0 * g;
+        Some(c)
+    } else {
+        None
+    };
+    let info_y = if t.show_selection_label || t.show_time_level {
+        let v = y;
+        y += lh + 6.0 * g;
+        Some(v)
+    } else {
+        None
+    };
+    let group_y = y;
+    y += lh + 2.0 * g;
+    let label_y = y;
+    y += lh + 3.0 * g;
+    let bh = (12.0 * g).max(4.0);
+    let pw = [64.0, 52.0, 40.0, 24.0][t.level.min(3) as usize] * g;
+    let first = periods.iter().position(|p| p.end > t.scroll).unwrap_or(0);
+    let mut bars = Vec::new();
+    let mut bx = r.x0 + pad;
+    for (i, _) in periods.iter().enumerate().skip(first) {
+        if bx + pw > r.x1 - pad + 0.5 || y + bh > r.y1 - 2.0 {
+            break;
+        }
+        bars.push((i, Rect::new(bx, y, bx + pw - 1.0 * g, y + bh)));
+        bx += pw;
+    }
+    TimelineGeom { caption, clear, info_y, group_y, label_y, bars }
+}
+
+fn draw_timeline(p: &mut Painter, cx: &ObjCtx, t: &Timeline, r: Rect, clip: &Rect) {
+    let g = cx.g;
+    p.fill(r, clip, rgb(0xFFFFFF));
+    p.stroke(r, clip, g.max(1.0), rgb(0xBFBFBF));
+    let font = cx.font.with_px((8.0 * 96.0 / 72.0 * g).round().max(5.0));
+    let lh = p.text.line_height_of(font);
+    let periods = timeline_periods(t);
+    let geo = timeline_geom(t, &periods, r, g, lh);
+    let ink = rgb(0x262626);
+    let soft = rgb(0x7F7F7F);
+    if let Some((x, y)) = geo.caption {
+        let mut cap = font;
+        cap.bold = true;
+        let cclip = clip.intersect(&Rect::new(r.x0, r.y0, geo.clear.x0 - 4.0 * g, r.y1));
+        p.text(&t.caption, cap, x, y, &cclip, ink);
+        let c = if t.selection.is_some() { rgb(0xC00000) } else { rgb(0xBFBFBF) };
+        p.stroke(geo.clear, clip, g.max(1.0), c);
+        let (a, b) = (geo.clear.inset(3.0 * g), g.max(1.0));
+        p.line([a.x0, a.y0], [a.x1, a.y1], b, clip, c);
+        p.line([a.x1, a.y0], [a.x0, a.y1], b, clip, c);
+    }
+    let pad = 6.0 * g;
+    if let Some(y) = geo.info_y {
+        if t.show_selection_label {
+            p.text(&timeline_label(t), font, r.x0 + pad, y, clip, ink);
+        }
+        if t.show_time_level {
+            let lv = ["ANOS", "TRIMESTRES", "MESES", "DIAS"][t.level.min(3) as usize];
+            p.text_aligned(lv, font, r.x0 + pad, r.x1 - pad, y, Align::Right, clip, soft);
+        }
+    }
+    // Cor da seleção: o primeiro tom de destaque do tema.
+    let accent = cx.styles.theme.color(4);
+    let on = rgba(map_rgb(accent, |c| c + (255.0 - c) * 0.25));
+    let off = rgb(0xE7E6E6);
+    let mut last_group = None;
+    for &(i, b) in &geo.bars {
+        let pd = &periods[i];
+        if last_group.as_deref() != Some(pd.group.as_str()) {
+            p.text(&pd.group, font, b.x0, geo.group_y, clip, ink);
+            last_group = Some(pd.group.clone());
+        }
+        let lclip = clip.intersect(&Rect::new(b.x0, geo.label_y, b.x1, geo.label_y + lh));
+        p.text_aligned(&pd.label, font, b.x0, b.x1, geo.label_y, Align::Center, &lclip, soft);
+        let sel = t.selection.is_none_or(|(a, z)| pd.start <= z && pd.end - 1.0 >= a);
+        p.fill(b, clip, if sel { on } else { off });
     }
 }

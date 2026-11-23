@@ -7,15 +7,13 @@ use std::collections::{HashMap, HashSet};
 
 use duck_calc::pivot::{self as engine, PivotResult};
 use duck_core::drawing::ObjectKind;
-use duck_core::pivot::{PItem, PivotCache, PivotTable, Records};
+use duck_core::pivot::{PItem, PivotCache, PivotFilter, PivotTable, Records};
 use duck_core::{CellChange, CellRange, CellValue, Command, Sheet, StringTable};
 
 /// Caches com os registros já lidos (sob demanda: só no primeiro clique).
 #[derive(Default)]
 pub struct PivotState {
     pub loaded: HashMap<u32, (PivotCache, Records)>,
-    /// Abas com tabelas dinâmicas ou segmentações mudadas (para salvar).
-    pub changed: HashSet<usize>,
 }
 
 /// Valor de célula de um item (rótulo).
@@ -182,7 +180,6 @@ impl crate::app::SheetsApp {
     /// Clique numa segmentação de tabela dinâmica.
     pub fn pivot_slicer_click(&mut self, obj: usize, item: Option<usize>, ctrl: bool) {
         let Some(doc) = self.doc.as_ref() else { return };
-        let active = doc.active;
         let Some((sheet, _)) = doc.current() else { return };
         let Some(ObjectKind::Slicer(s)) = sheet.layout.objects.get(obj).map(|o| o.kind.clone()) else {
             return;
@@ -208,15 +205,118 @@ impl crate::app::SheetsApp {
         }
         let visible: HashSet<u32> =
             link.item_x.iter().zip(&chosen).filter(|(_, c)| **c).map(|(x, _)| *x).collect();
+        let source = link.source.clone();
+        let part = link.part.clone();
+        self.update_pivots(
+            &link.cache_id,
+            &link.tables,
+            &|nt, cache| {
+                let Some(field) = cache.fields.iter().position(|f| f.name.trim() == source.trim()) else {
+                    return;
+                };
+                if let Some(f) = nt.fields.get_mut(field) {
+                    for it in &mut f.items {
+                        if it.t.is_none()
+                            && let Some(x) = it.x
+                        {
+                            it.hidden = !visible.contains(&x);
+                        }
+                    }
+                }
+            },
+            &mut |kind| {
+                if let ObjectKind::Slicer(x) = kind
+                    && x.pivot.as_ref().is_some_and(|p| p.part == part)
+                {
+                    for (it, c) in x.items.iter_mut().zip(&chosen) {
+                        it.1 = *c;
+                    }
+                }
+            },
+        );
+    }
 
+    /// Clique numa linha do tempo: um período (Shift estende a seleção) ou
+    /// limpar (`None`).
+    pub fn timeline_click(&mut self, obj: usize, period: Option<usize>, shift: bool) {
+        let Some(doc) = self.doc.as_ref() else { return };
+        let Some((sheet, _)) = doc.current() else { return };
+        let Some(ObjectKind::Timeline(tl)) = sheet.layout.objects.get(obj).map(|o| o.kind.clone()) else {
+            return;
+        };
+        let periods = crate::chart::timeline_periods(&tl);
+        let sel = match period.and_then(|i| periods.get(i)) {
+            None => None,
+            Some(p) => {
+                let (a, b) = (p.start, p.end - 1.0);
+                match tl.selection {
+                    Some((s0, s1)) if shift => Some((s0.min(a), s1.max(b))),
+                    _ => Some((a, b)),
+                }
+            }
+        };
+        if sel == tl.selection {
+            return;
+        }
+        let (source, part, name) = (tl.source.clone(), tl.part.clone(), tl.name.clone());
+        self.update_pivots(
+            &tl.cache_id,
+            &tl.tables,
+            &|nt, cache| {
+                let Some(fld) = cache.fields.iter().position(|f| f.name.trim() == source.trim()) else {
+                    return;
+                };
+                // O filtro de datas do campo é o da linha do tempo.
+                let old = nt.filters.iter().position(|f| f.fld as usize == fld && !f.by_value());
+                let prev = old.map(|i| nt.filters.remove(i));
+                if let Some((a, b)) = sel {
+                    let id = prev
+                        .as_ref()
+                        .map(|p| p.id)
+                        .unwrap_or_else(|| nt.filters.iter().map(|f| f.id).max().unwrap_or(0) + 1);
+                    nt.filters.push(PivotFilter {
+                        fld: fld as u32,
+                        kind: "dateBetween".into(),
+                        eval_order: -1,
+                        custom: vec![
+                            ("greaterThanOrEqual".into(), format!("{}", a as i64)),
+                            ("lessThanOrEqual".into(), format!("{}", b as i64)),
+                        ],
+                        and: true,
+                        whole_day: true,
+                        id,
+                        name: prev.and_then(|p| p.name).or_else(|| Some(name.clone())),
+                        ..Default::default()
+                    });
+                }
+            },
+            &mut |kind| {
+                if let ObjectKind::Timeline(x) = kind
+                    && x.part == part
+                {
+                    x.selection = sel;
+                }
+            },
+        );
+    }
+
+    /// Recalcula as tabelas dinâmicas `tables` (nomes) do cache `cache_x14`
+    /// depois de `edit` mudar cada uma, reescreve as células e ajusta os
+    /// objetos ligados (`objects`: seleção das segmentações e linhas do
+    /// tempo) em todas as abas. Tudo num passo de desfazer: o layout novo
+    /// vai junto das células.
+    fn update_pivots(
+        &mut self,
+        cache_x14: &str,
+        tables: &[(u32, String)],
+        edit: &dyn Fn(&mut PivotTable, &PivotCache),
+        objects: &mut dyn FnMut(&mut ObjectKind),
+    ) {
+        let Some(doc) = self.doc.as_ref() else { return };
+        let active = doc.active;
         // Cache (com os registros, lidos uma vez).
-        let Some(meta) = doc
-            .calc
-            .extras
-            .pivot_caches
-            .iter()
-            .find(|c| c.x14_id.as_deref() == Some(link.cache_id.as_str()))
-            .cloned()
+        let Some(meta) =
+            doc.calc.extras.pivot_caches.iter().find(|c| c.x14_id.as_deref() == Some(cache_x14)).cloned()
         else {
             self.message = "Cache da tabela dinâmica não encontrado".into();
             return;
@@ -240,82 +340,44 @@ impl crate::app::SheetsApp {
         }
         let Some(doc) = self.doc.as_ref() else { return };
         let (cache, rec) = &doc.pivots.loaded[&cache_id];
-        let Some(field) = cache.fields.iter().position(|f| f.name.trim() == link.source.trim()) else {
-            return;
-        };
-        let names: HashSet<&str> = link.tables.iter().map(|t| t.1.as_str()).collect();
+        let names: HashSet<&str> = tables.iter().map(|t| t.1.as_str()).collect();
 
-        // Novas tabelas e as mudanças de célula, aba por aba.
         let mut step: crate::edit::Step = Vec::new();
-        let mut new_tables: Vec<(usize, usize, PivotTable)> = Vec::new();
+        let mut total = 0;
         for (si, slot) in doc.sheets.iter().enumerate() {
             let Some(sh) = &slot.data else { continue };
+            let mut layout = sh.layout.clone();
             let mut cells = Vec::new();
             for (ti, t) in sh.layout.pivots.iter().enumerate() {
                 if t.cache_id != cache_id || !names.contains(t.name.as_str()) {
                     continue;
                 }
                 let mut nt = t.clone();
-                if let Some(f) = nt.fields.get_mut(field) {
-                    for it in &mut f.items {
-                        if it.t.is_none()
-                            && let Some(x) = it.x
-                        {
-                            it.hidden = !visible.contains(&x);
-                        }
-                    }
-                }
+                edit(&mut nt, cache);
                 let res = engine::compute(&nt, cache, rec);
                 let (out, range) = render(&nt, cache, &res);
                 cells.extend(changes(sh, &doc.strings, t.range, out, range));
                 nt.range = range;
                 nt.row_items = res.row_items;
                 nt.col_items = res.col_items;
-                new_tables.push((si, ti, nt));
+                layout.pivots[ti] = nt;
             }
-            if !cells.is_empty() {
-                step.push((si, Command::SetCells(cells)));
+            for o in &mut layout.objects {
+                objects(&mut o.kind);
             }
-        }
-        // Grava: modelos das tabelas, seleção das segmentações e as células.
-        let part = link.part.clone();
-        let Some(doc) = self.doc.as_mut() else { return };
-        for (si, ti, nt) in new_tables {
-            if let Some(sh) = doc.sheets.get_mut(si).and_then(crate::edit::sheet_mut)
-                && let Some(t) = sh.layout.pivots.get_mut(ti)
-            {
-                *t = nt;
-                sh.mark_pivots();
-            }
-            doc.pivots.changed.insert(si);
-        }
-        for si in 0..doc.sheets.len() {
-            let has = doc.sheets[si].data.as_ref().is_some_and(|d| {
-                d.layout.objects.iter().any(|o| matches!(&o.kind, ObjectKind::Slicer(x) if x.pivot.as_ref().is_some_and(|p| p.part == part)))
-            });
-            if !has {
+            if layout == sh.layout && cells.is_empty() {
                 continue;
             }
-            if let Some(sh) = doc.sheets.get_mut(si).and_then(crate::edit::sheet_mut) {
-                sh.mark_pivots();
-                for o in &mut sh.layout.objects {
-                    if let ObjectKind::Slicer(x) = &mut o.kind
-                        && x.pivot.as_ref().is_some_and(|p| p.part == part)
-                    {
-                        for (it, c) in x.items.iter_mut().zip(&chosen) {
-                            it.1 = *c;
-                        }
-                    }
-                }
+            total += cells.len();
+            let mut cmds = Vec::new();
+            if !cells.is_empty() {
+                cmds.push(Command::SetCells(cells));
             }
-            doc.pivots.changed.insert(si);
+            if layout != sh.layout {
+                cmds.push(Command::Layout(Box::new(layout)));
+            }
+            step.push((si, Command::Group(cmds)));
         }
-        doc.dirty = true;
-        let n = step.iter().map(|s| match &s.1 {
-            Command::SetCells(c) => c.len(),
-            _ => 0,
-        });
-        let total: usize = n.sum();
         if !step.is_empty() {
             self.run_step(step);
         }

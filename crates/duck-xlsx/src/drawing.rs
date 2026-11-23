@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use duck_core::drawing::{
     Anchor, Chart, ChartAxis, ChartColor, Grouping, LegendPos, Marker, Object, ObjectKind, Plot, PlotKind,
-    Series, Slicer,
+    Series, Slicer, Timeline,
 };
 
 use crate::package::Package;
@@ -547,6 +547,70 @@ pub fn parse_chart(xml: &[u8]) -> Option<Chart> {
 #[derive(Default)]
 pub struct SlicerCaches {
     by_name: HashMap<String, Slicer>,
+    /// Caches de linha do tempo, por nome.
+    timelines: HashMap<String, Timeline>,
+}
+
+/// `2026-01-06T00:00:00` → serial (só o dia).
+fn iso_day(s: &str) -> Option<f64> {
+    crate::pivot::iso_date(s).map(f64::floor)
+}
+
+/// Cache de linha do tempo (`xl/timelineCaches/`).
+fn parse_timeline_cache(x: &[u8], part: &str) -> Option<(String, Timeline)> {
+    let def = find_tag(x, 0, b"timelineCacheDefinition")?;
+    let name = attr_str(def.attrs, b"name").unwrap_or_default();
+    let mut t = Timeline {
+        part: part.to_string(),
+        source: attr_str(def.attrs, b"sourceName").unwrap_or_default(),
+        ..Default::default()
+    };
+    for_each(x, b"pivotTable", |a, _| {
+        if let (Some(tab), Some(n)) = (num_attr(a, b"tabId"), attr_str(a, b"name")) {
+            t.tables.push((tab as u32, n));
+        }
+    });
+    if let Some(st) = find_tag(x, 0, b"state") {
+        t.cache_id = attr_str(st.attrs, b"pivotCacheId").unwrap_or_default();
+    }
+    let range = |tag: &[u8]| {
+        find_tag(x, 0, tag).and_then(|s| {
+            let a = attr_str(s.attrs, b"startDate").and_then(|v| iso_day(&v))?;
+            let b = attr_str(s.attrs, b"endDate").and_then(|v| iso_day(&v))?;
+            Some((a, b))
+        })
+    };
+    t.selection = range(b"selection");
+    t.bounds = range(b"bounds").unwrap_or((0.0, 0.0));
+    Some((name, t))
+}
+
+/// Linhas do tempo de uma aba (`xl/timelines/timelineN.xml`), por nome.
+fn read_timelines(pkg: &Package, sheet_part: &str, caches: &SlicerCaches) -> HashMap<String, Timeline> {
+    let mut out = HashMap::new();
+    for (_, kind, target) in parts::rel_targets_typed(pkg, sheet_part) {
+        if !kind.ends_with("/timeline") {
+            continue;
+        }
+        let Ok(x) = pkg.read(&target) else { continue };
+        for_each(&x, b"timeline", |a, _| {
+            let Some(name) = attr_str(a, b"name") else { return };
+            let cache = attr_str(a, b"cache").unwrap_or_default();
+            let mut t = caches.timelines.get(&cache).cloned().unwrap_or_default();
+            t.name = name.clone();
+            t.caption = attr_str(a, b"caption").unwrap_or_else(|| t.source.clone());
+            let on = |k: &[u8]| attr(a, k) != Some(b"0");
+            t.show_header = on(b"showHeader");
+            t.show_selection_label = on(b"showSelectionLabel");
+            t.show_time_level = on(b"showTimeLevel");
+            t.show_scrollbar = on(b"showHorizontalScrollbar");
+            t.level = num_attr(a, b"level").unwrap_or(2.0) as u32;
+            t.scroll = attr_str(a, b"scrollPosition").and_then(|v| iso_day(&v)).unwrap_or(t.bounds.0);
+            t.style = attr_str(a, b"style");
+            out.insert(name, t);
+        });
+    }
+    out
 }
 
 /// Lê os caches de segmentação e os itens (dos caches de tabela dinâmica).
@@ -588,6 +652,14 @@ pub fn read_slicer_caches(pkg: &Package, workbook: &str) -> SlicerCaches {
         });
         if !id.is_empty() {
             pivot_fields.insert(id, fields);
+        }
+    }
+    for (_, kind, target) in &rels {
+        if kind.ends_with("/timelineCache")
+            && let Ok(x) = pkg.read(target)
+            && let Some((name, t)) = parse_timeline_cache(&x, target)
+        {
+            out.timelines.insert(name, t);
         }
     }
     for (_, kind, target) in &rels {
@@ -673,6 +745,7 @@ struct Walk<'a> {
     drawing: &'a str,
     rels: &'a [(String, String, String)],
     slicers: &'a HashMap<String, Slicer>,
+    timelines: &'a HashMap<String, Timeline>,
     anchor: Anchor,
     /// Retângulo do elemento de cima (frações dos filhos são em relação a ele).
     top: Option<R>,
@@ -739,14 +812,20 @@ impl Walk<'_> {
                         let rid = attr_str(c.attrs, b"r:id").unwrap_or_default();
                         if let Some((_, _, target)) = self.rels.iter().find(|r| r.0 == rid)
                             && let Ok(x) = self.pkg.read(target)
-                            && let Some(chart) = parse_chart(&x)
+                            && let Some(mut chart) = parse_chart(&x)
                         {
+                            chart.part = target.clone();
                             self.push(rect, ObjectKind::Chart(Box::new(chart)));
                         }
                     } else if let Some(s) = find_tag(el.body, 0, b"sle:slicer") {
                         let name = attr_str(s.attrs, b"name").unwrap_or_default();
                         if let Some(sl) = self.slicers.get(&name) {
                             self.push(rect, ObjectKind::Slicer(Box::new(sl.clone())));
+                        }
+                    } else if let Some(s) = find_tag(el.body, 0, b"tsle:timeslicer") {
+                        let name = attr_str(s.attrs, b"name").unwrap_or_default();
+                        if let Some(tl) = self.timelines.get(&name) {
+                            self.push(rect, ObjectKind::Timeline(Box::new(tl.clone())));
                         }
                     }
                 }
@@ -787,10 +866,16 @@ impl Walk<'_> {
     }
 }
 
-/// Objetos desenhados na aba `sheet_part`.
-pub fn read_objects(pkg: &Package, sheet_part: &str, caches: &SlicerCaches) -> Vec<Object> {
+/// Objetos desenhados na aba `sheet_part` e as âncoras de todos os desenhos.
+pub fn read_objects(
+    pkg: &Package,
+    sheet_part: &str,
+    caches: &SlicerCaches,
+) -> (Vec<Object>, Vec<duck_core::drawing::DrawingAnchor>) {
     let mut out = Vec::new();
+    let mut anchors = Vec::new();
     let slicers = read_slicers(pkg, sheet_part, caches);
+    let timelines = read_timelines(pkg, sheet_part, caches);
     for (_, kind, drawing) in parts::rel_targets_typed(pkg, sheet_part) {
         if !kind.ends_with("/drawing") {
             continue;
@@ -799,7 +884,22 @@ pub fn read_objects(pkg: &Package, sheet_part: &str, caches: &SlicerCaches) -> V
         let Some(root) = find_tag(&xml, 0, b"xdr:wsDr") else { continue };
         let body = inner(&xml, &root, b"xdr:wsDr");
         let rels = parts::rel_targets_typed(pkg, &drawing);
+        // Âncoras na ordem do arquivo; as de dentro de `mc:AlternateContent`
+        // contam todas (para o gravador), mas só as do `mc:Choice` desenham.
+        let mut list: Vec<(El, bool)> = Vec::new();
         for a in children(body) {
+            if a.name == b"mc:AlternateContent" {
+                for alt in children(a.body) {
+                    let draw = alt.name == b"mc:Choice";
+                    for el in children(alt.body) {
+                        list.push((el, draw));
+                    }
+                }
+            } else {
+                list.push((a, true));
+            }
+        }
+        for (a, draw) in list {
             let anchor = match a.name {
                 b"xdr:twoCellAnchor" => {
                     let (Some(f), Some(t)) = (child(a.body, b"xdr:from"), child(a.body, b"xdr:to")) else {
@@ -823,11 +923,16 @@ pub fn read_objects(pkg: &Package, sheet_part: &str, caches: &SlicerCaches) -> V
                 }
                 _ => continue,
             };
+            anchors.push(duck_core::drawing::DrawingAnchor { part: drawing.clone(), anchor });
+            if !draw {
+                continue;
+            }
             let mut w = Walk {
                 pkg,
                 drawing: &drawing,
                 rels: &rels,
                 slicers: &slicers,
+                timelines: &timelines,
                 anchor,
                 top: None,
                 out: Vec::new(),
@@ -836,5 +941,5 @@ pub fn read_objects(pkg: &Package, sheet_part: &str, caches: &SlicerCaches) -> V
             out.extend(w.out);
         }
     }
-    out
+    (out, anchors)
 }

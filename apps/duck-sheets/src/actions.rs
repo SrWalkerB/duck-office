@@ -54,6 +54,23 @@ impl SheetsApp {
                 }
             }
             Act::Register => self.register_file_types(),
+            Act::About => {
+                let gpu = self
+                    .gfx
+                    .as_ref()
+                    .map(|g| {
+                        let i = g.adapter_info();
+                        format!("{} ({}{})", i.name, i.backend, if i.software { ", software" } else { "" })
+                    })
+                    .unwrap_or_default();
+                duck_platform::info_box(
+                    "Sobre o duck-sheets",
+                    &format!(
+                        "duck-sheets {}\nPlanilhas .xlsx, .xlsm e .csv, nativo e rápido.\n\nGráficos: {gpu}\nLicença MIT · duck-office",
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                );
+            }
             Act::Quit => {
                 if self.confirm_discard() {
                     cx.exit();
@@ -140,6 +157,7 @@ impl SheetsApp {
                     Item::new("Salvar como…", Act::SaveAs).key("Ctrl+Shift+S"),
                     Item::sep(),
                     Item::new("Adicionar ao \"Abrir com\" do sistema…", Act::Register),
+                    Item::new("Sobre o duck-sheets", Act::About),
                     Item::sep(),
                     Item::new("Sair", Act::Quit).key("Alt+F4"),
                 ]);

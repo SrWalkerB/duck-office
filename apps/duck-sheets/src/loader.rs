@@ -136,6 +136,12 @@ fn load(
     );
     let styles = styles.map_err(|e| e.to_string())?;
     let strings = strings.map_err(|e| e.to_string())?;
+    // Fontes dos caches de tabela dinâmica, por aba (andam com as linhas).
+    let sources: Vec<(String, String, duck_core::CellRange)> = extras
+        .pivot_caches
+        .iter()
+        .filter_map(|c| c.source.as_ref().map(|(s, r)| (s.to_lowercase(), c.part.clone(), *r)))
+        .collect();
     send(Msg::Opened {
         sheets,
         active,
@@ -160,7 +166,12 @@ fn load(
     // Etapa 2 e 3: a aba ativa inteira, depois as outras.
     let opts = Options::default();
     let deliver = |index: usize, r: duck_xlsx::SheetResult| match r {
-        Ok((sheet, _)) => send(Msg::Sheet { index, sheet, at: t0.elapsed() }),
+        Ok((mut sheet, _)) => {
+            let name = sheet.name.to_lowercase();
+            sheet.layout.pivot_sources =
+                sources.iter().filter(|s| s.0 == name).map(|s| (s.1.clone(), s.2)).collect();
+            send(Msg::Sheet { index, sheet, at: t0.elapsed() })
+        }
         Err(e) => send(Msg::Failed(format!("aba {}: {e}", index + 1))),
     };
     book.load_sheets(&[active], &opts, &deliver);

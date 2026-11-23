@@ -1,0 +1,45 @@
+name: Release
+
+# Uma etiqueta `v*` (ex.: v1.0.0) compila o duck-sheets nos três sistemas,
+# empacota (scripts/package.sh) e publica os arquivos numa release do GitHub.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release -p duck-sheets
+
+      - name: Conferência rápida
+        shell: bash
+        run: |
+          cargo build --release -p duck-bench
+          ./target/release/duck-bench gen-showcase target/vitrine.xlsx
+          ./target/release/duck-bench roundtrip target/vitrine.xlsx --edit 50
+
+      - name: Pacote
+        shell: bash
+        run: scripts/package.sh
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

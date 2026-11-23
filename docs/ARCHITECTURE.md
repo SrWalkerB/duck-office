@@ -854,6 +854,18 @@ Conferido na planilha de painel de teste (20 gráficos, 26 segmentações, forma
 
 Conferência (`duck-bench dinamicas`): na planilha de painel, 21 de 21 tabelas com o layout idêntico ao do Excel e todos os valores iguais (exceto uma célula com valor antigo do próprio arquivo); no arquivo de referência, das 38 com registros, 37 com o layout idêntico e 91.576 valores iguais, 0 diferentes. Depois de clicar em cada segmentação da planilha de painel e salvar, a cópia confere: dinâmicas coerentes, 100% das fórmulas e 0 divergências no calamine.
 
+### Status da F5 (23/11/2026): fechamento das dinâmicas e versão 1.0
+
+- **Filtros das dinâmicas** (`PivotFilter`, `duck-calc/src/pivot.rs`): filtros de rótulo e de data viram uma tabela "passa/não passa" por item do cache e barram registros (datas usam o valor bruto, mesmo de campo agrupado). Filtros de valor rodam depois da primeira passada: em cada grupo de irmãos do nível do campo, os itens que não passam (10 maiores com empates, percentual, soma, comparações) entram numa lista de caminhos excluídos e a passada é refeita. O gravador mantém o XML de cada filtro que não mudou e escreve os novos.
+- **Ordenação por valor com escopo** (`autoSortScope` com referências): o total usado é o da coluna escolhida do outro eixo. Era o que faltava para 38 de 38.
+- **Mostrar valores como**: calculado na hora de ler o valor da célula, com os acumuladores de todos os prefixos (o total da linha, da coluna, do pai e o do item base são outras chaves do mesmo mapa) e a ordem de exibição dos irmãos (anterior/próximo, acumulado, posição).
+- **Linhas do tempo**: o cache (`timelineCacheDefinition`) liga o campo de data às dinâmicas; a seleção vira o filtro `dateBetween` da dinâmica (é assim que o Excel grava). Clique na segmentação ou na linha do tempo é um passo de desfazer com as células e o layout (`Command::Layout`).
+- **Objetos e inserir/apagar**: cada âncora de desenho da aba fica no layout (`drawing_anchors`, inclusive as de `mc:AlternateContent`), anda com a mudança e é reescrita no desenho; as séries dos gráficos são ajustadas pelo mesmo ajustador das fórmulas; dinâmicas e fontes de cache andam juntas.
+- **EMF** (`crates/duck-emf`): tocador de registros GDI com transformações (mundo, janela/viewport, modos de mapeamento), pilha de estados, caminhos, polígonos com cobertura de 4 sub-linhas, contornos como polígonos de mesma orientação (união pela regra não-zero), bitmaps DIB e as 256 operações raster ternárias bit a bit. Desenha em pixels inteiros do dispositivo (como o GDI: faixas de degradê não deixam frestas) e reduz por média de área. O texto usa glifos de um `duck_text::CpuGlyphs` (atlas copiado para a CPU), um caractere por avanço do registro, com rotação.
+- **Matrizes dinâmicas** (`duck-calc/src/dynarr.rs`): as funções avaliam os argumentos em modo matricial e devolvem `V::Arr`. LET vira variáveis locais no compilador (`Node::Local`, pilha no avaliador). No recálculo, `Engine::eval_full` devolve a matriz inteira; espalham as fórmulas de matriz do arquivo e as digitadas na sessão (avaliadas como no Excel atual), as comuns de arquivos antigos mantêm a interseção implícita. O app guarda a área de cada uma (`Calc::spills`), grava os vizinhos, muda a área da fórmula (`set_formula_kind`), limpa o que sobrou e bloqueia quando o usuário escreve na área. O gravador usa `t="array" ref`, `cm` e cria o `metadata.xml` (`XLDAPR`) se faltar.
+
+Conferência: 38 de 38 dinâmicas com registros idênticas ao Excel; 100% das fórmulas iguais nas duas planilhas reais e 0 valores mudados no recálculo completo; round-trip em todos os modos; clique, linha do tempo, desfazer e inserir/apagar conferidos nas cópias salvas.
+
 ---
 
 ## Questões em aberto

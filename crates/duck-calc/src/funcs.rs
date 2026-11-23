@@ -211,12 +211,24 @@ static FUNCS: &[FnDef] = &[
     f("HYPERLINK", "HIPERLINK", 1, 2, hyperlink),
     // Ainda não calculadas: o valor guardado fica.
     opq("GETPIVOTDATA", "INFODADOSTABELADINÂMICA"),
-    opq("FILTER", "FILTRO"),
-    opq("UNIQUE", "ÚNICO"),
-    opq("SORT", "CLASSIFICAR"),
-    opq("SORTBY", "CLASSIFICARPOR"),
-    opq("SEQUENCE", "SEQUÊNCIA"),
-    opq("LET", "LET"),
+    // Matrizes dinâmicas.
+    f("FILTER", "FILTRO", 2, 3, crate::dynarr::filter),
+    f("UNIQUE", "ÚNICO", 1, 3, crate::dynarr::unique),
+    f("SORT", "CLASSIFICAR", 1, 4, crate::dynarr::sort),
+    f("SORTBY", "CLASSIFICARPOR", 2, 255, crate::dynarr::sortby),
+    f("SEQUENCE", "SEQUÊNCIA", 1, 4, crate::dynarr::sequence),
+    vol("RANDARRAY", "MATRIZALEATÓRIA", 0, 5, crate::dynarr::randarray),
+    f("LET", "LET", 3, 255, crate::dynarr::let_),
+    f("TAKE", "TOMAR", 2, 3, crate::dynarr::take),
+    f("DROP", "DESCARTAR", 2, 3, crate::dynarr::drop),
+    f("CHOOSECOLS", "ESCOLHERCOLS", 2, 255, crate::dynarr::choosecols),
+    f("CHOOSEROWS", "ESCOLHERLINS", 2, 255, crate::dynarr::chooserows),
+    f("VSTACK", "EMPILHARV", 1, 255, crate::dynarr::vstack),
+    f("HSTACK", "EMPILHARH", 1, 255, crate::dynarr::hstack),
+    f("TOCOL", "PARACOL", 1, 3, crate::dynarr::tocol),
+    f("TOROW", "PARALIN", 1, 3, crate::dynarr::torow),
+    f("EXPAND", "EXPANDIR", 2, 4, crate::dynarr::expand),
+    f("TRANSPOSE", "TRANSPOR", 1, 1, crate::dynarr::transpose),
     opq("LAMBDA", "LAMBDA"),
     opq("CELL", "CÉL"),
     opq("INFO", "INFORMAÇÃO"),
@@ -1208,8 +1220,13 @@ fn rand_u64() -> u64 {
     })
 }
 
+/// Número aleatório em [0, 1).
+pub fn random01() -> f64 {
+    (rand_u64() >> 11) as f64 / (1u64 << 53) as f64
+}
+
 fn rand<'e>(_: &mut Eval<'e>, _: &[u32]) -> Res<V<'e>> {
-    Ok(V::Num((rand_u64() >> 11) as f64 / (1u64 << 53) as f64))
+    Ok(V::Num(random01()))
 }
 
 fn randbetween<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {

@@ -19,10 +19,28 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use duck_core::CellValue;
+use duck_core::{CellError, CellRange, CellValue, FormulaKind};
 use rayon::prelude::*;
 
-use crate::eval::{Book, Engine, Overlay};
+use crate::eval::{Book, Engine, Full, Overlay};
+
+/// Matrizes que espalham, por (aba, linha, coluna) da fórmula: a área que
+/// ocupam (as células dela, sem fórmula, são do resultado).
+pub type Spills = HashMap<(u32, u32, u32), CellRange>;
+
+/// Resultado de uma fórmula que espalha (ou que deixou de espalhar).
+#[derive(Debug)]
+pub struct SpillOut {
+    pub sheet: u32,
+    pub row: u32,
+    pub col: u32,
+    /// Área nova (`None` = não espalha: bloqueada ou resultado único).
+    pub range: Option<CellRange>,
+    /// Matriz antiga (CSE): área fixa.
+    pub fixed: bool,
+    /// Valores das células da área, sem a da fórmula.
+    pub values: Vec<(u32, u32, CellValue)>,
+}
 use crate::parse::{self, Area, Formula, MAX_COL, MAX_ROW, Node, SheetSel, flag};
 use crate::value::{Sid, V};
 
@@ -68,6 +86,8 @@ pub struct Graph {
     watch: Watch,
     /// Blocos voláteis (HOJE, AGORA, ALEATÓRIO, INDIRETO, DESLOC).
     volatile: Vec<u32>,
+    /// Áreas espalhadas: (bloco da fórmula, área).
+    spill_rects: Vec<(u32, Rect)>,
 }
 
 /// O que recalcular.
@@ -84,6 +104,8 @@ pub enum Dirty {
 pub struct Outcome {
     /// Valores novos que diferem dos atuais.
     pub overlay: Overlay,
+    /// Fórmulas que espalham.
+    pub spills: Vec<SpillOut>,
     pub cells: u64,
     pub levels: usize,
     pub cancelled: bool,
@@ -91,6 +113,12 @@ pub struct Outcome {
 
 impl Graph {
     pub fn build(book: &Book, eng: &Engine) -> Self {
+        Self::build_with(book, eng, &Spills::new())
+    }
+
+    /// Com as áreas espalhadas (as fórmulas que leem essas células dependem
+    /// de quem espalhou).
+    pub fn build_with(book: &Book, eng: &Engine, spills: &Spills) -> Self {
         // Blocos, uma aba e coluna por vez (em paralelo por aba).
         let per_sheet: Vec<Vec<Run>> = book
             .sheets
@@ -138,6 +166,40 @@ impl Graph {
             .collect();
 
         let n_runs = runs.len();
+        // Áreas espalhadas, com o bloco da fórmula: as do arquivo (matrizes)
+        // e as anotadas pelo app.
+        let mut spill_rects: Vec<(u32, Rect)> = Vec::new();
+        {
+            let mut add = |s: u32, row: u32, col: u32, rg: CellRange| {
+                if (rg.first_row, rg.first_col) == (rg.last_row, rg.last_col) {
+                    return;
+                }
+                let Some(list) = by_col.get(&(s, col)) else { return };
+                let i = list.partition_point(|&k| runs[k as usize].r1 < row);
+                if let Some(&k) = list.get(i)
+                    && runs[k as usize].r0 <= row
+                {
+                    spill_rects.push((
+                        k,
+                        Rect {
+                            sheet: s,
+                            r0: rg.first_row,
+                            r1: rg.last_row,
+                            c0: rg.first_col,
+                            c1: rg.last_col,
+                        },
+                    ));
+                }
+            };
+            for (s, sheet) in book.sheets.iter().enumerate() {
+                for (row, col, rg, _) in sheet.array_formulas() {
+                    add(s as u32, row, col, rg);
+                }
+            }
+            for (&(s, row, col), &rg) in spills {
+                add(s, row, col, rg);
+            }
+        }
         let mut col_nodes: Vec<(u32, u32)> = Vec::new();
         let mut col_node_of: HashMap<(u32, u32), u32> = HashMap::new();
         let mut edges: Vec<(u32, u32)> = Vec::new();
@@ -150,6 +212,18 @@ impl Graph {
                 volatile.push(me);
             }
             for rc in rs {
+                // Células espalhadas por outra fórmula: depende dela.
+                for &(k, sr) in &spill_rects {
+                    if k != me
+                        && sr.sheet == rc.sheet
+                        && sr.r0 <= rc.r1
+                        && rc.r0 <= sr.r1
+                        && sr.c0 <= rc.c1
+                        && rc.c0 <= sr.c1
+                    {
+                        edges.push((k, me));
+                    }
+                }
                 let used_cols = book.sheets.get(rc.sheet as usize).map_or(0, |s| s.cols());
                 let c1 = rc.c1.min(used_cols.saturating_sub(1));
                 if rc.c0 > c1 {
@@ -203,7 +277,7 @@ impl Graph {
         for list in watch.values_mut() {
             list.sort_unstable();
         }
-        Self { runs, by_col, adj_start, adj, col_nodes, watch, volatile }
+        Self { runs, by_col, adj_start, adj, col_nodes, watch, volatile, spill_rects }
     }
 
     pub fn nodes(&self) -> usize {
@@ -251,6 +325,12 @@ impl Graph {
                     for &(s, r, c) in cells {
                         if let Some(k) = self.run_at(s, r, c) {
                             seed(k, &mut mark, &mut stack);
+                        }
+                        // Mexeu na área de uma matriz que espalha: ela confere de novo.
+                        for &(k, sr) in &self.spill_rects {
+                            if sr.sheet == s && sr.r0 <= r && r <= sr.r1 && sr.c0 <= c && c <= sr.c1 {
+                                seed(k, &mut mark, &mut stack);
+                            }
                         }
                         if let Some(list) = self.watch.get(&(s, c)) {
                             let end = list.partition_point(|w| w.0 <= r);
@@ -320,13 +400,27 @@ impl Graph {
 
     /// Recalcula. `cancel` pode interromper entre níveis.
     pub fn recalc(&self, book: &Book, eng: &Engine, dirty: &Dirty, cancel: &AtomicBool) -> Outcome {
+        self.recalc_with(book, eng, dirty, cancel, &Spills::new())
+    }
+
+    /// Como [`Graph::recalc`], sabendo as áreas que cada fórmula já espalhou
+    /// (podem ser reocupadas; o resto precisa estar vazio).
+    pub fn recalc_with(
+        &self,
+        book: &Book,
+        eng: &Engine,
+        dirty: &Dirty,
+        cancel: &AtomicBool,
+        spills: &Spills,
+    ) -> Outcome {
         let levels = self.plan(dirty);
         let mut overlay = Overlay::default();
+        let mut spill_out: Vec<SpillOut> = Vec::new();
         let mut cells = 0u64;
         let n_levels = levels.len();
         for level in levels {
             if cancel.load(Ordering::Relaxed) {
-                return Outcome { overlay, cells, levels: n_levels, cancelled: true };
+                return Outcome { overlay, spills: spill_out, cells, levels: n_levels, cancelled: true };
             }
             // Tarefas: pedaços de linhas dos blocos do nível.
             let mut tasks: Vec<(u32, u32, u32)> = Vec::new();
@@ -350,13 +444,15 @@ impl Graph {
                 continue;
             }
             let view = Book { overlay: Some(&overlay), ..book.clone() };
-            let results: Vec<Vec<(u32, u32, u32, CellValue)>> = tasks
+            type TaskOut = (Vec<(u32, u32, u32, CellValue)>, Vec<SpillOut>);
+            let results: Vec<TaskOut> = tasks
                 .par_iter()
                 .map(|&(k, a, b)| {
                     let r = self.runs[k as usize];
                     let mut out = Vec::new();
+                    let mut sp = Vec::new();
                     if cancel.load(Ordering::Relaxed) {
-                        return out;
+                        return (out, sp);
                     }
                     if r.seq {
                         // De cima para baixo, vendo os próprios resultados.
@@ -371,29 +467,124 @@ impl Graph {
                             }
                         }
                     } else {
+                        let sheet = &view.sheets[r.sheet as usize];
                         for row in a..=b {
-                            if let Some(v) = eng.eval_cell(&view, r.sheet, row, r.col)
-                                && !same(&view.get(Sid::Local(r.sheet), row, r.col), &v)
-                            {
+                            // Espalham: fórmulas de matriz e as digitadas nesta sessão.
+                            let spill_ok = matches!(
+                                sheet.formula(row, r.col).map(|f| f.kind),
+                                Some(FormulaKind::Array { .. })
+                            ) || sheet.edits().has(row, r.col);
+                            let v = match eng.eval_full(&view, r.sheet, row, r.col, spill_ok) {
+                                None => continue,
+                                Some(Full::One(v)) => {
+                                    // Espalhava e agora é um valor só: a área volta a ser só ela.
+                                    if spills.contains_key(&(r.sheet, row, r.col)) {
+                                        sp.push(SpillOut {
+                                            sheet: r.sheet,
+                                            row,
+                                            col: r.col,
+                                            range: None,
+                                            fixed: false,
+                                            values: Vec::new(),
+                                        });
+                                    }
+                                    v
+                                }
+                                Some(Full::Many { rows, cols, v }) => {
+                                    let (master, s) =
+                                        spill(&view, r.sheet, row, r.col, rows, cols, v, spills);
+                                    for x in &s.values {
+                                        out.push((r.sheet, x.0, x.1, x.2.clone()));
+                                    }
+                                    sp.push(s);
+                                    master
+                                }
+                            };
+                            if !same(&view.get(Sid::Local(r.sheet), row, r.col), &v) {
                                 out.push((r.sheet, row, r.col, v));
                             }
                         }
                     }
-                    out
+                    (out, sp)
                 })
                 .collect();
             if cancel.load(Ordering::Relaxed) {
-                return Outcome { overlay, cells, levels: n_levels, cancelled: true };
+                return Outcome { overlay, spills: spill_out, cells, levels: n_levels, cancelled: true };
             }
             cells += tasks.iter().map(|t| (t.2 - t.1 + 1) as u64).sum::<u64>();
-            for list in results {
+            for (list, sp) in results {
                 for (s, r, c, v) in list {
                     overlay.set(s, r, c, v);
                 }
+                spill_out.extend(sp);
             }
         }
-        Outcome { overlay, cells, levels: n_levels, cancelled: false }
+        Outcome { overlay, spills: spill_out, cells, levels: n_levels, cancelled: false }
     }
+}
+
+/// Uma fórmula com resultado matricial: a área que ocupa e os valores, ou
+/// `#DESPEJAR!` se a área está ocupada por outra coisa. Matrizes antigas
+/// (CSE) têm a área fixa (o que falta vira `#N/D`).
+#[allow(clippy::too_many_arguments)]
+fn spill(
+    book: &Book,
+    sheet: u32,
+    row: u32,
+    col: u32,
+    rows: u32,
+    cols: u32,
+    v: Vec<CellValue>,
+    spills: &Spills,
+) -> (CellValue, SpillOut) {
+    let fixed = match book.sheets[sheet as usize].formula(row, col).map(|f| f.kind) {
+        Some(FormulaKind::Array { range, dynamic: false }) => Some(range),
+        _ => None,
+    };
+    let range = fixed.unwrap_or(CellRange {
+        first_row: row,
+        first_col: col,
+        last_row: row.saturating_add(rows - 1),
+        last_col: col.saturating_add(cols - 1),
+    });
+    let mut out = SpillOut { sheet, row, col, range: None, fixed: fixed.is_some(), values: Vec::new() };
+    if range.last_row >= MAX_ROW || range.last_col >= MAX_COL {
+        return (CellValue::Error(CellError::Spill), out);
+    }
+    let owned = spills.get(&(sheet, row, col));
+    if fixed.is_none() {
+        let s = &book.sheets[sheet as usize];
+        for rr in range.first_row..=range.last_row {
+            for cc in range.first_col..=range.last_col {
+                if (rr, cc) == (row, col) || owned.is_some_and(|o| o.contains(rr, cc)) {
+                    continue;
+                }
+                let busy =
+                    s.formula(rr, cc).is_some() || !matches!(book.get(Sid::Local(sheet), rr, cc), V::Empty);
+                if busy {
+                    return (CellValue::Error(CellError::Spill), out);
+                }
+            }
+        }
+    }
+    let at = |i: u32, j: u32| -> CellValue {
+        let i = if rows == 1 { 0 } else { i };
+        let j = if cols == 1 { 0 } else { j };
+        if i < rows && j < cols {
+            v[(i * cols + j) as usize].clone()
+        } else {
+            CellValue::Error(CellError::NA)
+        }
+    };
+    for rr in range.first_row..=range.last_row {
+        for cc in range.first_col..=range.last_col {
+            if (rr, cc) != (row, col) {
+                out.values.push((rr, cc, at(rr - row, cc - col)));
+            }
+        }
+    }
+    out.range = Some(range);
+    (at(0, 0), out)
 }
 
 /// O valor atual da célula já é o novo?
@@ -526,5 +717,39 @@ mod tests {
         assert_eq!(num(&out.overlay, 4, 3), Some(25.0));
         // B2..B5 não mudaram: não estão no resultado.
         assert_eq!(num(&out.overlay, 3, 1), None);
+    }
+
+    #[test]
+    fn dynamic_arrays_spill() {
+        let mut s = sheet();
+        let shared = StringTable::new();
+        let extras = BookExtras::default();
+        let cancel = AtomicBool::new(false);
+        // Fórmula digitada (desta sessão): espalha. A1:A5 = 1..5.
+        s.set_cell(0, 5, CellValue::Number(0.0), Some("_xlfn._xlws.FILTER(A1:A5,A1:A5>2)"), None);
+        s.set_cell(0, 6, CellValue::Number(0.0), Some("_xlfn.LET(_xlpm.x,A2,_xlpm.x*10)"), None);
+        s.set_cell(0, 7, CellValue::Number(0.0), Some("A1:A3*2"), None);
+        let book = Book::new(vec![&s], &shared, &extras, false);
+        let eng = Engine::new(&book);
+        let g = Graph::build(&book, &eng);
+        let out = g.recalc(&book, &eng, &Dirty::Cells(vec![(0, 0, 5), (0, 0, 6), (0, 0, 7)]), &cancel);
+        assert_eq!(num(&out.overlay, 0, 5), Some(3.0));
+        assert_eq!(num(&out.overlay, 0, 6), Some(20.0));
+        let f = out.spills.iter().find(|x| x.col == 5).expect("FILTRO espalha");
+        assert_eq!(f.range.map(|r| (r.first_row, r.last_row)), Some((0, 2)));
+        assert_eq!(f.values.len(), 2);
+        // Referência multiplicada (Excel atual): espalha 3 linhas.
+        let m = out.spills.iter().find(|x| x.col == 7).expect("A1:A3*2 espalha");
+        assert_eq!(
+            m.values.iter().map(|v| v.2.clone()).collect::<Vec<_>>(),
+            vec![CellValue::Number(4.0), CellValue::Number(6.0)]
+        );
+        // Área ocupada: #DESPEJAR!.
+        s.set_cell(1, 5, CellValue::Text("x".into()), None, None);
+        let book = Book::new(vec![&s], &shared, &extras, false);
+        let eng = Engine::new(&book);
+        let g = Graph::build(&book, &eng);
+        let out = g.recalc(&book, &eng, &Dirty::Cells(vec![(0, 0, 5)]), &cancel);
+        assert_eq!(out.overlay.get(0, 0, 5), Some(&CellValue::Error(duck_core::CellError::Spill)));
     }
 }

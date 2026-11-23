@@ -303,7 +303,7 @@ pub fn register_file_types(exe: &Path, name: &str, exts: &[&str]) -> Result<(), 
     #[cfg(target_os = "macos")]
     {
         let _ = (exe, name, exts);
-        Err("no macOS o registro vem do pacote .app (ainda não existe)".into())
+        Err("no macOS o duck-sheets.app do pacote já se registra para .xlsx, .xlsm e .csv".into())
     }
 }
 
@@ -313,6 +313,15 @@ pub fn message_box(title: &str, text: &str) {
         .set_title(title)
         .set_description(text)
         .set_level(rfd::MessageLevel::Error)
+        .show();
+}
+
+/// Mensagem informativa numa caixa de diálogo nativa ("Sobre", avisos).
+pub fn info_box(title: &str, text: &str) {
+    rfd::MessageDialog::new()
+        .set_title(title)
+        .set_description(text)
+        .set_level(rfd::MessageLevel::Info)
         .show();
 }
 

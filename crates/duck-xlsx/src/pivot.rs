@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 
 use duck_core::pivot::{
-    AxisItem, CacheField, DataField, FieldItem, Group, PItem, PivotCache, PivotField, PivotTable, Records,
-    SortType,
+    AxisItem, CacheField, DataField, FieldItem, Group, PItem, PivotCache, PivotField, PivotFilter,
+    PivotTable, Records, SortType,
 };
 
 use crate::package::Package;
@@ -102,6 +102,12 @@ fn parse_cache(x: &[u8]) -> PivotCache {
     }
     if let Some(s) = find_tag(x, 0, b"cacheSource") {
         c.external = attr(s.attrs, b"type").is_some_and(|t| t != b"worksheet");
+    }
+    if let Some(w) = find_tag(x, 0, b"worksheetSource")
+        && let (Some(sheet), Some(r)) =
+            (attr_str(w.attrs, b"sheet"), attr(w.attrs, b"ref").and_then(crate::sheet::parse_range))
+    {
+        c.source = Some((sheet, r));
     }
     c.x14_id = find_tag(x, 0, b"x14:pivotCacheDefinition").and_then(|t| attr_str(t.attrs, b"pivotCacheId"));
     for_each(x, b"cacheField", |a, body| {
@@ -353,10 +359,22 @@ pub fn parse_pivot_table(x: &[u8]) -> Option<PivotTable> {
                     });
                 });
             }
-            if let Some(ss) = find_tag(inner_b, 0, b"autoSortScope")
-                && let Some(r) = find_tag(inner(inner_b, &ss, b"autoSortScope"), 0, b"x")
-            {
-                f.sort_by_data = num(r.attrs, b"v").map(|v| v as u32);
+            if let Some(ss) = find_tag(inner_b, 0, b"autoSortScope") {
+                let scope = inner(inner_b, &ss, b"autoSortScope");
+                for_each(scope, b"reference", |ra, rb| {
+                    let x = find_tag(rb, 0, b"x").and_then(|x| num(x.attrs, b"v")).unwrap_or(0.0) as u32;
+                    match num(ra, b"field").map(|v| v as i64) {
+                        // 4294967294 = o campo "Valores".
+                        Some(4_294_967_294) | Some(-2) => f.sort_by_data = Some(x),
+                        Some(fld) if fld >= 0 => f.sort_refs.push((fld as u32, x)),
+                        _ => {}
+                    }
+                });
+                if f.sort_by_data.is_none()
+                    && let Some(r) = find_tag(scope, 0, b"x")
+                {
+                    f.sort_by_data = num(r.attrs, b"v").map(|v| v as u32);
+                }
             }
             fields.push(f);
             pos = if t.self_closing { t.end } else { t.end + inner_b.len() };
@@ -376,15 +394,53 @@ pub fn parse_pivot_table(x: &[u8]) -> Option<PivotTable> {
         page_fields.push((num(pa, b"fld").unwrap_or(0.0) as u32, num(pa, b"item").map(|v| v as u32)));
     });
     let mut data_fields = Vec::new();
-    for_each(x, b"dataField", |da, _| {
+    for_each(x, b"dataField", |da, body| {
+        // O Excel 2010 guarda as formas novas na extensão (`x14:dataField pivotShowAs`).
+        let ext = find_tag(body, 0, b"x14:dataField").and_then(|t| attr_str(t.attrs, b"pivotShowAs"));
         data_fields.push(DataField {
             name: attr_str(da, b"name").unwrap_or_default(),
             fld: num(da, b"fld").unwrap_or(0.0) as u32,
             subtotal: attr_str(da, b"subtotal").unwrap_or_else(|| "sum".into()),
-            show_as: attr_str(da, b"showDataAs"),
+            show_as: ext.or_else(|| attr_str(da, b"showDataAs")).filter(|s| s != "normal"),
+            base_field: num(da, b"baseField").unwrap_or(0.0) as i32,
+            base_item: num(da, b"baseItem").unwrap_or(0.0) as u32,
             num_fmt: num(da, b"numFmtId").map(|v| v as u32),
         });
     });
+    let mut filters = Vec::new();
+    for_each(x, b"filter", |fa, body| {
+        let mut f = PivotFilter {
+            fld: num(fa, b"fld").unwrap_or(0.0) as u32,
+            kind: attr_str(fa, b"type").unwrap_or_default(),
+            measure: num(fa, b"iMeasureFld").unwrap_or(0.0) as u32,
+            eval_order: num(fa, b"evalOrder").unwrap_or(0.0) as i32,
+            and: false,
+            whole_day: find_tag(body, 0, b"x15:pivotFilter")
+                .is_some_and(|t| flag(t.attrs, b"useWholeDay", false)),
+            raw: Some(format!(
+                "<filter{}>{}</filter>",
+                String::from_utf8_lossy(fa),
+                String::from_utf8_lossy(body)
+            )),
+            id: num(fa, b"id").unwrap_or(0.0) as u32,
+            name: attr_str(fa, b"name"),
+            ..Default::default()
+        };
+        if let Some(cf) = find_tag(body, 0, b"customFilters") {
+            f.and = flag(cf.attrs, b"and", false);
+        }
+        for_each(body, b"customFilter", |ca, _| {
+            f.custom.push((
+                attr_str(ca, b"operator").unwrap_or_else(|| "equal".into()),
+                attr_str(ca, b"val").unwrap_or_default(),
+            ));
+        });
+        if let Some(t) = find_tag(body, 0, b"top10") {
+            f.top = Some((flag(t.attrs, b"top", true), num(t.attrs, b"val").unwrap_or(10.0)));
+        }
+        filters.push(f);
+    });
+    filters.sort_by_key(|f| f.eval_order);
     Some(PivotTable {
         part: String::new(),
         name: attr_str(a, b"name").unwrap_or_default(),
@@ -413,6 +469,7 @@ pub fn parse_pivot_table(x: &[u8]) -> Option<PivotTable> {
         show_headers: flag(a, b"showHeaders", true),
         show_error: flag(a, b"showError", false),
         error_caption: attr_str(a, b"errorCaption").unwrap_or_default(),
+        filters,
     })
 }
 

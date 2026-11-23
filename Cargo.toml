@@ -12,12 +12,13 @@ members = [
     "crates/duck-deflate",
     "crates/duck-xlsx",
     "crates/duck-calc",
+    "crates/duck-emf",
     "crates/duck-bench",
 ]
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
+version = "1.0.0"
 license = "MIT"
 publish = false
 rust-version = "1.95"

@@ -5,10 +5,10 @@
 
 use std::collections::HashMap;
 
-use duck_core::pivot::{AxisItem, PivotTable};
+use duck_core::pivot::{AxisItem, PivotFilter, PivotTable};
 use memchr::memmem;
 
-use super::cellxml::cell_ref;
+use super::cellxml::{cell_ref, escape_attr};
 use crate::xml::{find_tag, for_each_attr, tag_end};
 
 /// Reescreve uma tag de abertura mudando/tirando atributos.
@@ -169,6 +169,128 @@ pub fn patch_pivot_table(xml: &[u8], t: &PivotTable) -> Vec<u8> {
         &axis_xml("colItems", &t.col_items),
         &[b"pageFields", b"dataFields", b"formats"],
     );
+    patch_filters(&out, &t.filters)
+}
+
+fn attr_into(out: &mut Vec<u8>, k: &str, v: &str) {
+    out.push(b' ');
+    out.extend_from_slice(k.as_bytes());
+    out.extend_from_slice(b"=\"");
+    escape_attr(v, out);
+    out.push(b'"');
+}
+
+/// Um filtro escrito a partir do modelo (criado ou mudado).
+fn filter_xml(f: &PivotFilter) -> Vec<u8> {
+    let mut o = b"<filter".to_vec();
+    attr_into(&mut o, "fld", &f.fld.to_string());
+    attr_into(&mut o, "type", &f.kind);
+    attr_into(&mut o, "evalOrder", &f.eval_order.to_string());
+    attr_into(&mut o, "id", &f.id.to_string());
+    if f.by_value() {
+        attr_into(&mut o, "iMeasureFld", &f.measure.to_string());
+    }
+    if let Some(n) = &f.name {
+        attr_into(&mut o, "name", n);
+    }
+    o.extend_from_slice(br#"><autoFilter ref="A1"><filterColumn colId="0">"#);
+    if let Some((top, n)) = f.top {
+        o.extend_from_slice(b"<top10");
+        if !top {
+            o.extend_from_slice(br#" top="0""#);
+        }
+        if f.kind == "percent" {
+            o.extend_from_slice(br#" percent="1""#);
+        }
+        attr_into(&mut o, "val", &n.to_string());
+        o.extend_from_slice(b"/>");
+    } else {
+        o.extend_from_slice(b"<customFilters");
+        if f.and {
+            o.extend_from_slice(br#" and="1""#);
+        }
+        o.push(b'>');
+        for (op, v) in &f.custom {
+            o.extend_from_slice(b"<customFilter");
+            if op != "equal" {
+                attr_into(&mut o, "operator", op);
+            }
+            attr_into(&mut o, "val", v);
+            o.extend_from_slice(b"/>");
+        }
+        o.extend_from_slice(b"</customFilters>");
+    }
+    o.extend_from_slice(b"</filterColumn></autoFilter>");
+    if f.whole_day {
+        o.extend_from_slice(
+            br#"<extLst><ext uri="{0605FD5F-26C8-4aeb-8148-2DB25E43C511}" xmlns:x15="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main"><x15:pivotFilter useWholeDay="1"/></ext></extLst>"#,
+        );
+    }
+    o.extend_from_slice(b"</filter>");
+    o
+}
+
+/// `<filters>` a partir do modelo: os que não mudaram saem como estavam.
+fn patch_filters(xml: &[u8], filters: &[PivotFilter]) -> Vec<u8> {
+    let cur = find_tag(xml, 0, b"filters");
+    let unchanged = || {
+        let mut n = 0;
+        crate::xml::for_each(xml, b"filter", |_, _| n += 1);
+        n == filters.len() && filters.iter().all(|f| f.raw.is_some())
+    };
+    if cur.is_some() && unchanged() || cur.is_none() && filters.is_empty() {
+        return xml.to_vec();
+    }
+    let mut block = Vec::new();
+    if !filters.is_empty() {
+        block.extend_from_slice(format!("<filters count=\"{}\">", filters.len()).as_bytes());
+        for f in filters {
+            match &f.raw {
+                Some(r) => block.extend_from_slice(r.as_bytes()),
+                None => block.extend_from_slice(&filter_xml(f)),
+            }
+        }
+        block.extend_from_slice(b"</filters>");
+    }
+    if cur.is_some() {
+        return replace_or_insert(xml, b"filters", &block, &[]);
+    }
+    // Novo: depois do estilo da tabela (ordem do esquema), ou antes do fim.
+    let at = match find_tag(xml, 0, b"pivotTableStyleInfo") {
+        Some(t) if t.self_closing => t.end,
+        Some(t) => memmem::find(&xml[t.end..], b"</pivotTableStyleInfo>").map_or(t.end, |i| t.end + i + 22),
+        None => memmem::rfind(xml, b"</pivotTableDefinition>").unwrap_or(xml.len()),
+    };
+    [&xml[..at], &block[..], &xml[at..]].concat()
+}
+
+/// Data (serial) como o Excel grava nas linhas do tempo.
+fn iso(serial: f64) -> String {
+    let d = duck_core::numfmt::serial_to_datetime(serial, false, 0);
+    d.map_or_else(String::new, |d| format!("{:04}-{:02}-{:02}T00:00:00", d.year, d.month, d.day))
+}
+
+/// Seleção de uma linha do tempo (`<state><selection>`).
+pub fn patch_timeline_cache(xml: &[u8], sel: Option<(f64, f64)>) -> Vec<u8> {
+    let Some(st) = find_tag(xml, 0, b"state") else { return xml.to_vec() };
+    let ty: Option<Vec<u8>> = sel.map(|_| b"dateBetween".to_vec());
+    let new_state = retag(&xml[st.start..st.end], &[(b"filterType", ty)]);
+    let mut out = [&xml[..st.start], &new_state[..], &xml[st.end..]].concat();
+    let new_sel = sel.map(|(a, b)| format!(r#"<selection startDate="{}" endDate="{}"/>"#, iso(a), iso(b)));
+    if let Some(s) = find_tag(&out, 0, b"selection") {
+        let end = if s.self_closing {
+            s.end
+        } else {
+            memmem::find(&out[s.end..], b"</selection>").map_or(s.end, |i| s.end + i + 12)
+        };
+        let ins = new_sel.unwrap_or_default();
+        out = [&out[..s.start], ins.as_bytes(), &out[end..]].concat();
+    } else if let Some(ins) = new_sel
+        && let Some(st) = find_tag(&out, 0, b"state")
+        && !st.self_closing
+    {
+        out = [&out[..st.end], ins.as_bytes(), &out[st.end..]].concat();
+    }
     out
 }
 
@@ -206,6 +328,43 @@ mod tests {
         let out = String::from_utf8(patch_slicer_cache(xml, &sel)).unwrap();
         assert!(out.contains(r#"<i x="0"/>"#), "{out}");
         assert!(out.contains(r#"<i x="1" s="1" nd="1"/>"#), "{out}");
+    }
+
+    #[test]
+    fn timeline_selection() {
+        let xml = br#"<timelineCacheDefinition><state pivotCacheId="1" filterType="dateBetween"><selection startDate="2025-05-01T00:00:00" endDate="2026-11-30T00:00:00"/><bounds startDate="2025-01-01T00:00:00" endDate="2027-01-01T00:00:00"/></state></timelineCacheDefinition>"#;
+        let jan = duck_core::input::serial(2026, 1, 1);
+        let out = String::from_utf8(patch_timeline_cache(xml, Some((jan, jan + 30.0)))).unwrap();
+        assert!(
+            out.contains(
+                r#"<selection startDate="2026-01-01T00:00:00" endDate="2026-01-31T00:00:00"/><bounds"#
+            ),
+            "{out}"
+        );
+        let out = String::from_utf8(patch_timeline_cache(xml, None)).unwrap();
+        assert!(out.contains(r#"<state pivotCacheId="1"><bounds"#), "{out}");
+    }
+
+    #[test]
+    fn new_filter() {
+        let xml = br#"<pivotTableDefinition><location ref="A1:B2"/><pivotTableStyleInfo name="x"/></pivotTableDefinition>"#;
+        let f = PivotFilter {
+            fld: 3,
+            kind: "dateBetween".into(),
+            eval_order: -1,
+            id: 7,
+            custom: vec![
+                ("greaterThanOrEqual".into(), "45000".into()),
+                ("lessThanOrEqual".into(), "45030".into()),
+            ],
+            and: true,
+            whole_day: true,
+            ..Default::default()
+        };
+        let out = String::from_utf8(patch_filters(xml, &[f])).unwrap();
+        assert!(out.contains(r#"<pivotTableStyleInfo name="x"/><filters count="1"><filter fld="3" type="dateBetween" evalOrder="-1" id="7"><autoFilter ref="A1"><filterColumn colId="0"><customFilters and="1"><customFilter operator="greaterThanOrEqual" val="45000"/>"#), "{out}");
+        // Sem filtros: o bloco sai.
+        assert_eq!(patch_filters(out.as_bytes(), &[]), xml.to_vec());
     }
 
     #[test]

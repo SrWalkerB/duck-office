@@ -214,6 +214,52 @@ impl Sheet {
         self.set_raw(row, col, RawCell { kind: k, style, payload, formula: formula_id });
     }
 
+    /// Troca o tipo da fórmula própria da célula (a de uma célula editada ou
+    /// a de uma matriz): uma fórmula que passou a espalhar vira matriz
+    /// dinâmica, e a área dela muda com o resultado. `false` se a fórmula é
+    /// compartilhada com outras células.
+    pub fn set_formula_kind(&mut self, row: u32, col: u32, kind: FormulaKind) -> bool {
+        let id = self.raw(row, col).formula;
+        if id == 0 || id & crate::SHARED_BIT != 0 {
+            return false;
+        }
+        let Some(def) = self.formula_defs.get_mut(id as usize - 1) else { return false };
+        if def.template || (def.row, def.col) != (row, col) {
+            return false;
+        }
+        if def.kind != kind {
+            def.kind = kind;
+            self.edits.mark(row, col);
+            self.edits.formulas = true;
+        }
+        true
+    }
+
+    /// Fórmulas de matriz da aba: (linha, coluna, área, dinâmica).
+    pub fn array_formulas(&self) -> Vec<(u32, u32, crate::CellRange, bool)> {
+        let mut out = Vec::new();
+        for (i, def) in self.formula_defs.iter().enumerate() {
+            if let FormulaKind::Array { range, dynamic } = def.kind
+                && !def.template
+                && self.raw(def.row, def.col).formula == i as u32 + 1
+            {
+                out.push((def.row, def.col, range, dynamic));
+            }
+        }
+        out
+    }
+
+    /// Valores espalhados por uma matriz dinâmica (células sem fórmula; o
+    /// estilo fica).
+    pub fn set_spill_values(&mut self, vals: Vec<(u32, u32, CellValue)>) {
+        for (row, col, value) in vals {
+            if self.raw(row, col).formula != 0 {
+                continue;
+            }
+            self.set_cell(row, col, value, None, None);
+        }
+    }
+
     /// Grava resultados calculados (o motor de cálculo) nas células com
     /// fórmula, mantendo fórmula e estilo. Poucas células são marcadas uma a
     /// uma para o remendo; muitas (um HOJE() em milhões de linhas) viram
@@ -637,6 +683,10 @@ impl Command {
             }
             Command::Layout(l) => {
                 let old = std::mem::replace(&mut sheet.layout, *l);
+                // Dinâmicas ou segmentações mudaram: o gravador precisa remendá-las.
+                if old.pivots != sheet.layout.pivots || old.objects != sheet.layout.objects {
+                    sheet.mark_pivots();
+                }
                 Command::Layout(Box::new(old))
             }
             Command::Group(list) => {

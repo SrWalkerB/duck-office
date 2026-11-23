@@ -22,6 +22,50 @@ pub enum Anchor {
     Abs { x: i64, y: i64, cx: i64, cy: i64 },
 }
 
+impl Marker {
+    /// O canto depois de inserir/apagar linhas ou colunas: anda com a célula;
+    /// se a célula foi apagada, fica no começo do trecho apagado.
+    pub fn shifted(self, s: crate::Shift) -> Marker {
+        let (pos, off) = match s.axis {
+            crate::Axis::Rows => (self.row, self.row_off),
+            crate::Axis::Cols => (self.col, self.col_off),
+        };
+        let (pos, off) = if s.insert {
+            if pos >= s.at { (pos + s.n, off) } else { (pos, off) }
+        } else if pos >= s.at + s.n {
+            (pos - s.n, off)
+        } else if pos >= s.at {
+            (s.at, 0)
+        } else {
+            (pos, off)
+        };
+        match s.axis {
+            crate::Axis::Rows => Marker { row: pos, row_off: off, ..self },
+            crate::Axis::Cols => Marker { col: pos, col_off: off, ..self },
+        }
+    }
+}
+
+impl Anchor {
+    /// A âncora depois de inserir/apagar linhas ou colunas (mover e
+    /// redimensionar com as células, como o Excel faz por padrão).
+    pub fn shifted(self, s: crate::Shift) -> Anchor {
+        match self {
+            Anchor::Two { from, to } => Anchor::Two { from: from.shifted(s), to: to.shifted(s) },
+            Anchor::One { from, cx, cy } => Anchor::One { from: from.shifted(s), cx, cy },
+            a => a,
+        }
+    }
+}
+
+/// Uma âncora de desenho (`xdr:twoCellAnchor`...) na ordem da parte.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrawingAnchor {
+    /// Parte do desenho (`xl/drawings/drawingN.xml`).
+    pub part: String,
+    pub anchor: Anchor,
+}
+
 /// Cor de gráfico: direta ou do tema, com os ajustes do DrawingML.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ChartColor {
@@ -217,6 +261,19 @@ pub struct Chart {
     pub border: Option<ChartColor>,
     /// Gráfico de tabela dinâmica (os valores vêm da tabela).
     pub pivot: bool,
+    /// Parte do gráfico (`xl/charts/chartN.xml`).
+    pub part: String,
+}
+
+impl Chart {
+    /// As referências das séries (nome, categorias, valores), na ordem.
+    pub fn refs_mut(&mut self) -> impl Iterator<Item = &mut String> {
+        self.plots
+            .iter_mut()
+            .flat_map(|p| p.series.iter_mut())
+            .flat_map(|s| [&mut s.name_ref, &mut s.cat_ref, &mut s.val_ref])
+            .flatten()
+    }
 }
 
 /// Segmentação de dados: botões com os valores de um campo.
@@ -252,10 +309,40 @@ pub struct SlicerPivot {
     pub item_x: Vec<u32>,
 }
 
+/// Linha do tempo: filtro de datas das tabelas dinâmicas (um período ou
+/// um intervalo de períodos).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Timeline {
+    pub name: String,
+    pub caption: String,
+    pub show_header: bool,
+    pub show_selection_label: bool,
+    pub show_time_level: bool,
+    pub show_scrollbar: bool,
+    /// Nível mostrado: 0 anos, 1 trimestres, 2 meses, 3 dias.
+    pub level: u32,
+    /// Primeira data visível (serial).
+    pub scroll: f64,
+    pub style: Option<String>,
+    /// Parte do cache (`xl/timelineCaches/timelineCacheN.xml`).
+    pub part: String,
+    /// Campo de data (nome no cache da tabela dinâmica).
+    pub source: String,
+    /// `pivotCacheId` (x14) do cache da tabela dinâmica.
+    pub cache_id: String,
+    /// Tabelas dinâmicas ligadas: (`tabId` da aba, nome).
+    pub tables: Vec<(u32, String)>,
+    /// Primeiro e último dia escolhidos (seriais); `None` = todos os períodos.
+    pub selection: Option<(f64, f64)>,
+    /// Período dos dados: [início, fim).
+    pub bounds: (f64, f64),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ObjectKind {
     Chart(Box<Chart>),
     Slicer(Box<Slicer>),
+    Timeline(Box<Timeline>),
     /// Forma com texto (caixa de texto, botão).
     Shape {
         text: String,

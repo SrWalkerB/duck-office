@@ -106,6 +106,8 @@ pub enum Node {
     /// `ref:ref` em que um dos lados não é uma referência simples
     /// (`A1:ÍNDICE(...)`).
     Range(u32, u32),
+    /// Variável de LET (posição na pilha de variáveis da fórmula).
+    Local(u32),
 }
 
 /// Bits de [`Formula::flags`].
@@ -167,7 +169,17 @@ pub trait Resolve {
 /// Compila `text` (sem o `=`) para a célula (`row`, `col`, base 0) da aba `sheet`.
 /// Texto que não dá para entender vira `#NOME?`, como no Excel.
 pub fn compile(text: &str, sheet: u32, row: u32, col: u32, res: &dyn Resolve) -> Formula {
-    let mut p = Parser { s: text.as_bytes(), text, i: 0, sheet, row, col, res, f: Formula::default() };
+    let mut p = Parser {
+        s: text.as_bytes(),
+        text,
+        i: 0,
+        sheet,
+        row,
+        col,
+        res,
+        f: Formula::default(),
+        scope: Vec::new(),
+    };
     match p.expr().and_then(|root| {
         p.ws();
         if p.i < p.s.len() { Err(()) } else { Ok(root) }
@@ -191,6 +203,14 @@ struct Parser<'s> {
     col: u32,
     res: &'s dyn Resolve,
     f: Formula,
+    /// Variáveis de LET visíveis (minúsculas, sem `_xlpm.`).
+    scope: Vec<String>,
+}
+
+/// Nome de variável de LET como o arquivo grava (`_xlpm.x`) ou digitado.
+fn local_name(w: &str) -> String {
+    let w = w.strip_prefix("_xlpm.").or_else(|| w.strip_prefix("_XLPM.")).unwrap_or(w);
+    w.to_lowercase()
 }
 
 fn is_ident_char(c: u8) -> bool {
@@ -752,6 +772,10 @@ impl Parser<'_> {
         if w.eq_ignore_ascii_case("FALSE") {
             return Ok(self.push(Node::Bool(false)));
         }
+        let lw = local_name(&w);
+        if let Some(k) = self.scope.iter().rposition(|n| *n == lw) {
+            return Ok(self.push(Node::Local(k as u32)));
+        }
         if let Some(x) = self.cell_or_cols(&w, SheetSel::This)? {
             return Ok(x);
         }
@@ -763,6 +787,8 @@ impl Parser<'_> {
 
     fn call(&mut self, name: &str) -> R<u32> {
         let f = funcs::lookup(name);
+        let is_let = f.is_some_and(|f| funcs::def(f).name == "LET");
+        let scope0 = self.scope.len();
         let mut args = Vec::new();
         self.ws();
         if self.peek() == Some(b')') {
@@ -770,6 +796,19 @@ impl Parser<'_> {
         } else {
             loop {
                 self.ws();
+                // LET: nos argumentos pares, um nome seguido de `,` é variável.
+                if is_let && args.len() % 2 == 0 {
+                    let save = self.i;
+                    let w = self.word().to_string();
+                    self.ws();
+                    if !w.is_empty() && self.peek() == Some(b',') {
+                        self.scope.push(local_name(&w));
+                        args.push(self.push(Node::Missing));
+                        self.i += 1;
+                        continue;
+                    }
+                    self.i = save;
+                }
                 let x = if matches!(self.peek(), Some(b',') | Some(b')')) {
                     self.push(Node::Missing)
                 } else {
@@ -787,6 +826,7 @@ impl Parser<'_> {
                 }
             }
         }
+        self.scope.truncate(scope0);
         let Some(f) = f else {
             self.f.flags |= flag::OPAQUE;
             return Ok(self.push(Node::Err(CellError::Name)));

@@ -7,3 +7,4 @@ bench.local.toml
 
 # Rascunhos visuais das sessões de brainstorming.
 .superpowers/
+/dist

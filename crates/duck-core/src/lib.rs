@@ -687,8 +687,13 @@ impl Column {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FormulaKind {
     Normal,
-    /// Fórmula matricial (CSE) que ocupa `range`.
-    Array(CellRange),
+    /// Fórmula de matriz que ocupa `range`: matricial antiga (CSE, área
+    /// fixa) ou dinâmica (`dynamic`, `cm` no arquivo: a área acompanha o
+    /// tamanho do resultado e o resultado "se espalha" pelas vizinhas).
+    Array {
+        range: CellRange,
+        dynamic: bool,
+    },
     /// Célula-mestre de uma fórmula compartilhada (`si`); as outras células do
     /// grupo reaproveitam o texto deslocando as referências relativas.
     Shared {

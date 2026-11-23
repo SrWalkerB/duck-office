@@ -103,6 +103,13 @@ pub struct Layout {
     pub objects: Vec<crate::drawing::Object>,
     /// Tabelas dinâmicas da aba.
     pub pivots: Vec<crate::pivot::PivotTable>,
+    /// Âncoras de todos os desenhos da aba, na ordem do arquivo (também as
+    /// de objetos que o duck-sheets não desenha): andam ao inserir/apagar
+    /// linhas e colunas e o gravador as reescreve.
+    pub drawing_anchors: Vec<crate::drawing::DrawingAnchor>,
+    /// Caches de tabela dinâmica com os dados nesta aba: (parte do cache,
+    /// intervalo da fonte).
+    pub pivot_sources: Vec<(String, CellRange)>,
 }
 
 /// Filtro automático: o intervalo (com a linha de cabeçalho) e os

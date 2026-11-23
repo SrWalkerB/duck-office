@@ -222,6 +222,9 @@ impl SheetsApp {
             f.done_query.clear();
         }
         let Some(doc) = &mut self.doc else { return false };
+        let user_cells: Vec<(usize, u32, u32)> =
+            step.iter().flat_map(|(i, c)| c.cells().into_iter().map(move |(r, cc)| (*i, r, cc))).collect();
+        let shifted = step.iter().any(|(_, c)| matches!(c, Command::Shift(..)));
         let mut inverse = Vec::with_capacity(step.len());
         let mut touched = Vec::new();
         for (idx, cmd) in step {
@@ -240,6 +243,11 @@ impl SheetsApp {
         doc.dirty = true;
         for (idx, st) in touched {
             self.after_change(idx, st);
+        }
+        if shifted {
+            self.init_spills();
+        } else {
+            self.check_spills(&user_cells);
         }
         self.refresh_charts();
         self.calc_kick();
@@ -287,6 +295,9 @@ impl SheetsApp {
             return;
         }
         let cells = step.first().map(|(_, c)| c.cells()).unwrap_or_default();
+        let user_cells: Vec<(usize, u32, u32)> =
+            step.iter().flat_map(|(i, c)| c.cells().into_iter().map(move |(r, cc)| (*i, r, cc))).collect();
+        let shifted = step.iter().any(|(_, c)| matches!(c, Command::Shift(..)));
         let mut inverse = Vec::with_capacity(step.len());
         let mut touched = Vec::new();
         for (idx, cmd) in step {
@@ -301,6 +312,11 @@ impl SheetsApp {
         doc.dirty = true;
         for (idx, st) in touched {
             self.after_change(idx, st);
+        }
+        if shifted {
+            self.init_spills();
+        } else {
+            self.check_spills(&user_cells);
         }
         self.calc_kick();
         // Mostra o que mudou.
@@ -692,6 +708,7 @@ impl SheetsApp {
                 let axis =
                     if op.ends_with("colunas") { duck_core::Axis::Cols } else { duck_core::Axis::Rows };
                 self.shift_selection(op.starts_with("inserir"), Some(axis));
+                eprintln!("--edit {e}: {}", self.message);
                 continue;
             }
             // `copiar:A1:B2`, `recortar:A1:B2`, `colar:D5` (clipboard interno).
@@ -714,22 +731,32 @@ impl SheetsApp {
                 continue;
             }
             // `segmentacao=N:I` (item I da N-ésima segmentação da aba; `limpar`),
-            // `segmentacao=N:I+` soma o item (Ctrl+clique).
-            if let Some(arg) = e.strip_prefix("segmentacao=")
+            // `segmentacao=N:I+` soma o item (Ctrl+clique). `linhadotempo=N:I`
+            // escolhe o período I (`I+` estende; `limpar`).
+            let target = e
+                .strip_prefix("segmentacao=")
+                .map(|a| (a, true))
+                .or_else(|| e.strip_prefix("linhadotempo=").map(|a| (a, false)));
+            if let Some((arg, slicer)) = target
                 && let Some((n, i)) = arg.split_once(':')
             {
+                use duck_core::drawing::ObjectKind;
                 let n: usize = n.parse().unwrap_or(0);
                 let obj = self.doc.as_ref().and_then(|d| d.current()).and_then(|(s, _)| {
                     s.layout
                         .objects
                         .iter()
                         .enumerate()
-                        .filter(|(_, o)| matches!(o.kind, duck_core::drawing::ObjectKind::Slicer(_)))
+                        .filter(|(_, o)| match o.kind {
+                            ObjectKind::Slicer(_) => slicer,
+                            ObjectKind::Timeline(_) => !slicer,
+                            _ => false,
+                        })
                         .nth(n)
                         .map(|(k, _)| k)
                 });
                 let Some(obj) = obj else {
-                    eprintln!("--edit: segmentação {n} não encontrada");
+                    eprintln!("--edit: objeto {n} não encontrado");
                     continue;
                 };
                 let ctrl = i.ends_with('+');
@@ -1013,17 +1040,19 @@ impl SheetsApp {
             return;
         }
         let slot = doc.slot();
-        if slot.info.objects && !self.objects_ok {
-            let ok = self.ask(
-                "Esta aba tem gráficos, imagens, tabelas ou tabelas dinâmicas. O duck-sheets ainda não \
-                 ajusta a posição deles ao inserir ou apagar linhas e colunas. Continuar?",
-            );
-            if !ok {
-                return;
-            }
-            self.objects_ok = true;
-        }
         let shift = Shift { axis, at, n, insert };
+        // Como o Excel: não dá para inserir/apagar no meio de uma tabela dinâmica.
+        let cuts = |r: &duck_core::CellRange| {
+            let (lo, hi) = match axis {
+                Axis::Rows => (r.first_row, r.last_row),
+                Axis::Cols => (r.first_col, r.last_col),
+            };
+            if insert { at > lo && at <= hi } else { at <= hi && at + n > lo }
+        };
+        if sheet.layout.pivots.iter().any(|p| cuts(&p.range)) {
+            self.message = "Não é possível mudar parte de uma tabela dinâmica".into();
+            return;
+        }
         let name = slot.info.name.clone();
         let ops = OpsHandle(Arc::new(duck_calc::ShiftOps { shift, sheet: name.clone(), own: true }));
         let mut step = vec![(doc.active, Command::Shift(shift, ops))];
@@ -1033,8 +1062,26 @@ impl SheetsApp {
             }
             let Some(data) = &other.data else { continue };
             let changes = other_sheet_changes(data, &doc.strings, &name, shift);
+            let mut cmds = Vec::new();
             if !changes.is_empty() {
-                step.push((i, Command::SetCells(changes)));
+                cmds.push(Command::SetCells(changes));
+            }
+            // Gráficos desta aba com séries na aba mudada.
+            let mut layout = data.layout.clone();
+            for o in &mut layout.objects {
+                if let duck_core::drawing::ObjectKind::Chart(c) = &mut o.kind {
+                    for r in c.refs_mut() {
+                        if let Some((new, _)) = duck_calc::adjust_refs(r, shift, false, &name) {
+                            *r = new;
+                        }
+                    }
+                }
+            }
+            if layout != data.layout {
+                cmds.push(Command::Layout(Box::new(layout)));
+            }
+            if !cmds.is_empty() {
+                step.push((i, Command::Group(cmds)));
             }
         }
         let t = Instant::now();

@@ -30,6 +30,8 @@ pub enum Act {
     Recent(u8),
     /// Registrar o duck-sheets no "Abrir com" do sistema.
     Register,
+    /// Versão, licença e o adaptador gráfico.
+    About,
     Quit,
     /// Abre uma lista ou paleta.
     Drop(Drop),

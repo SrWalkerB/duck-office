@@ -56,6 +56,8 @@ type CachedFormula = (Vec<u8>, Vec<u8>, u32);
 #[derive(Default)]
 pub struct Scratch {
     text: String,
+    /// A célula atual tem `cm` (metadados: matriz dinâmica).
+    cm: bool,
     /// Por coluna: atributos e texto crus da última fórmula que não depende da
     /// posição, e o id dela. Colunas calculadas de tabela e fórmulas só com
     /// referências absolutas repetem o mesmo texto em todas as linhas; com
@@ -151,6 +153,8 @@ pub fn parse_rows(
                 continue;
             }
             let (kids, after) = scan_children(buf, end);
+            // `cm="1"`: matriz dinâmica (só interessa em fórmulas de matriz).
+            scratch.cm = kids.f.is_some() && memchr::memmem::find(attrs, b"cm=").is_some();
             store_cell(part, row, col, style, t_attr, &kids, scratch);
             pos = after;
             continue;
@@ -500,7 +504,7 @@ fn store_formula(part: &mut SheetPart, row: u32, col: u32, f: Option<&Child>, sc
     unescape_into(f.content, scratch);
     let k = match t {
         Some(b"array") => match attr(f.attrs, b"ref").and_then(parse_range) {
-            Some(r) => FormulaKind::Array(r),
+            Some(range) => FormulaKind::Array { range, dynamic: sc.cm },
             None => FormulaKind::Normal,
         },
         Some(b"dataTable") => FormulaKind::DataTable,

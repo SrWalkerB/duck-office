@@ -13,6 +13,7 @@
 mod blank;
 mod cellxml;
 mod deflate;
+mod objects;
 mod patch;
 mod pivot;
 mod regen;
@@ -135,6 +136,41 @@ impl Book {
                 }
             }
         }
+        // Linhas/colunas inseridas ou apagadas: âncoras dos desenhos e fontes
+        // dos caches de tabela dinâmica; gráficos com referências mudadas.
+        for s in sheets.iter().flatten() {
+            if s.edits().structure {
+                let mut parts: Vec<(&str, Vec<duck_core::drawing::Anchor>)> = Vec::new();
+                for a in &s.layout.drawing_anchors {
+                    match parts.iter_mut().find(|p| p.0 == a.part) {
+                        Some(p) => p.1.push(a.anchor),
+                        None => parts.push((&a.part, vec![a.anchor])),
+                    }
+                }
+                for (part, list) in parts {
+                    if let Ok(xml) = self.pkg.read(part) {
+                        small.insert(part.to_string(), objects::patch_anchors(&xml, &list));
+                    }
+                }
+                for (part, r) in &s.layout.pivot_sources {
+                    if let Ok(xml) = self.pkg.read(part) {
+                        small.insert(part.clone(), objects::patch_cache_source(&xml, *r));
+                    }
+                }
+            }
+            if s.edits().structure || s.edits().pivots {
+                for o in &s.layout.objects {
+                    if let duck_core::drawing::ObjectKind::Chart(c) = &o.kind
+                        && !c.part.is_empty()
+                        && !small.contains_key(&c.part)
+                        && let Ok(xml) = self.pkg.read(&c.part)
+                        && let Some(new) = objects::patch_chart_refs(&xml, c)
+                    {
+                        small.insert(c.part.clone(), new);
+                    }
+                }
+            }
+        }
         // Tabelas dinâmicas e segmentações de dados mudadas.
         for s in sheets.iter().flatten() {
             if !s.edits().pivots {
@@ -157,12 +193,38 @@ impl Book {
                         link.item_x.iter().zip(&sl.items).map(|(x, it)| (*x, it.1)).collect();
                     small.insert(link.part.clone(), pivot::patch_slicer_cache(&xml, &sel));
                 }
+                if let duck_core::drawing::ObjectKind::Timeline(tl) = &o.kind
+                    && !tl.part.is_empty()
+                    && !small.contains_key(&tl.part)
+                    && let Ok(xml) = self.pkg.read(&tl.part)
+                {
+                    small.insert(tl.part.clone(), pivot::patch_timeline_cache(&xml, tl.selection));
+                }
             }
         }
         if new_styles && let Some(path) = &self.meta.styles {
             let xml = self.pkg.read(path)?;
             small.insert(path.clone(), styles::patch_styles(&xml, styles));
         }
+        // Matrizes dinâmicas: as abas regravadas apontam para os metadados
+        // `XLDAPR`; o arquivo que não tem `metadata.xml` ganha um.
+        let mut new_meta: Option<(String, Vec<u8>)> = None;
+        let has_dyn = by_path.values().any(|(_, s)| s.array_formulas().iter().any(|a| a.3));
+        let mut cm = 0;
+        if has_dyn {
+            let dir = self.meta.path.rsplit_once('/').map_or("", |p| p.0);
+            let meta =
+                if dir.is_empty() { "metadata.xml".to_string() } else { format!("{dir}/metadata.xml") };
+            match self.pkg.read(&meta) {
+                Ok(x) => cm = xldapr_cm(&x).unwrap_or(0),
+                Err(_) => {
+                    new_meta = Some((meta, DYN_METADATA.to_vec()));
+                    cm = 1;
+                }
+            }
+        }
+        cellxml::DYN_CM.store(cm, std::sync::atomic::Ordering::Relaxed);
+
         if let Some(cc) = calc_chain {
             let ct = self.pkg.read("[Content_Types].xml")?;
             small.insert(
@@ -174,6 +236,23 @@ impl Book {
                 small.insert(rels, drop_calc_chain_rel(&r));
             }
             rep.calc_chain_removed = true;
+        }
+        if let Some((meta, _)) = &new_meta {
+            let ct = match small.get("[Content_Types].xml") {
+                Some(b) => b.clone(),
+                None => self.pkg.read("[Content_Types].xml")?,
+            };
+            let ov = format!(
+                r#"<Override PartName="/{meta}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheetMetadata+xml"/>"#
+            );
+            small.insert("[Content_Types].xml".into(), insert_before(&ct, b"</Types>", ov.as_bytes()));
+            let rels = rels_path(&self.meta.path);
+            let r = match small.get(&rels) {
+                Some(b) => b.clone(),
+                None => self.pkg.read(&rels)?,
+            };
+            let rel = br#"<Relationship Id="rIdDuckMeta" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sheetMetadata" Target="metadata.xml"/>"#;
+            small.insert(rels, insert_before(&r, b"</Relationships>", rel));
         }
 
         let file = File::create(out)?;
@@ -201,6 +280,13 @@ impl Book {
                 zip.copy_raw(&e.name, e.method_code(), e.crc32, e.size, self.pkg.compressed(e))?;
                 rep.parts_copied += 1;
             }
+        }
+        if let Some((meta, bytes)) = &new_meta {
+            let z = compress_chunk(bytes, opts.level, true);
+            let mut h = crc32fast::Hasher::new();
+            h.update(bytes);
+            zip.copy_raw(meta, zipw::DEFLATED, h.finalize(), bytes.len() as u64, &z)?;
+            rep.parts_rewritten += 1;
         }
         let (w, len) = zip.finish()?;
         let file = w.into_inner().map_err(|e| Error::Io(e.into_error()))?;
@@ -421,6 +507,46 @@ impl HeadTail {
 }
 
 /// `dir/_rels/arquivo.rels` de uma parte.
+/// Metadados mínimos das matrizes dinâmicas (`cm="1"` = `XLDAPR`).
+const DYN_METADATA: &[u8] = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:xda="http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray"><metadataTypes count="1"><metadataType name="XLDAPR" minSupportedVersion="120000" copy="1" pasteAll="1" pasteValues="1" merge="1" splitFirst="1" rowColShift="1" clearFormats="1" clearComments="1" assign="1" coerce="1" cellMeta="1"/></metadataTypes><futureMetadata name="XLDAPR" count="1"><bk><extLst><ext uri="{bdbb8cdc-fa1e-496e-a857-3c3f30c029c3}"><xda:dynamicArrayProperties fDynamic="1" fCollapsed="0"/></ext></extLst></bk></futureMetadata><cellMetadata count="1"><bk><rc t="1" v="0"/></bk></cellMetadata></metadata>"#;
+
+/// O `cm` das matrizes dinâmicas num `metadata.xml` existente: o bloco de
+/// `cellMetadata` que aponta para o tipo `XLDAPR`.
+fn xldapr_cm(x: &[u8]) -> Option<u32> {
+    let mut t = None;
+    let mut k = 0u32;
+    crate::xml::for_each(x, b"metadataType", |a, _| {
+        k += 1;
+        if attr(a, b"name") == Some(b"XLDAPR") && t.is_none() {
+            t = Some(k);
+        }
+    });
+    let t = t?;
+    let cm = find_tag(x, 0, b"cellMetadata")?;
+    let body = crate::xml::inner(x, &cm, b"cellMetadata");
+    let mut idx = 0u32;
+    let mut found = None;
+    crate::xml::for_each(body, b"bk", |_, bk| {
+        idx += 1;
+        if found.is_none()
+            && let Some(rc) = find_tag(bk, 0, b"rc")
+            && attr(rc.attrs, b"t").and_then(crate::xml::parse_u32) == Some(t)
+        {
+            found = Some(idx);
+        }
+    });
+    found
+}
+
+/// Insere `ins` antes da última ocorrência de `before`.
+fn insert_before(xml: &[u8], before: &[u8], ins: &[u8]) -> Vec<u8> {
+    match memchr::memmem::rfind(xml, before) {
+        Some(i) => [&xml[..i], ins, &xml[i..]].concat(),
+        None => xml.to_vec(),
+    }
+}
+
 fn rels_path(part: &str) -> String {
     match part.rfind('/') {
         Some(i) => format!("{}/_rels/{}.rels", &part[..i], &part[i + 1..]),

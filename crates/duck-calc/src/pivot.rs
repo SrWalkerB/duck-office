@@ -12,10 +12,12 @@
 //! - as células a escrever na aba (rótulos e valores).
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use duck_core::CellValue;
-use duck_core::pivot::{AxisItem, PItem, PivotCache, PivotTable, Records, SortType};
+use duck_core::pivot::{
+    AxisItem, BASE_NEXT, BASE_PREVIOUS, PItem, PivotCache, PivotFilter, PivotTable, Records, SortType,
+};
 
 use crate::value::text_cmp;
 
@@ -99,6 +101,8 @@ pub struct PivotResult {
     /// de dados em cada acumulador).
     pub calc: Vec<Option<Expr>>,
     pub aux: Vec<u32>,
+    /// Ordem de exibição dos itens por (eixo: 0 linhas, 1 colunas; caminho do pai).
+    pub order: HashMap<(u8, Vec<u32>), Vec<u32>>,
 }
 
 /// Fórmula de campo calculado: aritmética sobre nomes de campos (que valem
@@ -327,6 +331,27 @@ pub fn compute(t: &PivotTable, cache: &PivotCache, rec: &Records) -> PivotResult
             filters.push((f, page_item));
         }
     }
+    // Filtros de rótulo e de data: decididos por item do cache, aplicados a
+    // cada registro (o campo nem precisa estar num eixo).
+    let item_filters: Vec<(&[u32], Vec<bool>)> = t
+        .filters
+        .iter()
+        .filter(|f| !f.by_value())
+        .filter_map(|f| item_filter(t, cache, rec, f).map(|(c, p, _)| (c, p)))
+        .collect();
+    // Posições barradas por esses filtros nos campos dos eixos (não aparecem
+    // nem com "mostrar itens sem dados").
+    let mut blocked: HashMap<usize, HashSet<u32>> = HashMap::new();
+    for f in t.filters.iter().filter(|f| !f.by_value()) {
+        if let Some((_, pass, false)) = item_filter(t, cache, rec, f) {
+            let fld = f.fld as usize;
+            for (&x, &p) in pos_of.get(fld).into_iter().flatten() {
+                if !pass.get(x as usize).copied().unwrap_or(true) {
+                    blocked.entry(fld).or_default().insert(p);
+                }
+            }
+        }
+    }
     let rows: Vec<Level> = t.row_fields.iter().map(|&f| Level { field: f }).collect();
     let cols: Vec<Level> = t.col_fields.iter().map(|&f| Level { field: f }).collect();
     // Caminho de um registro num eixo (o campo de valores não entra no caminho).
@@ -383,32 +408,63 @@ pub fn compute(t: &PivotTable, cache: &PivotCache, rec: &Records) -> PivotResult
             })
             .collect()
     };
-    let mut cells: HashMap<(Vec<u32>, Vec<u32>), Vec<Acc>> = HashMap::new();
-    let (mut passed, mut filtered, mut no_item) = (0, 0, 0);
-    'rec: for r in 0..rec.count {
-        for &(f, page) in &filters {
-            let Some(p) = item_pos(f, r) else { continue };
-            if t.fields[f].items[p as usize].hidden || page.is_some_and(|i| i != p) {
-                filtered += 1;
-                continue 'rec;
-            }
-        }
-        let (Some(rp), Some(cp)) = (path(&rows, r), path(&cols, r)) else {
-            no_item += 1;
-            continue;
-        };
-        passed += 1;
-        let mut vals = data_vals(r);
-        vals.extend(aux_vals(r));
-        for i in 0..=rp.len() {
-            for j in 0..=cp.len() {
-                let e = cells
-                    .entry((rp[..i].to_vec(), cp[..j].to_vec()))
-                    .or_insert_with(|| vec![Acc::default(); width]);
-                for (k, v) in vals.iter().enumerate() {
-                    e[k].add(v);
+    // Uma passada pelos registros; `excl` = caminhos tirados pelos filtros de valor.
+    let run = |excl: &[HashSet<Vec<u32>>; 2]| -> (Cells, usize, usize, usize) {
+        let mut cells: Cells = HashMap::new();
+        let (mut passed, mut filtered, mut no_item) = (0, 0, 0);
+        'rec: for r in 0..rec.count {
+            for &(f, page) in &filters {
+                let Some(p) = item_pos(f, r) else { continue };
+                if t.fields[f].items[p as usize].hidden || page.is_some_and(|i| i != p) {
+                    filtered += 1;
+                    continue 'rec;
                 }
             }
+            for (col, pass) in &item_filters {
+                if col.get(r).is_some_and(|&x| !pass.get(x as usize).copied().unwrap_or(true)) {
+                    filtered += 1;
+                    continue 'rec;
+                }
+            }
+            let (Some(rp), Some(cp)) = (path(&rows, r), path(&cols, r)) else {
+                no_item += 1;
+                continue;
+            };
+            let cut = |set: &HashSet<Vec<u32>>, p: &[u32]| (1..=p.len()).any(|l| set.contains(&p[..l]));
+            if !excl[0].is_empty() && cut(&excl[0], &rp) || !excl[1].is_empty() && cut(&excl[1], &cp) {
+                filtered += 1;
+                continue;
+            }
+            passed += 1;
+            let mut vals = data_vals(r);
+            vals.extend(aux_vals(r));
+            for i in 0..=rp.len() {
+                for j in 0..=cp.len() {
+                    let e = cells
+                        .entry((rp[..i].to_vec(), cp[..j].to_vec()))
+                        .or_insert_with(|| vec![Acc::default(); width]);
+                    for (k, v) in vals.iter().enumerate() {
+                        e[k].add(v);
+                    }
+                }
+            }
+        }
+        (cells, passed, filtered, no_item)
+    };
+    let mut excl: [HashSet<Vec<u32>>; 2] = [HashSet::new(), HashSet::new()];
+    let (mut cells, mut passed, mut filtered, mut no_item) = run(&excl);
+    // Filtros de valor, na ordem do arquivo: cada um olha o resultado dos anteriores.
+    for vf in t.filters.iter().filter(|f| f.by_value()) {
+        let real = |ls: &[Level]| ls.iter().filter(|l| l.field >= 0).position(|l| l.field == vf.fld as i32);
+        let (axis, level) = match (real(&rows), real(&cols)) {
+            (Some(l), _) => (0, l),
+            (None, Some(l)) => (1, l),
+            _ => continue,
+        };
+        let before = excl[axis].len();
+        value_filter(t, &calc, &cells, vf, axis, level, &mut excl[axis]);
+        if excl[axis].len() != before {
+            (cells, passed, filtered, no_item) = run(&excl);
         }
     }
 
@@ -425,10 +481,26 @@ pub fn compute(t: &PivotTable, cache: &PivotCache, rec: &Records) -> PivotResult
             no_item,
             calc,
             aux,
+            order: HashMap::new(),
         };
     }
-    let (row_items, row_paths) = axis(t, cache, &rows, &cells, true);
-    let (col_items, col_paths) = axis(t, cache, &cols, &cells, false);
+    let (row_items, row_paths) = axis(t, cache, &rows, &cells, true, &excl[0], &blocked);
+    let (col_items, col_paths) = axis(t, cache, &cols, &cells, false, &excl[1], &blocked);
+    // Ordem de exibição dos irmãos (mostrar valores como: anterior, acumulado, posição).
+    let mut order: HashMap<(u8, Vec<u32>), Vec<u32>> = HashMap::new();
+    for (ax, paths, items) in [(0u8, &row_paths, &row_items), (1, &col_paths, &col_items)] {
+        for (p, it) in paths.iter().zip(items.iter()) {
+            if it.t.is_some() {
+                continue;
+            }
+            for l in 0..p.len() {
+                let v = order.entry((ax, p[..l].to_vec())).or_default();
+                if !v.contains(&p[l]) {
+                    v.push(p[l]);
+                }
+            }
+        }
+    }
     PivotResult {
         row_items,
         col_items,
@@ -440,6 +512,232 @@ pub fn compute(t: &PivotTable, cache: &PivotCache, rec: &Records) -> PivotResult
         no_item,
         calc,
         aux,
+        order,
+    }
+}
+
+type Cells = HashMap<(Vec<u32>, Vec<u32>), Vec<Acc>>;
+
+/// Tipos de filtro de data relativos a hoje: [início, fim).
+fn dynamic_range(kind: &str) -> Option<(f64, f64)> {
+    let (y, m, d) = crate::value::today();
+    let s = duck_core::input::serial;
+    let t = s(y, m, d);
+    let month = |y: i32, m: i32| {
+        let (yy, mm) = (y + (m - 1).div_euclid(12), (m - 1).rem_euclid(12) as u32 + 1);
+        let (ny, nm) = if mm == 12 { (yy + 1, 1) } else { (yy, mm + 1) };
+        (s(yy, mm, 1), s(ny, nm, 1))
+    };
+    let quarter = |k: i32| {
+        let q0 = (m as i32 - 1) / 3 * 3 + 1 + 3 * k;
+        (month(y, q0).0, month(y, q0 + 2).1)
+    };
+    // Semana de domingo a sábado (o serial 1 foi um domingo).
+    let week = |k: f64| {
+        let dow = (t - 1.0).rem_euclid(7.0);
+        let a = t - dow + 7.0 * k;
+        (a, a + 7.0)
+    };
+    Some(match kind {
+        "today" => (t, t + 1.0),
+        "yesterday" => (t - 1.0, t),
+        "tomorrow" => (t + 1.0, t + 2.0),
+        "thisWeek" => week(0.0),
+        "lastWeek" => week(-1.0),
+        "nextWeek" => week(1.0),
+        "thisMonth" => month(y, m as i32),
+        "lastMonth" => month(y, m as i32 - 1),
+        "nextMonth" => month(y, m as i32 + 1),
+        "thisQuarter" => quarter(0),
+        "lastQuarter" => quarter(-1),
+        "nextQuarter" => quarter(1),
+        "thisYear" => (s(y, 1, 1), s(y + 1, 1, 1)),
+        "lastYear" => (s(y - 1, 1, 1), s(y, 1, 1)),
+        "nextYear" => (s(y + 1, 1, 1), s(y + 2, 1, 1)),
+        "yearToDate" => (s(y, 1, 1), t + 1.0),
+        _ => return None,
+    })
+}
+
+/// Compara pelo operador do `customFilter`. Texto: igual/diferente aceitam curingas.
+fn custom_pass(op: &str, val: &str, num: Option<f64>, text: &str) -> bool {
+    let target = val.trim().parse::<f64>().ok();
+    let ord = match (num, target) {
+        (Some(a), Some(b)) => a.total_cmp(&b),
+        _ => text_cmp(text, val),
+    };
+    match op {
+        "notEqual" => !eq_wild(val, num, target, text),
+        "greaterThan" => ord.is_gt(),
+        "greaterThanOrEqual" => ord.is_ge(),
+        "lessThan" => ord.is_lt(),
+        "lessThanOrEqual" => ord.is_le(),
+        _ => eq_wild(val, num, target, text),
+    }
+}
+
+fn eq_wild(val: &str, num: Option<f64>, target: Option<f64>, text: &str) -> bool {
+    if let (Some(a), Some(b)) = (num, target) {
+        return a == b;
+    }
+    if val.contains(['*', '?']) {
+        return crate::index::Wild::new(val).matches(text);
+    }
+    crate::value::text_eq(text, val)
+}
+
+fn customs_pass(f: &PivotFilter, num: Option<f64>, text: &str) -> bool {
+    if f.custom.is_empty() {
+        return true;
+    }
+    let mut it = f.custom.iter().map(|(op, v)| custom_pass(op, v, num, text));
+    if f.and { it.all(|b| b) } else { it.any(|b| b) }
+}
+
+fn month_of(serial: f64) -> Option<u32> {
+    duck_core::numfmt::serial_to_datetime(serial, false, 0).map(|d| d.month)
+}
+
+/// Filtro de rótulo/data: qual coluna de índices dos registros olhar, se
+/// cada índice passa e se os índices são os valores brutos (campo agrupado).
+fn item_filter<'a>(
+    t: &PivotTable,
+    cache: &PivotCache,
+    rec: &'a Records,
+    f: &PivotFilter,
+) -> Option<(&'a [u32], Vec<bool>, bool)> {
+    let fld = f.fld as usize;
+    let cf = cache.fields.get(fld)?;
+    let quarter = f.kind.strip_prefix('Q').and_then(|q| q.parse::<u32>().ok());
+    let month = f.kind.strip_prefix('M').and_then(|q| q.parse::<u32>().ok());
+    let is_date = f.kind.starts_with("date")
+        || dynamic_range(&f.kind).is_some()
+        || quarter.is_some()
+        || month.is_some();
+    // Datas: o valor bruto (antes de agrupar), se o campo for agrupado.
+    let (col, items, raw): (&[u32], &[PItem], bool) =
+        match rec.grouped_raw.iter().find(|g| g.0 as usize == fld) {
+            Some((_, raw)) if is_date => (raw.as_slice(), cf.raw.as_slice(), true),
+            _ => (rec.cols.get(fld)?.as_slice(), cf.items.as_slice(), false),
+        };
+    if col.is_empty() {
+        return None;
+    }
+    let names: HashMap<u32, &str> = t
+        .fields
+        .get(fld)
+        .map(|pf| pf.items.iter().filter_map(|i| Some((i.x?, i.name.as_deref()?))).collect())
+        .unwrap_or_default();
+    let pass = items
+        .iter()
+        .enumerate()
+        .map(|(i, it)| {
+            if is_date {
+                let (PItem::Date(d) | PItem::Num(d)) = *it else { return false };
+                let d = if f.whole_day { d.floor() } else { d };
+                if let Some((a, b)) = dynamic_range(&f.kind) {
+                    return d >= a && d < b;
+                }
+                if let Some(q) = quarter {
+                    return month_of(d).is_some_and(|m| (m - 1) / 3 + 1 == q);
+                }
+                if let Some(mm) = month {
+                    return month_of(d) == Some(mm);
+                }
+                return customs_pass(f, Some(d), &item_text(it, false));
+            }
+            let text = names.get(&(i as u32)).map_or_else(|| item_text(it, false), |n| n.to_string());
+            let num = match it {
+                PItem::Num(x) | PItem::Date(x) => Some(*x),
+                _ => None,
+            };
+            customs_pass(f, num, &text)
+        })
+        .collect();
+    Some((col, pass, raw))
+}
+
+/// Valor de um campo de dados num cruzamento: `None` = vazio, `Err` = erro.
+fn acc_value(t: &PivotTable, calc: &[Option<Expr>], accs: &[Acc], k: usize) -> Option<Result<f64, ()>> {
+    if let Some(Some(e)) = calc.get(k) {
+        let n_data = t.data_fields.len().max(1);
+        let sums: Vec<f64> = accs.get(n_data..)?.iter().map(|a| a.sum).collect();
+        return Some(e.eval(&sums).and_then(|x| if x.is_finite() { Ok(x) } else { Err(()) }));
+    }
+    let func = t.data_fields.get(k).map_or("sum", |d| d.subtotal.as_str());
+    accs.get(k)?.value(func).map(Ok)
+}
+
+/// Filtro de valor (inclusive os 10 maiores) num nível de um eixo: em cada
+/// grupo de irmãos, os itens que não passam vão para `excl`.
+fn value_filter(
+    t: &PivotTable,
+    calc: &[Option<Expr>],
+    cells: &Cells,
+    f: &PivotFilter,
+    axis: usize,
+    level: usize,
+    excl: &mut HashSet<Vec<u32>>,
+) {
+    let k = f.measure as usize;
+    type Sib<'a> = (&'a [u32], Option<f64>);
+    let mut groups: HashMap<&[u32], Vec<Sib>> = HashMap::new();
+    for ((rp, cp), accs) in cells {
+        let (p, other) = if axis == 0 { (rp, cp) } else { (cp, rp) };
+        if !other.is_empty() || p.len() != level + 1 {
+            continue;
+        }
+        let v = acc_value(t, calc, accs, k).and_then(Result::ok);
+        groups.entry(&p[..level]).or_default().push((p.as_slice(), v));
+    }
+    for (_, mut sibs) in groups {
+        let keep: Vec<bool> = match (f.kind.as_str(), f.top) {
+            ("count" | "percent" | "sum", Some((top, n))) => {
+                sibs.sort_by(|a, b| {
+                    let (x, y) = (a.1.unwrap_or(f64::NAN), b.1.unwrap_or(f64::NAN));
+                    let o = x.total_cmp(&y);
+                    if top { o.reverse() } else { o }
+                });
+                let vals: Vec<f64> = sibs.iter().filter_map(|s| s.1).collect();
+                if f.kind == "count" {
+                    let n = n.max(0.0) as usize;
+                    // Empates com o último entram.
+                    let cut = if n == 0 { None } else { vals.get(n - 1).or(vals.last()).copied() };
+                    sibs.iter()
+                        .map(|s| match (s.1, cut) {
+                            (Some(v), Some(c)) => {
+                                if top {
+                                    v >= c
+                                } else {
+                                    v <= c
+                                }
+                            }
+                            _ => false,
+                        })
+                        .collect()
+                } else {
+                    let total: f64 = vals.iter().sum();
+                    let goal = if f.kind == "percent" { total * n / 100.0 } else { n };
+                    let mut acc = 0.0;
+                    sibs.iter()
+                        .map(|s| match s.1 {
+                            Some(v) => {
+                                let take = acc < goal;
+                                acc += v;
+                                take
+                            }
+                            None => false,
+                        })
+                        .collect()
+                }
+            }
+            _ => sibs.iter().map(|s| s.1.is_some_and(|v| customs_pass(f, Some(v), ""))).collect(),
+        };
+        for (s, ok) in sibs.iter().zip(keep) {
+            if !ok {
+                excl.insert(s.0.to_vec());
+            }
+        }
     }
 }
 
@@ -450,6 +748,8 @@ fn axis(
     levels: &[Level],
     cells: &HashMap<(Vec<u32>, Vec<u32>), Vec<Acc>>,
     rows: bool,
+    excl: &HashSet<Vec<u32>>,
+    blocked: &HashMap<usize, HashSet<u32>>,
 ) -> (Vec<AxisItem>, Vec<Vec<u32>>) {
     let real: Vec<usize> = levels.iter().filter(|l| l.field >= 0).map(|l| l.field as usize).collect();
     let values_at = levels.iter().position(|l| l.field < 0);
@@ -477,8 +777,18 @@ fn axis(
             cells.contains_key(&(Vec::new(), p.to_vec()))
         }
     };
-    let total = |p: &[u32], k: usize| -> f64 {
-        let key = if rows { (p.to_vec(), Vec::new()) } else { (Vec::new(), p.to_vec()) };
+    // Total de um caminho pelo campo de dados `k`, na linha/coluna do outro
+    // eixo escolhida para a ordenação (`refs`; sem referências = o total).
+    let total = |p: &[u32], k: usize, refs: &[(u32, u32)]| -> f64 {
+        let other: &[i32] = if rows { &t.col_fields } else { &t.row_fields };
+        let mut q = Vec::new();
+        for &f in other.iter().filter(|&&f| f >= 0) {
+            match refs.iter().find(|r| r.0 as i32 == f) {
+                Some(r) => q.push(r.1),
+                None => break,
+            }
+        }
+        let key = if rows { (p.to_vec(), q) } else { (q, p.to_vec()) };
         cells
             .get(&key)
             .and_then(|v| v.get(k))
@@ -517,10 +827,11 @@ fn axis(
             .enumerate()
             .filter(|(_, it)| it.t.is_none() && !it.hidden)
             .map(|(p, _)| p as u32)
+            .filter(|p| !blocked.get(&real[level]).is_some_and(|b| b.contains(p)))
             .filter(|&p| {
                 let mut q = prefix.to_vec();
                 q.push(p);
-                has_data(&q) || (f.show_all && !f.items[p as usize].missing)
+                has_data(&q) || (f.show_all && !f.items[p as usize].missing && !excl.contains(&q))
             })
             .collect();
         match (f.sort, f.sort_by_data) {
@@ -540,7 +851,8 @@ fn axis(
                     let (mut pa, mut pb) = (prefix.to_vec(), prefix.to_vec());
                     pa.push(*a);
                     pb.push(*b);
-                    let o = total(&pa, k as usize).total_cmp(&total(&pb, k as usize));
+                    let o =
+                        total(&pa, k as usize, &f.sort_refs).total_cmp(&total(&pb, k as usize, &f.sort_refs));
                     if s == SortType::Descending { o.reverse() } else { o }
                 });
             }
@@ -568,11 +880,13 @@ fn axis(
         prefix: &mut Vec<u32>,
         children: &dyn Fn(usize, &[u32]) -> Vec<u32>,
         out: &mut Vec<(Option<&'static str>, Vec<u32>)>,
+        rows: bool,
     ) {
         let f = &t.fields[real[level]];
         let last = level + 1 == real.len();
-        // Forma tabular: o primeiro filho fica na mesma linha do pai.
-        let tabular = !f.outline || !t.outline && !t.compact;
+        // Forma tabular: o primeiro filho fica na mesma linha do pai. Nas
+        // colunas é sempre assim (o pai não ganha coluna própria).
+        let tabular = !rows || !f.outline || !t.outline && !t.compact;
         for c in children(level, prefix) {
             prefix.push(c);
             let collapsed = f.items[c as usize].collapsed;
@@ -582,7 +896,7 @@ fn axis(
                 if !tabular {
                     out.push((None, prefix.clone()));
                 }
-                walk(t, real, level + 1, prefix, children, out);
+                walk(t, real, level + 1, prefix, children, out, rows);
                 let bottom = tabular || !f.subtotal_top;
                 if f.default_subtotal && bottom {
                     out.push((Some("default"), prefix.clone()));
@@ -592,7 +906,7 @@ fn axis(
         }
     }
     let mut prefix = Vec::new();
-    walk(t, &real, 0, &mut prefix, &children, &mut out);
+    walk(t, &real, 0, &mut prefix, &children, &mut out, rows);
 
     // Para AxisItem: `r` = campos repetidos da linha anterior.
     let mut prev: Vec<u32> = Vec::new();
@@ -658,23 +972,126 @@ pub fn data_value(t: &PivotTable, r: &PivotResult, ri: usize, ci: usize) -> Opti
     let ritem = r.row_items.get(ri)?;
     let citem = r.col_items.get(ci)?;
     let k = if t.row_fields.contains(&-2) { ritem.i } else { citem.i } as usize;
-    let key = (r.row_paths.get(ri)?.clone(), r.col_paths.get(ci)?.clone());
-    let accs = r.cells.get(&key)?;
-    if let Some(Some(e)) = r.calc.get(k) {
-        // Campo calculado: a fórmula sobre as somas dos campos na célula.
-        let n_data = t.data_fields.len().max(1);
-        let sums: Vec<f64> = accs[n_data..].iter().map(|a| a.sum).collect();
-        return match e.eval(&sums) {
-            Ok(x) if x.is_finite() => Some(CellValue::Number(x)),
-            // Erro com `showError`: o texto escolhido (vazio = célula vazia).
-            _ if t.show_error && t.error_caption.is_empty() => None,
-            _ if t.show_error => Some(CellValue::Text(t.error_caption.clone())),
-            _ => Some(CellValue::Error(duck_core::CellError::Div0)),
-        };
+    let (rp, cp) = (r.row_paths.get(ri)?, r.col_paths.get(ci)?);
+    let raw = |p: &[u32], q: &[u32]| -> Option<Result<f64, ()>> {
+        let accs = r.cells.get(&(p.to_vec(), q.to_vec()))?;
+        acc_value(t, &r.calc, accs, k)
+    };
+    // Erro com `showError`: o texto escolhido (vazio = célula vazia).
+    let err = |e: duck_core::CellError| {
+        if t.show_error && t.error_caption.is_empty() {
+            None
+        } else if t.show_error {
+            Some(CellValue::Text(t.error_caption.clone()))
+        } else {
+            Some(CellValue::Error(e))
+        }
+    };
+    let v = match raw(rp, cp)? {
+        Ok(v) => v,
+        Err(()) => return err(duck_core::CellError::Div0),
+    };
+    let Some(d) = t.data_fields.get(k) else { return Some(CellValue::Number(v)) };
+    let Some(show) = d.show_as.as_deref() else { return Some(CellValue::Number(v)) };
+    let num = |p: &[u32], q: &[u32]| raw(p, q).and_then(Result::ok);
+    let div = |a: f64, b: Option<f64>| match b {
+        Some(b) if b != 0.0 => Some(CellValue::Number(a / b)),
+        _ => err(duck_core::CellError::Div0),
+    };
+    // Eixo (0 linhas, 1 colunas) e nível do campo base.
+    let base = || -> Option<(usize, usize)> {
+        let lvl = |fs: &[i32]| fs.iter().filter(|&&f| f >= 0).position(|&f| f == d.base_field);
+        lvl(&t.row_fields).map(|l| (0, l)).or_else(|| lvl(&t.col_fields).map(|l| (1, l)))
+    };
+    // O par de caminhos trocando o do eixo `ax`.
+    let with = |ax: usize, p: &[u32]| -> (Vec<u32>, Vec<u32>) {
+        if ax == 0 { (p.to_vec(), cp.clone()) } else { (rp.clone(), p.to_vec()) }
+    };
+    let path_of = |ax: usize| if ax == 0 { rp } else { cp };
+    match show {
+        "percentOfTotal" => div(v, num(&[], &[])),
+        "percentOfRow" => div(v, num(rp, &[])),
+        "percentOfCol" => div(v, num(&[], cp)),
+        "index" => match (num(&[], &[]), num(rp, &[]), num(&[], cp)) {
+            (Some(g), Some(a), Some(b)) if a * b != 0.0 => Some(CellValue::Number(v * g / (a * b))),
+            _ => err(duck_core::CellError::Div0),
+        },
+        "percentOfParentRow" | "percentOfParentCol" => {
+            let ax = usize::from(show == "percentOfParentCol");
+            let p = path_of(ax);
+            if p.is_empty() {
+                return Some(CellValue::Number(1.0));
+            }
+            let (a, b) = with(ax, &p[..p.len() - 1]);
+            div(v, num(&a, &b))
+        }
+        "percentOfParent" => {
+            let (ax, l) = base()?;
+            let p = path_of(ax);
+            if p.len() <= l {
+                return None;
+            }
+            let (a, b) = with(ax, &p[..=l]);
+            div(v, num(&a, &b))
+        }
+        "percent" | "difference" | "percentDiff" => {
+            let (ax, l) = base()?;
+            let p = path_of(ax);
+            if p.len() <= l {
+                return None;
+            }
+            let sibs = r.order.get(&(ax as u8, p[..l].to_vec()))?;
+            let at = sibs.iter().position(|&x| x == p[l]);
+            let bpos = match d.base_item {
+                BASE_PREVIOUS => at.and_then(|i| i.checked_sub(1)).map_or(p[l], |i| sibs[i]),
+                BASE_NEXT => at.and_then(|i| sibs.get(i + 1).copied()).unwrap_or(p[l]),
+                b => b,
+            };
+            // O próprio item base: 100% em "% de"; vazio nas diferenças.
+            if bpos == p[l] && show != "percent" {
+                return None;
+            }
+            let mut q = p.clone();
+            q[l] = bpos;
+            let (a, b) = with(ax, &q);
+            let bv = num(&a, &b);
+            match show {
+                "percent" => div(v, bv),
+                "difference" => Some(CellValue::Number(v - bv.unwrap_or(0.0))),
+                _ => div(v - bv.unwrap_or(0.0), bv),
+            }
+        }
+        "runTotal" | "percentOfRunningTotal" | "rankAscending" | "rankDescending" => {
+            let (ax, l) = base()?;
+            let p = path_of(ax);
+            if p.len() <= l {
+                return None;
+            }
+            let sibs = r.order.get(&(ax as u8, p[..l].to_vec()))?;
+            let vals: Vec<(u32, Option<f64>)> = sibs
+                .iter()
+                .map(|&s| {
+                    let mut q = p.clone();
+                    q[l] = s;
+                    let (a, b) = with(ax, &q);
+                    (s, num(&a, &b))
+                })
+                .collect();
+            if show.starts_with("rank") {
+                let asc = show == "rankAscending";
+                let n = vals.iter().filter_map(|x| x.1).filter(|&x| if asc { x < v } else { x > v }).count();
+                return Some(CellValue::Number(n as f64 + 1.0));
+            }
+            let upto = vals.iter().position(|x| x.0 == p[l]).unwrap_or(0);
+            let run: f64 = vals[..=upto].iter().filter_map(|x| x.1).sum();
+            if show == "runTotal" {
+                Some(CellValue::Number(run))
+            } else {
+                div(run, Some(vals.iter().filter_map(|x| x.1).sum()))
+            }
+        }
+        _ => Some(CellValue::Number(v)),
     }
-    let acc = accs.get(k)?;
-    let func = t.data_fields.get(k).map_or("sum", |d| d.subtotal.as_str());
-    acc.value(func).map(CellValue::Number)
 }
 
 #[cfg(test)]
@@ -734,20 +1151,8 @@ mod tests {
             col_fields: Vec::new(),
             page_fields: Vec::new(),
             data_fields: vec![
-                DataField {
-                    name: "Soma".into(),
-                    fld: 1,
-                    subtotal: "sum".into(),
-                    show_as: None,
-                    num_fmt: None,
-                },
-                DataField {
-                    name: "Dobro".into(),
-                    fld: 2,
-                    subtotal: "sum".into(),
-                    show_as: None,
-                    num_fmt: None,
-                },
+                DataField { name: "Soma".into(), fld: 1, subtotal: "sum".into(), ..Default::default() },
+                DataField { name: "Dobro".into(), fld: 2, subtotal: "sum".into(), ..Default::default() },
             ],
             row_items: Vec::new(),
             col_items: Vec::new(),
@@ -764,6 +1169,7 @@ mod tests {
             show_headers: true,
             show_error: false,
             error_caption: String::new(),
+            filters: Vec::new(),
         };
         (t, cache, rec)
     }
@@ -786,5 +1192,62 @@ mod tests {
         let r = compute(&t, &cache, &rec);
         assert_eq!(r.row_items.len(), 2);
         assert_eq!(data_value(&t, &r, 1, 0), Some(CellValue::Number(15.0)));
+    }
+
+    #[test]
+    fn filters() {
+        let (mut t, cache, rec) = sample();
+        t.col_fields = vec![-2];
+        // 10 maiores (1 maior): só Norte; o total geral acompanha.
+        t.filters =
+            vec![PivotFilter { fld: 0, kind: "count".into(), top: Some((true, 1.0)), ..Default::default() }];
+        let r = compute(&t, &cache, &rec);
+        assert_eq!(r.row_items.len(), 2);
+        assert_eq!(data_value(&t, &r, 1, 0), Some(CellValue::Number(15.0)));
+        // Valor maior que 10 (não passa ninguém além de Norte).
+        t.filters[0] = PivotFilter {
+            fld: 0,
+            kind: "valueGreaterThan".into(),
+            custom: vec![("greaterThan".into(), "10".into())],
+            ..Default::default()
+        };
+        assert_eq!(compute(&t, &cache, &rec).row_items.len(), 2);
+        // Rótulo contém "ul": só Sul.
+        t.filters[0] = PivotFilter {
+            fld: 0,
+            kind: "captionContains".into(),
+            custom: vec![("equal".into(), "*UL*".into())],
+            ..Default::default()
+        };
+        let r = compute(&t, &cache, &rec);
+        assert_eq!(r.row_items.len(), 2);
+        assert_eq!(data_value(&t, &r, 1, 0), Some(CellValue::Number(5.0)));
+    }
+
+    #[test]
+    fn show_values_as() {
+        let (mut t, cache, rec) = sample();
+        t.col_fields = vec![-2];
+        let set = |t: &mut PivotTable, s: &str, item: u32| {
+            t.data_fields[0].show_as = Some(s.into());
+            t.data_fields[0].base_field = 0;
+            t.data_fields[0].base_item = item;
+        };
+        let at = |t: &PivotTable, ri: usize| {
+            let r = compute(t, &cache, &rec);
+            data_value(t, &r, ri, 0)
+        };
+        set(&mut t, "percentOfTotal", 0);
+        assert_eq!(at(&t, 0), Some(CellValue::Number(0.75)));
+        assert_eq!(at(&t, 2), Some(CellValue::Number(1.0)));
+        set(&mut t, "runTotal", 0);
+        assert_eq!(at(&t, 1), Some(CellValue::Number(20.0)));
+        set(&mut t, "difference", BASE_PREVIOUS);
+        assert_eq!(at(&t, 0), None);
+        assert_eq!(at(&t, 1), Some(CellValue::Number(-10.0)));
+        set(&mut t, "percent", 0);
+        assert_eq!(at(&t, 1), Some(CellValue::Number(5.0 / 15.0)));
+        set(&mut t, "rankDescending", 0);
+        assert_eq!(at(&t, 1), Some(CellValue::Number(2.0)));
     }
 }

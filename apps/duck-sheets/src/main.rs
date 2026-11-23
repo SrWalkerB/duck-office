@@ -114,6 +114,10 @@ fn parse_args() -> Opts {
             "--aba" => o.ribbon = val(),
             "--menu" => o.menu = val(),
             "--novo" => o.new_file = true,
+            "--version" | "--versao" => {
+                println!("duck-sheets {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             _ if !a.starts_with("--") && o.path.is_none() => o.path = Some(PathBuf::from(a)),
             _ => eprintln!("opção desconhecida: {a}"),
         }

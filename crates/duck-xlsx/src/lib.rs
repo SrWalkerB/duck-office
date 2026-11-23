@@ -268,7 +268,8 @@ impl Book {
                             let caches = self
                                 .slicer_caches
                                 .get_or_init(|| drawing::read_slicer_caches(&self.pkg, &self.meta.path));
-                            sh.layout.objects = drawing::read_objects(&self.pkg, &m.path, caches);
+                            (sh.layout.objects, sh.layout.drawing_anchors) =
+                                drawing::read_objects(&self.pkg, &m.path, caches);
                             sh.layout.pivots = pivot::read_pivot_tables(&self.pkg, &m.path);
                             (sh, rep)
                         })
