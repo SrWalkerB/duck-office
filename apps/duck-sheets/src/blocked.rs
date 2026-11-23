@@ -305,6 +305,23 @@ fn what_stays_allowed() {
     assert!(refused(&mut a));
 }
 
+/// Com a fórmula oculta, F2 e Enter sem mexer não a apagam.
+#[test]
+fn hidden_formulas_survive_the_editor() {
+    let mut a = sample();
+    select(&mut a, "C1");
+    a.apply_fmt(Fmt::Lock);
+    a.apply_fmt(Fmt::HideFormula);
+    protect(&mut a, true);
+    let before = state(&a);
+    a.start_edit(None, false);
+    assert_eq!(a.editor.as_ref().unwrap().input.text, "", "não aparece no editor");
+    a.commit_edit();
+    assert_eq!(state(&a), before);
+    type_in(&mut a, "C1", "3");
+    assert_eq!(get(&a, 0, "C1"), "3");
+}
+
 /// Linhas inseridas numa aba livre ajustam as fórmulas de uma protegida.
 #[test]
 fn other_sheets_follow_even_protected() {

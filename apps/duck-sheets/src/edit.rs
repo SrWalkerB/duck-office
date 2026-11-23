@@ -755,6 +755,10 @@ impl SheetsApp {
         out.clear();
         let Some(doc) = &self.doc else { return };
         let Some((sheet, _)) = doc.current() else { return };
+        // Como em `formula_text`: a fórmula oculta não aparece no editor.
+        if sheet.formula_hidden(&doc.styles, r, c) {
+            return;
+        }
         if let Some(f) = duck_calc::cell_formula(sheet, r, c) {
             out.push('=');
             out.push_str(&duck_calc::locale::to_pt(&f));
