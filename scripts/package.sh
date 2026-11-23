@@ -67,6 +67,9 @@ EOF
 </dict>
 </plist>
 EOF
+    # O binário sai do linker com assinatura ad-hoc só dele; o bundle precisa
+    # da sua, senão o macOS acusa "app danificado" ao abrir o .zip baixado.
+    codesign --force -s - "$APP"
     cp LICENSE "dist/stage/"
     (cd dist/stage && zip -qry "../$NAME.zip" duck-sheets.app LICENSE)
     ;;
