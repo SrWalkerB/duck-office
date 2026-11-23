@@ -1142,9 +1142,6 @@ pub fn serial_to_datetime(v: f64, date1904: bool, sub: u8) -> Option<DateTime> {
         // 29/02/1900: não existe, mas o Excel (e o Lotus 1-2-3) contam ele.
         (year, month, day, weekday) = (1900, 2, 29, 3);
     } else {
-        if !date1904 && days < 60 {
-            days += 1; // antes do dia fictício
-        }
         if !date1904 && days == 0 {
             // 00/01/1900
             return Some(DateTime {
@@ -1157,6 +1154,9 @@ pub fn serial_to_datetime(v: f64, date1904: bool, sub: u8) -> Option<DateTime> {
                 second: (ms / 1000 % 60) as u32,
                 milli: (ms % 1000) as u32,
             });
+        }
+        if !date1904 && days < 60 {
+            days += 1; // antes do dia fictício
         }
         // Dias desde 1970-01-01.
         let epoch = if date1904 { -24_107 } else { -25_569 };

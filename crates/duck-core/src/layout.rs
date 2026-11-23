@@ -99,6 +99,8 @@ pub struct Layout {
     pub autofilter: Option<AutoFilter>,
     /// Tabelas do Excel (`xl/tables/tableN.xml`) desta aba.
     pub tables: Vec<Table>,
+    /// Gráficos, segmentações e formas sobre a aba.
+    pub objects: Vec<crate::drawing::Object>,
 }
 
 /// Filtro automático: o intervalo (com a linha de cabeçalho) e os
@@ -130,6 +132,8 @@ pub enum FilterKind {
 pub struct Table {
     /// Caminho da parte no pacote (`xl/tables/table1.xml`).
     pub part: String,
+    /// `id` da tabela no arquivo (segmentações de dados apontam por ele).
+    pub id: u32,
     pub name: String,
     pub range: CellRange,
     /// Linhas de cabeçalho (0 ou 1) e de totais.
@@ -226,6 +230,7 @@ impl Layout {
         self.links.extend(other.links);
         self.autofilter = self.autofilter.take().or(other.autofilter);
         self.tables.extend(other.tables);
+        self.objects.extend(other.objects);
     }
 
     /// Ordena depois de juntar todos os pedaços.

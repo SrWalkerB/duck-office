@@ -170,6 +170,49 @@ fn number(t: &str) -> Option<(f64, Num)> {
 
 /// Data e/ou hora → (número de série, formato).
 fn date_time(t: &str, today: (i32, u32, u32)) -> Option<(f64, u16)> {
+    // "JAN - 26", "1 / 3": espaços em volta do separador saem.
+    let squeezed;
+    let t = if t.contains(" -") || t.contains("- ") || t.contains(" /") || t.contains("/ ") {
+        squeezed = t.split(['-', '/']).map(str::trim).collect::<Vec<_>>().join(if t.contains('/') {
+            "/"
+        } else {
+            "-"
+        });
+        squeezed.as_str()
+    } else {
+        t
+    };
+    // "1jan", "15jan2026": número colado no nome do mês.
+    let glued;
+    let t = if !t.contains([' ', '-', '/', ':'])
+        && t.chars().any(char::is_alphabetic)
+        && t.chars().any(|c| c.is_ascii_digit())
+    {
+        let mut parts: Vec<String> = Vec::new();
+        for c in t.chars() {
+            let digit = c.is_ascii_digit();
+            match parts.last_mut() {
+                Some(p) if p.chars().last().is_some_and(|l| l.is_ascii_digit() == digit) => p.push(c),
+                _ => parts.push(c.to_string()),
+            }
+        }
+        if parts.iter().any(|p| month_name(p).is_some()) {
+            glued = parts.join("-");
+            glued.as_str()
+        } else {
+            t
+        }
+    } else {
+        t
+    };
+    // "jan 2026", "15 jan 2026": nomes de mês separados por espaço.
+    let spaced;
+    let t = if t.split(' ').any(|w| month_name(w).is_some()) && !t.contains(':') {
+        spaced = t.split_whitespace().collect::<Vec<_>>().join("-");
+        spaced.as_str()
+    } else {
+        t
+    };
     let (date, time) = match t.split_once(' ') {
         Some((d, h)) => (Some(d.trim()), Some(h.trim())),
         None if t.contains(':') => (None, Some(t)),
@@ -194,6 +237,55 @@ fn date_time(t: &str, today: (i32, u32, u32)) -> Option<(f64, u16)> {
     })
 }
 
+/// Mês pelo nome (português ou inglês, abreviado ou completo).
+fn month_name(w: &str) -> Option<u32> {
+    const PT: [&str; 12] =
+        ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"];
+    const EN: [&str; 12] =
+        ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+    const FULL: [&str; 12] = [
+        "janeiro",
+        "fevereiro",
+        "março",
+        "abril",
+        "maio",
+        "junho",
+        "julho",
+        "agosto",
+        "setembro",
+        "outubro",
+        "novembro",
+        "dezembro",
+    ];
+    let w = w.trim().trim_end_matches('.').to_lowercase();
+    if w.len() < 3 || !w.chars().all(char::is_alphabetic) {
+        return None;
+    }
+    let w = w.replace('ç', "c");
+    let pos = |list: &[&str]| list.iter().position(|m| m.replace('ç', "c") == w);
+    pos(&PT)
+        .or_else(|| pos(&EN))
+        .or_else(|| pos(&FULL))
+        .or_else(|| {
+            const FULL_EN: [&str; 12] = [
+                "january",
+                "february",
+                "march",
+                "april",
+                "may",
+                "june",
+                "july",
+                "august",
+                "september",
+                "october",
+                "november",
+                "december",
+            ];
+            pos(&FULL_EN)
+        })
+        .map(|i| i as u32 + 1)
+}
+
 fn parse_date(d: &str, today: (i32, u32, u32)) -> Option<f64> {
     let sep = if d.contains('/') { '/' } else { '-' };
     let parts: Vec<&str> = d.split(sep).collect();
@@ -202,7 +294,22 @@ fn parse_date(d: &str, today: (i32, u32, u32)) -> Option<f64> {
             .then(|| s.parse::<i64>().ok())
             .flatten()
     };
+    let two_digit = |y: i64| if y < 30 { 2000 + y } else { 1900 + y };
     let (day, month, year) = match parts.as_slice() {
+        // ISO: 2026-11-22.
+        [yy, mm, dd] if sep == '-' && yy.len() == 4 => (num(dd)?, num(mm)?, num(yy)?),
+        // "jan-26" e "jan-2026": 1º de janeiro de 2026 (mmm-aa, como o Excel em português).
+        [mon, n] if month_name(mon).is_some() => {
+            let x = num(n)?;
+            (1, month_name(mon)? as i64, if n.len() <= 2 { two_digit(x) } else { x })
+        }
+        // "26-jan": dia e mês do ano atual.
+        [dd, mon] if month_name(mon).is_some() => (num(dd)?, month_name(mon)? as i64, today.0 as i64),
+        // "26-jan-2026".
+        [dd, mon, yy] if month_name(mon).is_some() => {
+            let y = num(yy)?;
+            (num(dd)?, month_name(mon)? as i64, if yy.len() <= 2 { two_digit(y) } else { y })
+        }
         [dd, mm] => (num(dd)?, num(mm)?, today.0 as i64),
         [dd, mm, yy] => {
             let y = num(yy)?;

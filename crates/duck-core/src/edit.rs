@@ -205,6 +205,65 @@ impl Sheet {
         self.set_raw(row, col, RawCell { kind: k, style, payload, formula: formula_id });
     }
 
+    /// Grava resultados calculados (o motor de cálculo) nas células com
+    /// fórmula, mantendo fórmula e estilo. Poucas células são marcadas uma a
+    /// uma para o remendo; muitas (um HOJE() em milhões de linhas) viram
+    /// faixas de linhas regravadas, sem ocupar memória por célula.
+    pub fn set_calc_values(&mut self, vals: Vec<(u32, u32, CellValue)>) {
+        const MARK_LIMIT: usize = 50_000;
+        let few = vals.len() <= MARK_LIMIT;
+        let mut rows: Vec<u32> = Vec::with_capacity(if few { 0 } else { vals.len() });
+        for (row, col, value) in vals {
+            let old = self.raw(row, col);
+            if old.formula == 0 && old.kind & kind::FORMULA == 0 {
+                continue;
+            }
+            let (k, payload) = match value {
+                CellValue::Empty => (kind::EMPTY, 0),
+                CellValue::Number(x) => (kind::NUMBER, x.to_bits()),
+                CellValue::Text(s) => {
+                    let (t, i) = self.push_edit_string(&s);
+                    (kind::LOCAL_STR, (t << 32) | i as u64)
+                }
+                CellValue::Bool(b) => (kind::BOOL, b as u64),
+                CellValue::Error(e) => (kind::ERROR, e as u64),
+            };
+            let cell = RawCell { kind: k | kind::FORMULA, style: old.style, payload, formula: old.formula };
+            if few {
+                self.set_raw(row, col, cell);
+                continue;
+            }
+            let (c, r) = (col as usize, row as usize);
+            if c >= self.columns.len() {
+                self.columns.resize_with(c + 1, Default::default);
+            }
+            let b = self.columns[c].block_mut(r / BLOCK_ROWS);
+            let i = r % BLOCK_ROWS;
+            b.kind[i] = cell.kind;
+            b.payload[i] = cell.payload;
+            self.touched.push((col, (r / BLOCK_ROWS) as u32));
+            rows.push(row);
+        }
+        if !rows.is_empty() {
+            rows.sort_unstable();
+            rows.dedup();
+            let mut a = rows[0];
+            let mut b = a;
+            for &r in &rows[1..] {
+                if r == b + 1 {
+                    b = r;
+                } else {
+                    self.edits.rewrite.push((a, b));
+                    a = r;
+                    b = r;
+                }
+            }
+            self.edits.rewrite.push((a, b));
+            self.edits.values = true;
+        }
+        self.settle();
+    }
+
     /// Troca só o estilo da célula (valor e fórmula ficam).
     pub fn set_style(&mut self, row: u32, col: u32, style: u16) {
         let mut raw = self.raw(row, col);

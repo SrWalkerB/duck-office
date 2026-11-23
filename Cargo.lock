@@ -568,6 +568,7 @@ name = "duck-calc"
 version = "0.1.0"
 dependencies = [
  "duck-core",
+ "rayon",
 ]
 
 [[package]]

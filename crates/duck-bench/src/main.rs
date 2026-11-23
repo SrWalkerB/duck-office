@@ -8,11 +8,13 @@
 //! duck-bench preview [ARQUIVO] [--mb N]                      mede o caminho da primeira tela (F2)
 //! duck-bench roundtrip [ARQUIVO] [--rewrite-all] [--edit N] [--level L] [--keep]  salva numa cópia e confere (F3)
 //! duck-bench gen-showcase SAIDA.xlsx                         planilha de vitrine (formatos, bordas, painéis)
+//! duck-bench calc [ARQUIVO] [--hoje AAAA-MM-DD]              calcula cada fórmula e compara com o Excel (F4)
 //! ```
 //!
 //! Sem ARQUIVO, usa `reference = "..."` de `bench.local.toml` (fora do git:
 //! o arquivo de referência tem dados reais e nunca entra no repositório).
 
+mod calc;
 mod generate;
 mod mem;
 mod roundtrip;
@@ -73,6 +75,8 @@ fn main() {
         "parse" => cmd_parse(rest),
         "preview" => cmd_preview(rest),
         "roundtrip" => roundtrip::cmd(rest),
+        "calc" => calc::cmd(rest),
+        "objetos" => calc::cmd_objects(rest),
         "gen-showcase" => match rest.first() {
             Some(p) => showcase::write(Path::new(p))
                 .map_err(|e| e.to_string())
@@ -108,7 +112,14 @@ fn positional(args: &[String]) -> Option<String> {
         if a.starts_with("--") {
             skip = !matches!(
                 a.as_str(),
-                "--quiet" | "--machine" | "--mem-trace" | "--rewrite-all" | "--keep" | "--estrutura"
+                "--quiet"
+                    | "--machine"
+                    | "--mem-trace"
+                    | "--rewrite-all"
+                    | "--keep"
+                    | "--estrutura"
+                    | "--formas-valor"
+                    | "--recalc"
             );
             continue;
         }

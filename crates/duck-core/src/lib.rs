@@ -16,6 +16,7 @@
 //!   é idêntico com qualquer número de threads (ADR-012).
 
 pub mod cond;
+pub mod drawing;
 pub mod edit;
 pub mod input;
 mod layout;
@@ -1178,6 +1179,51 @@ impl Sheet {
         })
     }
 
+    /// Como [`Sheet::formula`], com o índice da definição: células de um mesmo
+    /// modelo relativo ou grupo compartilhado têm o mesmo índice (o motor de
+    /// cálculo compila cada definição uma vez). Para modelos, a âncora é a
+    /// própria célula.
+    pub fn formula_entry(&self, row: u32, col: u32) -> Option<(u32, FormulaRef<'_>)> {
+        let id = self.columns.get(col as usize)?.formula_id(row as usize);
+        if id == 0 {
+            return None;
+        }
+        let idx = if id & SHARED_BIT != 0 { *self.shared_groups.get(&(id & !SHARED_BIT))? } else { id - 1 };
+        let def = self.formula_defs.get(idx as usize)?;
+        let (anchor_row, anchor_col) = if def.template { (row, col) } else { (def.row, def.col) };
+        Some((
+            idx,
+            FormulaRef {
+                text: self.formula_texts.get(def.text)?,
+                kind: def.kind,
+                anchor_row,
+                anchor_col,
+                template: def.template,
+            },
+        ))
+    }
+
+    /// Id bruto de fórmula da célula (0 = sem fórmula). Células seguidas com o
+    /// mesmo id têm a mesma fórmula (modelo relativo ou grupo compartilhado).
+    pub fn formula_id(&self, row: u32, col: u32) -> u32 {
+        self.columns.get(col as usize).map_or(0, |c| c.formula_id(row as usize))
+    }
+
+    /// Visita as células com fórmula da coluna, em ordem, pulando blocos sem
+    /// fórmula: `f(linha, id bruto)`.
+    pub fn for_each_formula(&self, col: u32, mut f: impl FnMut(u32, u32)) {
+        let Some(column) = self.columns.get(col as usize) else { return };
+        for (bi, b) in column.formulas.iter().enumerate() {
+            let Some(ids) = b else { continue };
+            for i in 0..BLOCK_ROWS {
+                let id = ids.get(i);
+                if id != 0 {
+                    f((bi * BLOCK_ROWS + i) as u32, id);
+                }
+            }
+        }
+    }
+
     /// Entradas de fórmula guardadas (modelos deduplicados, mestres de grupos
     /// compartilhados e fórmulas guardadas como texto).
     pub fn formula_texts_stored(&self) -> usize {
@@ -1249,6 +1295,40 @@ impl Sheet {
 // Workbook
 // ---------------------------------------------------------------------------
 
+/// Nome definido do workbook (`<definedName>`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DefinedName {
+    pub name: String,
+    /// Aba em que o nome vale (`localSheetId`); `None` = o arquivo todo.
+    pub sheet: Option<u32>,
+    /// Fórmula do nome, sem o `=` (ex.: `Dados!$A$1:$C$10`).
+    pub formula: String,
+    pub hidden: bool,
+}
+
+/// Outro arquivo referenciado pelas fórmulas (`[1]Aba!A1`), com os valores
+/// que o Excel guardou dele (`xl/externalLinks/externalLinkN.xml`).
+#[derive(Default)]
+pub struct ExternalBook {
+    /// Caminho ou nome do arquivo, como está nos relacionamentos.
+    pub target: String,
+    /// Abas, com os valores guardados (texto como string local).
+    pub sheets: Vec<Sheet>,
+    /// Nomes definidos do outro arquivo (nome, referência).
+    pub names: Vec<(String, String)>,
+}
+
+/// O que o motor de cálculo precisa além das abas: nomes definidos e
+/// arquivos externos.
+#[derive(Default)]
+pub struct BookExtras {
+    pub names: Vec<DefinedName>,
+    pub externals: Vec<ExternalBook>,
+    /// Data e hora (serial) em que o arquivo foi salvo, se o arquivo disser
+    /// (`docProps/core.xml`): é o "hoje" dos valores guardados.
+    pub saved_at: Option<f64>,
+}
+
 #[derive(Default)]
 pub struct Workbook {
     pub sheets: Vec<Sheet>,
@@ -1257,6 +1337,8 @@ pub struct Workbook {
     pub styles: Styles,
     /// Datas contadas a partir de 1904 (Mac antigo) em vez de 1900.
     pub date1904: bool,
+    /// Nomes definidos e arquivos externos.
+    pub extras: BookExtras,
 }
 
 impl Workbook {

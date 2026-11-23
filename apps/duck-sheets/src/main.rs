@@ -24,6 +24,8 @@
 mod actions;
 mod app;
 mod axis;
+mod calc;
+mod chart;
 mod draw;
 mod edit;
 mod filter;

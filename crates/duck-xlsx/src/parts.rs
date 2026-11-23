@@ -71,6 +71,13 @@ pub(crate) fn rel_targets(pkg: &Package, part: &str) -> Vec<(String, String)> {
     read_rels(pkg, part).map(|v| v.into_iter().map(|r| (r.id, r.target)).collect()).unwrap_or_default()
 }
 
+/// (id, tipo, caminho) dos relacionamentos internos de uma parte.
+pub(crate) fn rel_targets_typed(pkg: &Package, part: &str) -> Vec<(String, String, String)> {
+    read_rels(pkg, part)
+        .map(|v| v.into_iter().map(|r| (r.id, r.kind, r.target)).collect())
+        .unwrap_or_default()
+}
+
 /// A aba tem partes ligadas que dependem das posições das células e que o
 /// duck-sheets ainda não ajusta (desenhos com gráficos e imagens, tabelas
 /// dinâmicas)? As tabelas do Excel são ajustadas.
@@ -391,6 +398,17 @@ pub(crate) fn parse_styles(buf: &[u8]) -> Styles {
     }
 
     for_each(section(buf, b"dxfs"), b"dxf", |_, c| st.dxfs.push(dxf(c)));
+    // Estilos de segmentação de dados (`x14:slicerStyles`, no extLst).
+    for_each(buf, b"x14:slicerStyle", |a, body| {
+        let name = attr_str(a, b"name").unwrap_or_default();
+        let mut els = Vec::new();
+        for_each(body, b"x14:slicerStyleElement", |ea, _| {
+            if let (Some(t), Some(d)) = (attr_str(ea, b"type"), attr(ea, b"dxfId").and_then(parse_u32)) {
+                els.push((t, d));
+            }
+        });
+        st.slicer_styles.push((name, els));
+    });
 
     for_each(section(buf, b"cellXfs"), b"xf", |a, c| {
         let num = |k: &[u8]| attr(a, k).and_then(parse_u32).unwrap_or(0) as u16;

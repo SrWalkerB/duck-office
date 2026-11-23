@@ -90,7 +90,7 @@ fn collect_affected(cmd: &Command, a: &mut Affected) {
 
 /// A aba para escrita. A busca pode estar terminando numa thread com uma
 /// cópia do `Arc`: espera um pouco por ela (a busca já foi cancelada).
-fn sheet_mut(slot: &mut Slot) -> Option<&mut Sheet> {
+pub(crate) fn sheet_mut(slot: &mut Slot) -> Option<&mut Sheet> {
     let arc = slot.data.as_mut()?;
     for _ in 0..300 {
         if Arc::strong_count(arc) == 1 {
@@ -150,6 +150,11 @@ impl SheetsApp {
             self.message = "Aguarde: salvando…".into();
             return false;
         }
+        // O cálculo em andamento lê as abas: para (em milissegundos) e
+        // recomeça depois da edição com o que faltava.
+        if let Some(doc) = &mut self.doc {
+            doc.calc.cancel();
+        }
         let Some(doc) = &self.doc else { return false };
         let slot = doc.slot();
         if slot.data.is_none() || slot.preview {
@@ -177,11 +182,18 @@ impl SheetsApp {
             return false;
         };
         let aff = affected(&cmd);
+        doc.calc.note(idx, &cmd);
+        let filter_changed = matches!(cmd, Command::SetFilter { .. } | Command::Group(_));
         let inverse = cmd.apply(sheet);
         doc.history.undo.push(vec![(idx, inverse)]);
         doc.history.redo.clear();
         doc.dirty = true;
         self.after_change(idx, aff);
+        if filter_changed {
+            self.refresh_table_slicers();
+        }
+        self.refresh_charts();
+        self.calc_kick();
         true
     }
 
@@ -215,6 +227,7 @@ impl SheetsApp {
         for (idx, cmd) in step {
             let st = affected(&cmd);
             let Some(sheet) = doc.sheets.get_mut(idx).and_then(sheet_mut) else { continue };
+            doc.calc.note(idx, &cmd);
             inverse.push((idx, cmd.apply(sheet)));
             touched.push((idx, st));
         }
@@ -228,6 +241,7 @@ impl SheetsApp {
         for (idx, st) in touched {
             self.after_change(idx, st);
         }
+        self.calc_kick();
         true
     }
 
@@ -276,6 +290,7 @@ impl SheetsApp {
         let mut touched = Vec::new();
         for (idx, cmd) in step {
             let st = affected(&cmd);
+            doc.calc.note(idx, &cmd);
             let sheet = doc.sheets.get_mut(idx).and_then(sheet_mut).expect("aba livre");
             inverse.push((idx, cmd.apply(sheet)));
             touched.push((idx, st));
@@ -286,6 +301,7 @@ impl SheetsApp {
         for (idx, st) in touched {
             self.after_change(idx, st);
         }
+        self.calc_kick();
         // Mostra o que mudou.
         if let Some(&(r, c)) = cells.first() {
             self.go_to(r, c);
@@ -469,8 +485,10 @@ impl SheetsApp {
         let base = if cell.style == 0 { v.blank_style(r, c) } else { cell.style };
         let change = match parse_input(&text, doc.date1904, duck_core::input::today()) {
             Input::Formula(f) => {
+                // Valor provisório (o recálculo em segundo plano dá o certo).
                 let cx = CfCtx { sheet, shared: &doc.strings, today };
                 let value = cx.eval_formula(&f, r, c).unwrap_or(CellValue::Empty);
+                let f = duck_calc::locale::from_pt(&f);
                 CellChange { row: r, col: c, value, formula: Some(f), style: Some(base) }
             }
             Input::Value(value, fmt) => {
@@ -500,7 +518,7 @@ impl SheetsApp {
         let Some((sheet, _)) = doc.current() else { return };
         if let Some(f) = duck_calc::cell_formula(sheet, r, c) {
             out.push('=');
-            out.push_str(&f);
+            out.push_str(&duck_calc::locale::to_pt(&f));
             return;
         }
         let cell = sheet.cell(r, c, &doc.strings);
@@ -708,6 +726,8 @@ impl SheetsApp {
         }
         self.scripted_ui();
         if let Some(dest) = self.opts.save_to.clone() {
+            // Os valores calculados entram no arquivo salvo.
+            self.calc_finish();
             self.save_to(dest);
         }
     }
@@ -763,6 +783,9 @@ impl SheetsApp {
     /// Salva em `dest` (o próprio arquivo ou uma cópia).
     pub fn save_to(&mut self, dest: PathBuf) {
         self.commit_edit();
+        if let Some(doc) = &mut self.doc {
+            doc.calc.cancel();
+        }
         let Some(doc) = &self.doc else { return };
         if self.saving.is_some() || doc.finished.is_none() {
             return;
@@ -855,6 +878,7 @@ impl SheetsApp {
                     rep.sheets_rewritten.len()
                 );
                 self.update_title();
+                self.calc_kick();
                 true
             }
             Err(e) => {
@@ -1207,6 +1231,7 @@ impl SheetsApp {
                         match parse_input(field, doc.date1904, duck_core::input::today()) {
                             Input::Formula(f) => {
                                 let value = cfx.eval_formula(&f, r, c).unwrap_or(CellValue::Empty);
+                                let f = duck_calc::locale::from_pt(&f);
                                 changes.push(CellChange {
                                     row: r,
                                     col: c,

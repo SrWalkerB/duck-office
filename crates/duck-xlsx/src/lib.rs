@@ -13,6 +13,8 @@
 
 mod cond;
 pub mod csv;
+pub mod drawing;
+mod extras;
 pub mod filter;
 mod package;
 mod parts;
@@ -135,6 +137,8 @@ pub struct SheetInfo {
 pub struct Book {
     pkg: Package,
     meta: parts::WorkbookMeta,
+    /// Caches das segmentações de dados (lidos uma vez, na primeira aba que tiver).
+    slicer_caches: std::sync::OnceLock<drawing::SlicerCaches>,
 }
 
 impl Book {
@@ -142,7 +146,7 @@ impl Book {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         let pkg = Package::open(path.as_ref())?;
         let meta = parts::read_workbook(&pkg)?;
-        Ok(Self { pkg, meta })
+        Ok(Self { pkg, meta, slicer_caches: Default::default() })
     }
 
     pub fn sheets(&self) -> Vec<SheetInfo> {
@@ -165,6 +169,12 @@ impl Book {
 
     pub fn date1904(&self) -> bool {
         self.meta.date1904
+    }
+
+    /// Nomes definidos, arquivos externos (com os valores guardados) e a
+    /// data em que o arquivo foi salvo: o que o motor de cálculo precisa.
+    pub fn read_extras(&self) -> duck_core::BookExtras {
+        extras::read_extras(&self.pkg, &self.meta)
     }
 
     /// Estilos e tema.
@@ -239,6 +249,10 @@ impl Book {
                             sh.hidden = m.hidden;
                             parts::resolve_links(&self.pkg, &m.path, &mut sh.layout.links);
                             filter::read_tables(&self.pkg, &m.path, &mut sh.layout.tables);
+                            let caches = self
+                                .slicer_caches
+                                .get_or_init(|| drawing::read_slicer_caches(&self.pkg, &self.meta.path));
+                            sh.layout.objects = drawing::read_objects(&self.pkg, &m.path, caches);
                             (sh, rep)
                         })
                     }
@@ -283,7 +297,7 @@ pub fn open(path: impl AsRef<Path>, opts: &Options) -> Result<(Workbook, LoadRep
         book.spawn_sheets(s, &wanted, opts, &limiter, &done);
     });
 
-    let mut wb = Workbook { date1904: book.meta.date1904, ..Default::default() };
+    let mut wb = Workbook { date1904: book.meta.date1904, extras: book.read_extras(), ..Default::default() };
     let mut report = LoadReport { threads, package: package_time, ..Default::default() };
     if let Some(r) = shared.into_inner().unwrap() {
         let (st, t) = r?;

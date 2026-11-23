@@ -41,6 +41,8 @@ pub const KIND_SOLID: u32 = 0;
 pub const KIND_GLYPH: u32 = 1;
 pub const KIND_DASH: u32 = 2;
 pub const KIND_GLYPH_ROT: u32 = 3;
+/// Triângulo: vértices em `rect.xy`, `rect.zw` e `uv.xy` (gráficos).
+pub const KIND_TRI: u32 = 4;
 
 impl Instance {
     #[inline]
@@ -61,6 +63,12 @@ impl Instance {
         // Centésimos de grau, deslocados para ficarem positivos (24 bits).
         let a = ((degrees.clamp(-360.0, 360.0) + 360.0) * 100.0).round() as u32;
         Self { rect, uv, color, kind: KIND_GLYPH_ROT | (a << 8) }
+    }
+
+    /// Triângulo cheio (sem recorte na GPU: quem chama recorta).
+    #[inline]
+    pub fn triangle(a: [f32; 2], b: [f32; 2], c: [f32; 2], color: [u8; 4]) -> Self {
+        Self { rect: [a[0], a[1], b[0], b[1]], uv: [c[0], c[1], c[0], c[1]], color, kind: KIND_TRI }
     }
 
     /// Linha tracejada (bordas pontilhadas, tracejadas...). O padrão segue a
@@ -150,6 +158,16 @@ fn vs(in: VIn) -> VOut {
     // Triangle strip: 0=(0,0) 1=(1,0) 2=(0,1) 3=(1,1)
     let corner = vec2<f32>(f32(in.vi & 1u), f32(in.vi >> 1u));
     var p = in.rect.xy + corner * in.rect.zw;
+    if (in.kind == 4u) {
+        // Triângulo: o 4º vértice da faixa repete o 3º.
+        if (in.vi == 0u) {
+            p = in.rect.xy;
+        } else if (in.vi == 1u) {
+            p = in.rect.zw;
+        } else {
+            p = in.uv.xy;
+        }
+    }
     if ((in.kind & 0xFFu) == 3u) {
         // Anti-horário na tela (y para baixo).
         let a = radians(f32(in.kind >> 8u) / 100.0 - 360.0);

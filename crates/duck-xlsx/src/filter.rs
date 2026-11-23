@@ -64,6 +64,7 @@ pub fn parse_table(xml: &[u8]) -> Option<Table> {
     let num = |k: &[u8], d: u32| attr(a, k).and_then(parse_u32).unwrap_or(d);
     let mut table = Table {
         part: String::new(),
+        id: num(b"id", 0),
         name: attr_str(a, b"displayName").or_else(|| attr_str(a, b"name")).unwrap_or_default(),
         range,
         header_rows: num(b"headerRowCount", 1),

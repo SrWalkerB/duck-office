@@ -2,17 +2,17 @@
 
 Onde o projeto está, o que já foi feito e o que falta. Os detalhes de cada decisão e as medições completas ficam em [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-**Fase atual: fim da F3.5** (a casca do app): faixa de opções, menu Arquivo, clique direito, planilha nova, mesclar, ocultar, congelar painéis, "Abrir com", filtro automático, classificar e tabelas do Excel. Falta o teste manual de teclado e mouse. A próxima fase é o motor de cálculo (F4).
+**Fase atual: F5** (gráficos e segmentações de dados, que aparecem em quase toda planilha real). O motor de cálculo (F4) está pronto: 100% das fórmulas das planilhas de teste iguais ao Excel, recálculo do arquivo de referência em 0,6 s. Gráficos e segmentações já aparecem na tela; falta a interação (clicar na segmentação, tabelas dinâmicas). Falta o teste manual de teclado e mouse das fases anteriores.
 
 | Fase | Entrega | Status |
 |---|---|---|
 | **F0** | Camada nativa (`platform/`) e grade de 1 milhão de linhas | ✅ Concluída |
-| **F1** | Leitura paralela de `.xlsx`/`.xlsm` e benchmark | ✅ Concluída (metas de 16+ núcleos em aberto) |
+| **F1** | Leitura paralela de `.xlsx`/`.xlsm` e benchmark | ✅ Concluída |
 | **F2** | Visualizador `duck-sheets` | ✅ Concluída |
 | **F3** | Edição e salvar com round-trip | ✅ Concluída (teste manual pendente) |
 | **F3.5** | Casca do app: faixa de opções, menu Arquivo, clique direito, novo arquivo, "Abrir com"; filtro e classificação | ✅ Concluída (teste manual pendente) |
-| **F4** | Motor de cálculo | ⏳ Próxima |
-| **F5+** | Gráficos, pivôs, slicers, VBA, formato nativo, docs e slides | ⏳ Planejada |
+| **F4** | Motor de cálculo | ✅ Concluída (matrizes dinâmicas pendentes) |
+| **F5+** | Gráficos, pivôs, slicers, VBA, formato nativo, docs e slides | 🔶 Em andamento (gráficos e segmentações na tela) |
 
 ---
 
@@ -37,7 +37,7 @@ Resultado: ~0,8 ms de CPU por frame (1.150+ fps sem vsync) no Windows, e o mesmo
 
 Resultado no arquivo de referência (185 MB, 1,9 GB de XML, 24 milhões de células, 10 milhões de fórmulas): **370–420 ms** para ler tudo com 16 threads (era 450–650 ms), pico de ~355 MB, **0 divergências** contra o calamine.
 
-Em aberto: a meta de < 0,4 s está no limite, e o ganho ≥ 10× com 16+ núcleos não foi atingido. A leitura hoje está limitada pela CPU total; as alavancas que sobram são micro-otimizações do parse e do decodificador.
+Escalabilidade medida em 22/11/2026 (Ryzen 9 5950X, 16 núcleos físicos, melhor de 5 rodadas): 1 thread 3,58 s; 8 threads 0,58 s (6,2×); **16 threads 0,338 s (10,6×)**; 32 threads lógicas 0,343 s (os mesmos 16 núcleos). As duas metas estão atingidas (< 0,4 s e ≥ 10× com 16 núcleos). O que sobra entre 10,6× e o ideal: a frequência cai com todos os núcleos ocupados e a descompactação especulativa da aba de 1,6 GB gasta uns 25% a mais de CPU que a sequencial.
 
 ## ✅ F2 · Visualizador `duck-sheets`
 
@@ -105,7 +105,7 @@ Limites desta versão:
 - texto rico de células reescritas vira texto simples; quebra de linha dentro da célula (Alt+Enter) ainda não existe;
 - os nomes das funções são os do arquivo (inglês, separador `,`).
 
-## ⏳ F3.5 · Casca do app
+## ✅ F3.5 · Casca do app
 
 Sem isso o editor só é usável por atalhos. O objetivo é que tudo o que a F3 já faz esteja à vista, como num editor de planilhas comum, e que o duck-sheets se integre ao sistema.
 
@@ -133,19 +133,31 @@ Segunda parte (aba **Dados**):
 
 Critério de pronto: dá para abrir, editar, formatar, filtrar e salvar uma planilha só com o mouse.
 
-## ⏳ F4 · Motor de cálculo
+## ✅ F4 · Motor de cálculo
 
-- [ ] Parser de fórmulas e AST.
-- [ ] Grafo de dependências por intervalos.
-- [ ] Recálculo incremental, em níveis paralelos; fórmulas compartilhadas como kernels SIMD.
-- [ ] Funções mais usadas (matemáticas, texto, datas, busca, lógicas), com compatibilidade numérica com o Excel.
+- [x] **Leitor de fórmulas** (`duck-calc/src/parse.rs`): texto → fórmula compilada que não depende da célula (cada referência é absoluta ou um deslocamento). Um modelo copiado para um milhão de linhas é compilado uma vez. Abas, referências de tabela (`Tabela[[#This Row],[Coluna]]`, `[@Coluna]`), nomes definidos e arquivos externos (`[1]Aba!A:F`, com os valores que o Excel guardou) são resolvidos na compilação.
+- [x] **Funções** (150 calculadas): lógicas, informação, matemáticas e estatísticas, critérios (SOMASES, CONT.SES, MÉDIASES...), texto (TEXTO com códigos em português), datas (FIMMÊS, NÚMSEMANA, DATADIF...) e busca (PROCV, PROCX, CORRESP, ÍNDICE, DESLOC, INDIRETO). As que ainda não são calculadas (INFODADOSTABELADINÂMICA, FILTRO, ÚNICO...) mantêm o valor guardado.
+- [x] **Buscas com índice**: PROCV, CORRESP, PROCX e os critérios de igualdade montam um índice por coluna uma vez e o compartilham entre as threads.
+- [x] **Grafo de dependências por intervalos**: células seguidas com a mesma fórmula viram um bloco; referências viram retângulos; níveis calculados em paralelo; blocos que dependem de si mesmos (saldo acumulado) de cima para baixo.
+- [x] **Recálculo incremental em segundo plano**: ao abrir (voláteis, como o Excel) e a cada edição, só os dependentes e os voláteis. A janela continua respondendo; uma edição nova cancela o cálculo em andamento. F9 recalcula os voláteis, Shift+F9 tudo.
+- [x] **Fórmulas em português** na barra e ao digitar (`=SOMA(A1;1,5)`); o arquivo guarda como o Excel (`SUM(A1,1.5)`).
+- [x] **Conferência** (`duck-bench calc`): cada fórmula do arquivo é calculada com os valores guardados e comparada com o resultado do Excel.
+- [ ] Fórmulas de matriz dinâmica (FILTRO, ÚNICO, CLASSIFICAR, SEQUÊNCIA) e LET/LAMBDA.
+- [ ] Núcleos SIMD para blocos de fórmulas simples (hoje cada célula é avaliada pela árvore).
 
-Critério de pronto: recalcular o arquivo de referência sem travar a janela.
+Resultado: nas duas planilhas reais de teste, **100% das fórmulas iguais ao Excel** (10,1 milhões e 140 mil). O arquivo de referência inteiro é recalculado em **0,6 s** com 32 threads (grafo montado em 30 ms); só os voláteis (5 milhões de células com HOJE) em 0,2 s.
 
-## ⏳ F5+ · O resto da suíte
+Critério de pronto: recalcular o arquivo de referência sem travar a janela. ✅
 
-- [ ] Gráficos, imagens e formas.
-- [ ] Tabelas dinâmicas interativas, segmentação de dados (slicers) e linhas do tempo (timelines).
+## 🔶 F5+ · O resto da suíte
+
+- [x] **Gráficos na tela**: barras (verticais, horizontais, agrupadas, empilhadas, 100%), linhas (também empilhadas e tracejadas), área, pizza e rosca, combinações com eixo secundário, rótulos de dados (com caixa colorida), legenda, título, linhas de grade, escala fixa do eixo e as cores do tema com os ajustes do arquivo (`lumMod`, padrões, gradientes). Os valores vêm das células: o gráfico muda quando a fórmula de origem é recalculada.
+- [x] **Segmentações de dados na tela**: de tabela dinâmica (itens do cache, com o que está selecionado) e de tabela do Excel (valores da coluna, marcados pelo filtro da tabela), com o estilo do arquivo (`x14:slicerStyles`) ou os estilos prontos.
+- [x] Formas com texto e grupos de formas (as posições dos filhos são compostas até a âncora).
+- [ ] Imagens (hoje lidas, não desenhadas), edição de gráficos, gráficos de dispersão completos.
+- [ ] Clicar na segmentação filtra a tabela (as de tabela do Excel já sabem qual coluna); as de tabela dinâmica dependem do motor de tabelas dinâmicas.
+- [ ] Tabelas dinâmicas interativas e linhas do tempo (timelines).
+- [ ] Inserir/apagar linhas e colunas move os objetos (hoje o app avisa e eles ficam onde estavam).
 - [ ] VBA (hoje só preservado).
 - [ ] Formato de arquivo nativo (ADR-013, em discussão).
 - [x] macOS: compila, roda e passa no CI (Metal); o pacote `.app` assinado ainda não existe.
@@ -153,6 +165,5 @@ Critério de pronto: recalcular o arquivo de referência sem travar a janela.
 
 ## Questões em aberto
 
-- Licença do projeto.
 - Nome próprio para a biblioteca de `platform/`.
 - Corpus de testes com planilhas públicas grandes e variadas.

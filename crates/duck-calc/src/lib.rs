@@ -1,6 +1,6 @@
 //! `duck-calc`: fórmulas (ADR-003).
 //!
-//! Por enquanto, a parte de **referências** das fórmulas:
+//! A parte de **referências** das fórmulas:
 //!
 //! - [`shift`]: desloca as referências relativas (usado nas fórmulas
 //!   compartilhadas, cujo texto o Excel grava só na célula-mestre).
@@ -9,7 +9,24 @@
 //!   célula, como no R1C1) e de volta. Fórmulas copiadas para baixo, como
 //!   `A2*2`, `A3*2`, `A4*2`, viram o mesmo modelo e são guardadas uma vez só.
 //!
-//! O motor de cálculo (F4) vai crescer a partir daqui.
+//! E o **motor de cálculo** (F4):
+//!
+//! - [`parse`]: texto → fórmula compilada, independente da célula.
+//! - [`eval`]: avaliação ([`Book`], [`Engine`], [`Eval`]).
+//! - [`funcs`]: as funções de planilha.
+//! - [`index`]: índices de busca (PROCV, SOMASES...) e critérios.
+//! - [`recalc`]: grafo de dependências e recálculo em paralelo.
+
+pub mod eval;
+pub mod funcs;
+pub mod index;
+pub mod locale;
+pub mod parse;
+pub mod recalc;
+pub mod value;
+
+pub use eval::{Book, Engine, Eval, Overlay};
+pub use recalc::{Dirty, Graph, Outcome};
 
 use std::borrow::Cow;
 use std::sync::Arc;

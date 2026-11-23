@@ -143,6 +143,8 @@ pub struct Styles {
     pub xf_base: Vec<u16>,
     /// Formatos de número criados na edição (ids em `num_fmts`).
     pub new_num_fmts: Vec<u16>,
+    /// Estilos de segmentação de dados do arquivo: (nome, [(elemento, dxf)]).
+    pub slicer_styles: Vec<(String, Vec<(String, u32)>)>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

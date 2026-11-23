@@ -282,9 +282,16 @@ impl SheetsApp {
                 };
                 // Fundo da grade.
                 p.fill(geom.grid, &geom.grid, WHITE);
+                let octx = crate::chart::ObjCtx {
+                    styles: &doc.styles,
+                    font: self.font_styles.first().copied().unwrap_or(ui),
+                    g: geom.g,
+                    date1904: doc.date1904,
+                };
                 for q in geom.quads.iter().rev() {
                     if !q.rect.is_empty() {
                         draw_cells(&mut p, &cx, q, &mut buf, &mut buf2);
+                        crate::chart::draw_objects(&mut p, &octx, &sheet.layout.objects, view, q);
                     }
                 }
                 // Linhas dos painéis congelados.

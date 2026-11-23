@@ -39,6 +39,8 @@ pub enum Msg {
         styles: Arc<Styles>,
         strings: Arc<StringTable>,
         date1904: bool,
+        /// Nomes definidos e arquivos externos (motor de cálculo).
+        extras: Arc<duck_core::BookExtras>,
         at: Duration,
     },
     Preview {
@@ -128,8 +130,8 @@ fn load(
     let active = want.filter(|&i| i < sheets.len()).unwrap_or(book.active_sheet());
 
     // Etapa 1: tudo o que a primeira tela precisa, em paralelo.
-    let (styles, (strings, preview)) = rayon::join(
-        || book.read_styles(),
+    let ((styles, extras), (strings, preview)) = rayon::join(
+        || (book.read_styles(), book.read_extras()),
         || rayon::join(|| book.read_shared_strings(), || book.preview_sheet(active, PREVIEW_BYTES)),
     );
     let styles = styles.map_err(|e| e.to_string())?;
@@ -140,6 +142,7 @@ fn load(
         styles: Arc::new(styles),
         strings: Arc::new(strings),
         date1904: book.date1904(),
+        extras: Arc::new(extras),
         at: t0.elapsed(),
     });
     if let Ok(sheet) = preview {
@@ -186,6 +189,7 @@ fn load_csv(path: &PathBuf, send: &(dyn Fn(Msg) + Sync), t0: Instant) -> Result<
         styles: Arc::new(Styles::default()),
         strings: Arc::new(StringTable::new()),
         date1904: false,
+        extras: Arc::default(),
         at: t0.elapsed(),
     });
     send(Msg::Sheet { index: 0, sheet, at: t0.elapsed() });

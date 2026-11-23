@@ -166,6 +166,8 @@ pub struct Doc {
     pub history: crate::edit::History,
     /// Há alterações não salvas.
     pub dirty: bool,
+    /// Recálculo em segundo plano (F4).
+    pub calc: crate::calc::Calc,
 }
 
 impl Doc {
@@ -629,7 +631,7 @@ impl SheetsApp {
         let path = loader.path.clone();
         for m in msgs {
             match m {
-                Msg::Opened { sheets, active, styles, strings, date1904, at } => {
+                Msg::Opened { sheets, active, styles, strings, date1904, extras, at } => {
                     self.note("arquivo aberto", at);
                     self.remember_recent(&path);
                     let looks = Arc::new(Looks::new(&styles));
@@ -650,6 +652,7 @@ impl SheetsApp {
                         finished: None,
                         history: Default::default(),
                         dirty: false,
+                        calc: crate::calc::Calc::new(extras),
                     });
                     self.font_key = (0, 0);
                 }
@@ -669,7 +672,10 @@ impl SheetsApp {
                         d.finished = Some(at);
                     }
                     self.message = format!("Pronto em {} ms", at.as_millis());
+                    self.refresh_table_slicers();
+                    self.refresh_charts();
                     self.scripted_edits();
+                    self.calc_kick();
                 }
                 Msg::Failed(e) => {
                     self.start_font_scan();
@@ -1164,7 +1170,7 @@ impl SheetsApp {
         let (r, c) = v.cur;
         if let Some(f) = duck_calc::cell_formula(sheet, r, c) {
             out.push('=');
-            out.push_str(&f);
+            out.push_str(&duck_calc::locale::to_pt(&f));
             return;
         }
         let cell = sheet.cell(r, c, &doc.strings);
@@ -1358,6 +1364,14 @@ impl SheetsApp {
             if g.grid.contains(x, y) && self.loader.is_none() {
                 self.pick_and_open(cx);
             }
+            return;
+        }
+        // Segmentação de dados.
+        if g.grid.contains(x, y)
+            && let Some((obj, item)) = self.slicer_hit(&g, x, y)
+        {
+            self.commit_edit();
+            self.slicer_click(obj, item, mods.ctrl || mods.logo);
             return;
         }
         // Botão de filtro num cabeçalho.
@@ -1825,6 +1839,20 @@ impl SheetsApp {
             },
             Key::F(3) => self.find_next(cx.waker(), shift),
             Key::F(2) => self.start_edit(None, false),
+            // F9: recalcula os voláteis; Ctrl+Alt+F9 (ou Shift+F9): tudo.
+            Key::F(9) => {
+                let all = shift || (mods.ctrl && mods.alt);
+                if let Some(doc) = &mut self.doc {
+                    doc.calc.cancel();
+                    doc.calc.request(if all {
+                        crate::calc::Pending::All
+                    } else {
+                        crate::calc::Pending::Volatile
+                    });
+                }
+                self.message = "Calculando…".into();
+                self.calc_kick();
+            }
             Key::Delete => self.clear_selection(),
             Key::Backspace => self.start_edit(Some(""), false),
             Key::F(5) => {
@@ -2087,7 +2115,7 @@ impl App for SheetsApp {
                     cx.exit();
                     return;
                 }
-                let b = self.poll_search() | saved.is_some();
+                let b = self.poll_search() | saved.is_some() | self.poll_calc();
                 if a && let Some(q) = self.opts.find.take() {
                     // `--find`: busca assim que a aba ativa chegar.
                     if self.doc.as_ref().is_some_and(|d| d.slot().data.is_some() && !d.slot().preview) {

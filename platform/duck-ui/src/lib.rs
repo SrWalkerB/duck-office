@@ -93,6 +93,55 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// Triângulo cheio, recortado por `clip` (na CPU: o polígono recortado
+    /// vira um leque de triângulos).
+    pub fn triangle(&mut self, a: [f32; 2], b: [f32; 2], c: [f32; 2], clip: &Rect, color: Rgba) {
+        if color[3] == 0 {
+            return;
+        }
+        let inside = |p: &[f32; 2]| p[0] >= clip.x0 && p[0] <= clip.x1 && p[1] >= clip.y0 && p[1] <= clip.y1;
+        if inside(&a) && inside(&b) && inside(&c) {
+            self.out.push(Instance::triangle(a, b, c, color));
+            return;
+        }
+        let poly = clip_polygon(&[a, b, c], clip);
+        for i in 1..poly.len().saturating_sub(1) {
+            self.out.push(Instance::triangle(poly[0], poly[i], poly[i + 1], color));
+        }
+    }
+
+    /// Polígono convexo cheio (leque a partir do primeiro vértice).
+    pub fn polygon(&mut self, pts: &[[f32; 2]], clip: &Rect, color: Rgba) {
+        for i in 1..pts.len().saturating_sub(1) {
+            self.triangle(pts[0], pts[i], pts[i + 1], clip, color);
+        }
+    }
+
+    /// Segmento de reta com `w` pixels de espessura.
+    pub fn line(&mut self, a: [f32; 2], b: [f32; 2], w: f32, clip: &Rect, color: Rgba) {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-3 {
+            return;
+        }
+        if dx.abs() < 1e-3 || dy.abs() < 1e-3 {
+            // Reta na horizontal ou vertical: retângulo (mais nítido).
+            let h = w / 2.0;
+            let r = Rect::new(
+                a[0].min(b[0]) - if dx.abs() < 1e-3 { h } else { 0.0 },
+                a[1].min(b[1]) - if dy.abs() < 1e-3 { h } else { 0.0 },
+                a[0].max(b[0]) + if dx.abs() < 1e-3 { h } else { 0.0 },
+                a[1].max(b[1]) + if dy.abs() < 1e-3 { h } else { 0.0 },
+            );
+            self.fill(r, clip, color);
+            return;
+        }
+        let (nx, ny) = (-dy / len * w / 2.0, dx / len * w / 2.0);
+        let p =
+            [[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]];
+        self.polygon(&p, clip, color);
+    }
+
     /// Retângulo tracejado (bordas pontilhadas e tracejadas).
     pub fn dashed(&mut self, r: Rect, clip: &Rect, color: Rgba, period: f32, on: f32) {
         let c = r.intersect(clip);
@@ -536,6 +585,33 @@ impl TabBar {
         let x = x + self.scroll;
         self.spans.iter().position(|&(a, b)| x >= a && x < b)
     }
+}
+
+/// Recorta um polígono convexo pelo retângulo (Sutherland–Hodgman).
+fn clip_polygon(pts: &[[f32; 2]], r: &Rect) -> Vec<[f32; 2]> {
+    let mut poly: Vec<[f32; 2]> = pts.to_vec();
+    // (eixo, limite, manter >=)
+    for (axis, lim, keep_ge) in [(0, r.x0, true), (0, r.x1, false), (1, r.y0, true), (1, r.y1, false)] {
+        if poly.is_empty() {
+            break;
+        }
+        let inside = |p: &[f32; 2]| if keep_ge { p[axis] >= lim } else { p[axis] <= lim };
+        let mut out = Vec::with_capacity(poly.len() + 2);
+        for i in 0..poly.len() {
+            let cur = poly[i];
+            let prev = poly[(i + poly.len() - 1) % poly.len()];
+            let (ci, pi) = (inside(&cur), inside(&prev));
+            if ci != pi {
+                let t = (lim - prev[axis]) / (cur[axis] - prev[axis]);
+                out.push([prev[0] + (cur[0] - prev[0]) * t, prev[1] + (cur[1] - prev[1]) * t]);
+            }
+            if ci {
+                out.push(cur);
+            }
+        }
+        poly = out;
+    }
+    poly
 }
 
 #[cfg(test)]

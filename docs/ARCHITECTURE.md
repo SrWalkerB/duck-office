@@ -818,12 +818,36 @@ Conferido com as opções de teste (`--novo`, `--edit mesclar…`, `--menu`): me
 
 A vitrine ganhou uma tabela do Excel com filtro (aba "Recursos"), que entra no round-trip do CI.
 
+### Status da F4 (22/11/2026): motor de cálculo
+
+O motor fica no `duck-calc` e não depende da janela.
+
+- **Compilação** (`parse.rs`): o texto da fórmula (como está no arquivo, em inglês) vira uma árvore num vetor (`Formula { nodes, args, root }`). Cada coordenada é absoluta ou um deslocamento a partir da célula avaliada, então a árvore vale para todas as células de um modelo relativo ou grupo compartilhado: o `Engine` guarda uma árvore por definição (`OnceLock` por índice, sem trava na leitura). Abas, tabelas (`[#This Row]`, `#Data`, `#All`, intervalos de colunas, nomes com escape), nomes definidos e arquivos externos são resolvidos aqui.
+- **Valores** (`value.rs`): `V<'e>` com texto emprestado da aba ou da fórmula (`Cow`), referências (`Rng`) e matrizes. As conversões seguem o Excel em português: vírgula decimal, `VERDADEIRO`/`FALSO`, datas digitadas ("jan-26", "1jan", "15/03/2026"), comparação sem diferenciar maiúsculas, 15 algarismos significativos.
+- **Avaliação** (`eval.rs`): `Book` é a visão do arquivo (abas por referência, strings, nomes, arquivos externos, "agora"); `Overlay` guarda os resultados novos por cima, para o cálculo rodar sem mexer nas abas. Interseção implícita, como no Excel antigo; elemento a elemento dentro de SOMARPRODUTO e em fórmulas matriciais.
+- **Buscas** (`index.rs`): índice por vetor (hash → posições em ordem, CSR), montado uma vez e compartilhado (`Mutex<HashMap<Rng, Arc<OnceLock<_>>>>`: quem pede o mesmo índice espera quem está montando). O índice dos critérios também põe textos numéricos pela chave do número (CONT.SE casa 5 com "5"; PROCV não).
+- **Grafo** (`recalc.rs`): blocos = células seguidas de uma coluna com o mesmo id de fórmula; precedentes = retângulos (relativos andam com o bloco); um retângulo que cobre mais de 32 blocos de uma coluna passa por um nó de coluna. Níveis por Kahn; cada nível é cortado em tarefas de 2 mil linhas para o rayon. Blocos que leem a própria coluna (saldo acumulado) são calculados de cima para baixo com um overlay local. Referência circular: o que sobra vai num nível final, uma vez.
+- **No app** (`apps/duck-sheets/src/calc.rs`): uma thread recalcula lendo as abas por `Arc`; o resultado volta como overlay e é gravado com `Sheet::set_calc_values` (poucas células marcadas uma a uma; muitas viram faixas de linhas regravadas, sem memória por célula). Editar cancela o cálculo (as tarefas checam o sinal a cada pedaço) e junta o que faltava ao próximo.
+
+Medido no arquivo de referência (10,1 milhões de fórmulas, 32 threads): compilação de 40 mil definições em 14 ms; conferência fórmula a fórmula em 0,5–0,6 s (16–23 milhões de fórmulas por segundo); grafo com 80 mil blocos em 30 ms; recálculo completo em 28 níveis em 0,6 s; só os voláteis em 0,2 s. As 10.111.650 fórmulas ficam iguais ao Excel (com o "hoje" do dia em que o arquivo foi salvo). Aberto no app com a data de hoje, 4.583 valores mudam; a cópia salva confere com 0 divergências no calamine.
+
+As diferenças encontradas pela conferência e corrigidas mostram o tipo de compatibilidade que importa: MÊS de célula vazia é 1 (data 0 = 00/01/1900); "JAN - 26" vira janeiro de 2026; "1jan" é uma data; SOMASE com outro arquivo fechado dá #VALOR!; tabela de outro arquivo dá #REF!; nomes de coluna com espaço no fim.
+
+### Status da F5 (22/11/2026): gráficos e segmentações de dados na tela
+
+- **Leitura** (`duck-xlsx/src/drawing.rs`): `xl/drawings/drawingN.xml` de cada aba, com âncoras de duas células, de uma célula e absolutas. Os elementos são percorridos como árvore (filhos diretos com aninhamento, porque grupos ficam dentro de grupos com o mesmo nome de tag); `mc:AlternateContent` usa o `mc:Choice`. Grupos guardam a posição dos filhos num espaço próprio (`chOff`/`chExt`): as transformações são compostas até o elemento de cima, e cada objeto fica com a fração da âncora que ocupa.
+- **Modelo** (`duck-core/src/drawing.rs`): `Object { anchor, frac, kind }` em `Layout::objects`. Gráfico = plots (tipo, agrupamento, eixo secundário, rótulos) com séries (fórmulas das referências, valores e categorias em cache, cores, linha, rótulos); cores do tema guardadas com os ajustes (`lumMod`, `lumOff`, `shade`, `tint`) e resolvidas no desenho.
+- **Segmentações**: os caches (`xl/slicerCaches/`) são lidos uma vez por arquivo. Os de tabela dinâmica trazem os itens (índices nos `sharedItems` do cache da tabela dinâmica, ligados pelo `pivotCacheId` do `x14:pivotCacheDefinition`) e a seleção; os de tabela do Excel apontam para (tabela, coluna) e os itens são calculados no app, em paralelo, com o texto que a célula mostra e a marca do filtro da tabela.
+- **Desenho** (`apps/duck-sheets/src/chart.rs`): a âncora vira pixels pelas larguras e alturas da visão (acompanha zoom, rolagem e painéis congelados; cada painel recorta os seus). O `duck-gfx` ganhou um tipo de instância triângulo; o `Painter` recorta triângulos na CPU (Sutherland–Hodgman) e monta linhas grossas, polígonos e fatias de pizza com eles. Escala "bonita" do eixo (1, 2, 2,5, 5 × 10ⁿ), largura das barras pela regra do Excel (`gapWidth`, `overlap`), propriedades de texto (`c:txPr`: tamanho, negrito, cor — eixos com texto branco ficam escondidos, como no arquivo).
+- **Valores vivos**: as séries com referência a um intervalo do arquivo são relidas das células ao abrir, depois de cada edição e depois de cada recálculo.
+
+Conferido na planilha de painel de teste (20 gráficos, 26 segmentações, formas e imagens): leitura do arquivo continua em 0,3 s; o desenho fica próximo do que o Excel e o OnlyOffice mostram. A vitrine ganhou dois gráficos (barras + linha no eixo secundário, rosca) que entram no round-trip.
+
 ---
 
 ## Questões em aberto
 
-- **Licença** do projeto (MIT/Apache-2.0, GPL, outra).
 - **Nome próprio** para a biblioteca de `platform/`, já que ela vai ser usada fora da suíte (por enquanto os crates usam o prefixo `duck-`).
 - **Formato de arquivo nativo**: ideia registrada no ADR-013, com as perguntas que precisam de resposta antes de decidir.
 - **Corpus de testes**: reunir planilhas públicas grandes e variadas além do gerador sintético.
-- **Motor de cálculo**: avaliar compatibilidade numérica com o Excel (datas, precisão, funções financeiras) antes da F4.
+- **Motor de cálculo**: funções financeiras e de matriz dinâmica; corpus maior de planilhas reais para a conferência.
