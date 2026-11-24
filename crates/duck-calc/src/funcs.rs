@@ -3228,6 +3228,12 @@ fn indirect<'e>(e: &mut Eval<'e>, a: &[u32]) -> Res<V<'e>> {
     let f = parse::compile(s.trim(), e.sheet, e.row, e.col, e.book);
     match f.node(f.root) {
         Node::Area(ar) => e.area(ar).map(V::Ref).ok_or(CellError::Ref),
+        // Nome definido: só vale se for uma referência.
+        Node::Name(i) => match e.name(*i) {
+            V::Ref(r) => Ok(V::Ref(r)),
+            V::Err(x) => Err(x),
+            _ => Err(CellError::Ref),
+        },
         _ => Err(CellError::Ref),
     }
 }

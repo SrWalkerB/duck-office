@@ -86,6 +86,10 @@ pub fn retext_layout(l: &Layout, map: &SheetMap) -> Option<Layout> {
             *s = n;
         }
     };
+    for v in &mut new.validations {
+        fix(&mut v.f1);
+        fix(&mut v.f2);
+    }
     for r in &mut new.cond {
         match &mut r.kind {
             CfKind::CellIs { f1, f2, .. } => {

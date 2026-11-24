@@ -45,12 +45,19 @@ pub use layout::{
     AutoFilter, CellRange, ColSpec, ControlRef, FilterColumn, FilterKind, Hyperlink, Layout, Pane, RowSpec,
     SheetView, Table,
 };
+pub use notes::Note;
 pub use numfmt::{Formatted, NumFmt};
+pub use protect::{BookProtection, Password, ProtectedRange, SheetProtection};
 pub use shift::{Axis, FormulaOps, Shift};
 pub use styles::{
     Alignment, Border, BorderSide, BorderStyle, CellXf, Color, Dxf, FileCounts, Fill, Font, HAlign, RichRun,
     RunFont, Styles, Theme, VAlign, apply_tint, rotation_angle,
 };
+pub use valid::{DataValidation, DvAlert, DvKind, DvOp};
+
+pub mod notes;
+pub mod protect;
+pub mod valid;
 
 /// Linhas por bloco.
 pub const BLOCK_ROWS: usize = 1024;
@@ -1371,6 +1378,8 @@ pub struct BookExtras {
     pub externals: Vec<ExternalBook>,
     /// Caches das tabelas dinâmicas (sem os registros, lidos sob demanda).
     pub pivot_caches: Vec<pivot::PivotCache>,
+    /// Proteção da pasta (`<workbookProtection>`).
+    pub protection: Option<BookProtection>,
     /// Data e hora (serial) em que o arquivo foi salvo, se o arquivo disser
     /// (`docProps/core.xml`): é o "hoje" dos valores guardados.
     pub saved_at: Option<f64>,

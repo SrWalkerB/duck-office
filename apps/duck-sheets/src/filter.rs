@@ -520,9 +520,10 @@ impl SheetsApp {
 
     /// Grava o filtro e acerta as linhas escondidas (com `pre` antes, ex.:
     /// classificar), num passo só.
-    pub fn set_filter(&mut self, target: Target, af: Option<AutoFilter>, pre: Option<Command>) {
-        let Some(doc) = self.doc.as_ref() else { return };
-        let Some((sheet, v)) = doc.current() else { return };
+    /// `false` = nada mudou (a planilha protegida recusa, por exemplo).
+    pub fn set_filter(&mut self, target: Target, af: Option<AutoFilter>, pre: Option<Command>) -> bool {
+        let Some(doc) = self.doc.as_ref() else { return false };
+        let Some((sheet, v)) = doc.current() else { return false };
         // Linhas a esconder ou mostrar depois do `pre` (que só reordena: o
         // filtro é avaliado no modelo depois de reordenar, abaixo).
         let mut cmds = Vec::new();
@@ -540,20 +541,24 @@ impl SheetsApp {
         });
         let _ = v;
         if !self.run_command(Command::Group(cmds)) {
-            return;
+            return false;
         }
         // Agora (depois de reordenar), quais linhas ficam escondidas; entra
         // no mesmo passo de desfazer.
-        let Some(range) = range else { return };
+        let Some(range) = range else { return true };
         let changes = self.filter_changes(range, af.as_ref());
         let n = changes.iter().filter(|c| c.1).count();
+        // Esconder as linhas é parte do filtro: a proteção já deixou filtrar.
+        self.unchecked = true;
         if !changes.is_empty() && self.run_command(Command::RowsHidden(changes)) {
             self.merge_last_steps();
         }
+        self.unchecked = false;
         if af.as_ref().is_some_and(|f| !f.columns.is_empty()) {
             self.message =
                 format!("Filtro aplicado ({} linhas escondidas agora)", crate::app::fmt_int(n as u64));
         }
+        true
     }
 
     /// Linhas de dados de `range` cuja visibilidade muda com o filtro `af`.
@@ -659,21 +664,26 @@ impl SheetsApp {
         if let Some(f) = filters(sheet).into_iter().find(|f| f.filter.range.contains(r, c)) {
             match f.target {
                 // Desligar: as linhas voltam e o filtro sai.
-                Target::Sheet => self.set_filter(Target::Sheet, None, None),
+                Target::Sheet => {
+                    self.set_filter(Target::Sheet, None, None);
+                }
                 Target::Table(_) => self.clear_filters(),
             }
             return;
         }
         if sheet.layout.autofilter.is_some() {
-            self.set_filter(Target::Sheet, None, None);
-            self.message = "Filtro retirado".into();
+            if self.set_filter(Target::Sheet, None, None) {
+                self.message = "Filtro retirado".into();
+            }
             return;
         }
         let Some(reg) = filter_range(sheet, v.sel(), (r, c), v.rows.len(), v.cols.len()) else {
             self.message = "Selecione uma célula dentro dos dados".into();
             return;
         };
-        self.set_filter(Target::Sheet, Some(AutoFilter { range: reg, columns: Vec::new() }), None);
+        if !self.set_filter(Target::Sheet, Some(AutoFilter { range: reg, columns: Vec::new() }), None) {
+            return;
+        }
         let (mut a, mut b) = (String::new(), String::new());
         crate::app::cell_name(reg.first_row, reg.first_col, &mut a);
         crate::app::cell_name(reg.last_row, reg.last_col, &mut b);

@@ -819,6 +819,36 @@ fn saved_as_xlsx() {
     assert_eq!(left.len(), 3, "{left:?}");
 }
 
+/// Validação lida do binário; nota e proteção postas no app vão para o `.xlsx`.
+#[test]
+fn validation_notes_and_protection_are_saved() {
+    use duck_core::{BookProtection, Command, Note, SheetProtection};
+    let dir = Dir::new("validacao");
+    let p = dir.file("a.xlsb");
+    package(&p, &parts());
+    let mut wb = open(&p);
+    let v = &wb.sheets[0].layout.validations;
+    assert_eq!(v.len(), 1);
+    assert_eq!((v[0].kind, v[0].f1.as_str()), (duck_core::DvKind::List, "$A$3:$A$5"));
+    assert_eq!((v[0].ranges.as_slice(), v[0].error.as_str()), (&[range(9, 0, 9, 0)][..], "Não pode"));
+    assert!(v[0].dropdown && v[0].allow_blank && v[0].show_error && !v[0].show_input);
+
+    Command::Notes(vec![Note::new(3, 1, "Ana", "conferir")]).apply(&mut wb.sheets[0]);
+    Command::Protect(Some(Box::default())).apply(&mut wb.sheets[0]);
+    let sheets: Vec<Option<&Sheet>> = wb.sheets.iter().map(Some).collect();
+    let q = dir.file("b.xlsx");
+    let book = BookProtection { structure: true, ..Default::default() };
+    let opts = SaveOptions { book_protection: Some(Some(book.clone())), ..Default::default() };
+    crate::save_file(&p, &q, &sheets, &wb.shared_strings, &wb.styles, &opts).unwrap();
+    let back = open(&q);
+    let l = &back.sheets[0].layout;
+    assert_eq!(l.validations, wb.sheets[0].layout.validations);
+    assert_eq!((l.notes.len(), l.notes[0].text.as_str(), l.notes[0].row), (1, "conferir", 3));
+    assert_eq!(l.protection, Some(SheetProtection::default()));
+    assert_eq!(back.extras.protection, Some(book));
+    assert_eq!(formula(&back.sheets[0], 2, 1).unwrap(), "A3*$A$1");
+}
+
 /// Inserir linhas e depois salvar.
 #[test]
 fn structural_edits_are_saved() {

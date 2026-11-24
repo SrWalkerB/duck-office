@@ -84,13 +84,18 @@ pub fn has_book(step: &Step) -> bool {
 
 /// O passo não mexe na lista de abas (só nas listas do arquivo)?
 pub fn lists_only(step: &Step) -> bool {
-    step.iter().all(|(_, c)| match c {
-        Command::Book(op) => {
-            op.0.downcast_ref::<Mutex<Option<TabOp>>>()
-                .is_some_and(|m| m.lock().is_ok_and(|o| matches!(&*o, Some(TabOp::Refs(_)))))
-        }
-        _ => true,
-    })
+    !step.iter().any(|(_, c)| changes_tabs(c))
+}
+
+/// O comando muda a lista de abas (criar, excluir, mover, renomear, ocultar)?
+pub fn changes_tabs(cmd: &Command) -> bool {
+    match cmd {
+        Command::Book(op) => !op
+            .0
+            .downcast_ref::<Mutex<Option<TabOp>>>()
+            .is_some_and(|m| m.lock().is_ok_and(|o| matches!(&*o, Some(TabOp::Refs(_))))),
+        _ => false,
+    }
 }
 
 /// Aplica no documento e devolve o inverso.
@@ -221,6 +226,9 @@ impl SheetsApp {
     /// As abas podem mudar agora? Senão, explica.
     fn tabs_editable(&mut self) -> bool {
         self.commit_edit();
+        if self.answering() {
+            return false;
+        }
         if self.saving.is_some() {
             self.message = "Aguarde: salvando…".into();
             return false;
@@ -234,7 +242,8 @@ impl SheetsApp {
             self.message = "Um arquivo CSV tem uma aba só; salve como .xlsx para ter mais".into();
             return false;
         }
-        true
+        // A estrutura da pasta protegida não deixa mexer nas abas.
+        !self.structure_locked()
     }
 
     fn refs(&self) -> Vec<&Sheet> {

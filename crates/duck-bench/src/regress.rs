@@ -166,6 +166,7 @@ fn measure(path: &Path) -> Result<Metrics, String> {
     charts(&wb, &mut m);
     conditional(&wb, &mut m);
     links(&wb, &mut m);
+    rules(&wb, &mut m);
     macros(path, &mut m);
     drop(wb);
     others(path, &mut m)?;
@@ -190,6 +191,30 @@ fn conditional(wb: &Workbook, m: &mut Metrics) {
         count(&|k| matches!(k, CfKind::DataBar { look, .. } if **look != duck_core::BarLook::default())),
         Rule::Same,
     );
+}
+
+/// Validação de dados, notas e proteção lidas, e as listas que se resolvem.
+fn rules(wb: &Workbook, m: &mut Metrics) {
+    let sum = |f: &dyn Fn(&duck_core::Layout) -> usize| {
+        wb.sheets.iter().map(|s| f(&s.layout)).sum::<usize>() as f64
+    };
+    m.add("validação: regras", sum(&|l| l.validations.len()), Rule::Same);
+    let refs: Vec<&Sheet> = wb.sheets.iter().collect();
+    let book = duck_calc::Book::new(refs, &wb.shared_strings, &wb.extras, wb.date1904);
+    let (mut lists, mut ok) = (0, 0);
+    for (i, s) in wb.sheets.iter().enumerate() {
+        for v in s.layout.validations.iter().filter(|v| v.kind == duck_core::DvKind::List) {
+            lists += 1;
+            let (r, c) = v.base();
+            ok += duck_calc::valid::list_items(&book, i as u32, v, r, c).is_some() as u32;
+        }
+    }
+    m.add("validação: listas", lists as f64, Rule::Same);
+    m.add("validação: listas com itens", ok as f64, Rule::AtLeast);
+    m.add("notas", sum(&|l| l.notes.len()), Rule::Same);
+    m.add("notas: conversas", sum(&|l| l.notes.iter().filter(|n| n.thread.is_some()).count()), Rule::Same);
+    let locked = wb.sheets.iter().filter(|s| s.protected().is_some()).count();
+    m.add("abas protegidas", locked as f64, Rule::Same);
 }
 
 /// Links de objetos que levam a uma aba e célula que existem.

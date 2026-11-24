@@ -208,6 +208,10 @@ impl SheetsApp {
         if !self.editable() {
             return false;
         }
+        let active = self.doc.as_ref().map_or(0, |d| d.active);
+        if !self.allowed(&[(active, &cmd)]) {
+            return false;
+        }
         // A busca lê a aba numa thread: cancela (o resultado ficaria velho).
         if let Some(f) = &mut self.find {
             f.job = None;
@@ -255,6 +259,10 @@ impl SheetsApp {
         if !self.editable() {
             return false;
         }
+        let list: Vec<(usize, &Command)> = step.iter().map(|(i, c)| (*i, c)).collect();
+        if !self.allowed(&list) {
+            return false;
+        }
         if let Some(f) = &mut self.find {
             f.job = None;
             f.result = None;
@@ -273,6 +281,11 @@ impl SheetsApp {
         let mut inverse = Vec::with_capacity(step.len());
         let mut touched = Vec::new();
         for (idx, cmd) in step {
+            if let Command::BookProtect(p) = cmd {
+                let old = crate::protect::swap(&mut doc.protection, &mut doc.protection_changed, p);
+                inverse.push((idx, old));
+                continue;
+            }
             if let Command::Book(op) = &cmd {
                 inverse.extend(crate::tabs::apply(doc, op).map(|c| (idx, c)));
                 continue;
@@ -380,6 +393,11 @@ impl SheetsApp {
         let mut inverse = Vec::with_capacity(step.len());
         let mut touched = Vec::new();
         for (idx, cmd) in step {
+            if let Command::BookProtect(p) = cmd {
+                let old = crate::protect::swap(&mut doc.protection, &mut doc.protection_changed, p);
+                inverse.push((idx, old));
+                continue;
+            }
             if let Command::Book(op) = &cmd {
                 inverse.extend(crate::tabs::apply(doc, op).map(|c| (idx, c)));
                 continue;
@@ -516,8 +534,15 @@ impl SheetsApp {
             .map(|(c, px)| (*c, Some(px_to_width(*px, doc.mdw))))
             .filter(|(c, w)| *w != sheet.col_width(*c))
             .collect();
-        if !changes.is_empty() {
-            self.run_command(Command::ColWidths(changes));
+        if !changes.is_empty() && !self.run_command(Command::ColWidths(changes)) {
+            self.undo_resize();
+        }
+    }
+
+    /// O tamanho arrastado na tela foi recusado: volta ao do arquivo.
+    fn undo_resize(&mut self) {
+        if let Some(i) = self.doc.as_ref().map(|d| d.active) {
+            self.after_change(i, Affected { rebuild: true, ..Default::default() });
         }
     }
 
@@ -547,8 +572,8 @@ impl SheetsApp {
         let Some((sheet, _)) = self.doc.as_ref().and_then(|d| d.current()) else { return };
         let list: Vec<(u32, Option<f32>)> =
             rows.iter().filter(|&&r| sheet.row_height(r) != height).map(|&r| (r, height)).collect();
-        if !list.is_empty() {
-            self.run_command(Command::RowHeights(list));
+        if !list.is_empty() && !self.run_command(Command::RowHeights(list)) {
+            self.undo_resize();
         }
     }
 
@@ -601,6 +626,10 @@ impl SheetsApp {
         if let Some(m) = v.merges.at(row, col) {
             (row, col) = (m.first_row, m.first_col);
         }
+        if !self.can_edit_cell(row, col) {
+            return;
+        }
+        self.dv_list = None;
         let mut input = TextInput::new();
         input.multiline = true;
         let wrap = self.doc.as_ref().and_then(|d| Some((d, d.current()?))).is_some_and(|(d, (s, v))| {
@@ -705,11 +734,19 @@ impl SheetsApp {
                 CellChange { row: r, col: c, value, formula: None, style: Some(style) }
             }
         };
+        // Validação de dados: o valor pode ser recusado (ou perguntar).
+        let invalid = self.broken_rule(std::slice::from_ref(&change));
         let set = Command::SetCells(vec![change]);
-        self.run_command(match rich {
+        let cmd = match rich {
             Some(x) => Command::Group(vec![set, x]),
             None => set,
-        });
+        };
+        match invalid {
+            Some(rule) => self.ask_invalid(&rule, cmd, (r, c), text, false),
+            None => {
+                self.run_command(cmd);
+            }
+        }
         true
     }
 
@@ -718,6 +755,10 @@ impl SheetsApp {
         out.clear();
         let Some(doc) = &self.doc else { return };
         let Some((sheet, _)) = doc.current() else { return };
+        // Como em `formula_text`: a fórmula oculta não aparece no editor.
+        if sheet.formula_hidden(&doc.styles, r, c) {
+            return;
+        }
         if let Some(f) = duck_calc::cell_formula(sheet, r, c) {
             out.push('=');
             out.push_str(&duck_calc::locale::to_pt(&f));
@@ -769,7 +810,10 @@ impl SheetsApp {
         let ed = self.editor.as_mut()?;
         let mv = |app: &mut Self, dr: i32, dc: i32| {
             app.commit_edit();
-            app.move_cur(dr, dc, false, false);
+            // Um valor recusado segura o cursor na célula.
+            if app.dialog.is_none() {
+                app.move_cur(dr, dc, false, false);
+            }
         };
         match key {
             Key::Escape => self.cancel_edit(),
@@ -914,7 +958,10 @@ impl SheetsApp {
         let edits = std::mem::take(&mut self.opts.edits);
         let mut clipboard = String::new();
         for e in &edits {
-            if self.scripted_tabs(e)
+            self.scripted_refusal();
+            // `validar:`, `nota:`, `proteger=`... (ver `scripted_rules`).
+            if self.scripted_rules(e)
+                || self.scripted_tabs(e)
                 || self.scripted_fill(e)
                 || self.scripted_object(e)
                 || self.scripted_cells(e)
@@ -1165,6 +1212,9 @@ impl SheetsApp {
             self.start_edit(Some(&text.replace("\\n", "\n")), false);
             self.commit_edit();
         }
+        if self.opts.screenshot.is_none() {
+            self.scripted_refusal();
+        }
         for _ in 0..std::mem::take(&mut self.opts.undo) {
             self.undo();
         }
@@ -1261,6 +1311,7 @@ impl SheetsApp {
         let sheets: Vec<Option<Arc<Sheet>>> =
             doc.sheets.iter().map(|s| if s.preview { None } else { s.data.clone() }).collect();
         let (strings, styles) = (doc.strings.clone(), doc.styles.clone());
+        let book_protection = doc.protection_changed.then(|| doc.protection.clone());
         let tabs = Some(crate::tabs::plan(doc));
         let (tx, rx) = channel();
         let Some(waker) = self.waker.clone() else { return };
@@ -1277,7 +1328,7 @@ impl SheetsApp {
                         &refs,
                         &strings,
                         &styles,
-                        &duck_xlsx::SaveOptions { tabs, ..Default::default() },
+                        &duck_xlsx::SaveOptions { tabs, book_protection, ..Default::default() },
                     )
                 });
                 // As abas voltam a ter um dono só antes de avisar a janela.
@@ -1336,6 +1387,7 @@ impl SheetsApp {
                     doc.dirty = false;
                     // De um `.xlsb`: daqui em diante é o arquivo novo.
                     doc.binary = None;
+                    doc.protection_changed = false;
                     crate::tabs::saved(doc, &rep);
                 }
                 self.remember_recent(&job.dest);
@@ -1485,6 +1537,12 @@ impl SheetsApp {
                             *r = new;
                         }
                     }
+                }
+            }
+            // Validação desta aba que aponta para a aba mudada.
+            for f in layout.validations.iter_mut().flat_map(|v| [&mut v.f1, &mut v.f2]) {
+                if let Some((new, _)) = duck_calc::adjust_refs(f, shift, false, &name) {
+                    *f = new;
                 }
             }
             if layout != data.layout {

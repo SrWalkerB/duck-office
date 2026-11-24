@@ -164,6 +164,10 @@ impl SheetsApp {
     /// O objeto de cima no ponto (os controles de formulário ficam de fora:
     /// a posição deles também está em outras partes do arquivo).
     fn object_at(&self, g: &Geom, x: f32, y: f32) -> Option<usize> {
+        // Protegidos, não se deixam selecionar: o clique vai para a célula.
+        if self.objects_locked() {
+            return None;
+        }
         let (sheet, v) = self.doc.as_ref()?.current()?;
         let q = g.quads.iter().find(|q| !q.rect.is_empty() && q.rect.contains(x, y))?;
         let hit = sheet.layout.objects.iter().enumerate().rev().find(|(_, o)| {

@@ -415,6 +415,11 @@ impl SheetsApp {
             doc.styles = styles;
             self.font_key = (0, 0);
         }
+        // Validação de dados: uma célula que não aceita segura todas.
+        if let Some(rule) = self.broken_rule(&changes) {
+            let cmd = Command::SetCells(changes);
+            return self.ask_invalid(&rule, cmd, (ed.row, ed.col), text, true);
+        }
         let n = changes.len() as u64;
         if self.run_step(vec![(active, Command::SetCells(changes))]) {
             self.message = format!("{} células preenchidas", fmt_int(n));

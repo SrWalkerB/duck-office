@@ -25,6 +25,7 @@ mod olap;
 mod regress;
 mod roundtrip;
 mod showcase;
+mod showcase_rules;
 mod verify;
 
 // Alocador com arenas por thread (ADR-012): menos contenção e menos memória

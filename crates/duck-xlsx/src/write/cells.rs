@@ -1,6 +1,6 @@
 //! Células movidas, inseridas ou excluídas (só células): o que está no XML da
-//! aba depois de `</sheetData>` (formatação condicional, validação, links,
-//! minigráficos) acompanha. As células saem do modelo, como qualquer edição.
+//! aba depois de `</sheetData>` (formatação condicional, links,
+//! minigráficos) acompanha; validação e proteção saem do modelo (`tail`). As células saem do modelo, como qualquer edição.
 
 use duck_core::CellRange;
 use duck_core::cells::CellOp;
@@ -48,13 +48,7 @@ pub(super) fn tail(xml: &[u8], op: &CellOp, sheet: &str) -> Vec<u8> {
         let name = &xml[lt + 1..lt + 1 + n];
         let container = matches!(
             name,
-            b"conditionalFormatting"
-                | b"x14:conditionalFormatting"
-                | b"dataValidation"
-                | b"x14:dataValidation"
-                | b"hyperlink"
-                | b"ignoredError"
-                | b"protectedRange"
+            b"conditionalFormatting" | b"x14:conditionalFormatting" | b"hyperlink" | b"ignoredError"
         );
         if !container {
             out.extend_from_slice(&xml[lt..end]);
@@ -182,7 +176,7 @@ mod tests {
             out,
             concat!(
                 r#"<conditionalFormatting sqref="A1 A4 D6:D7"><cfRule type="expression"><formula>A1&gt;$E$6</formula></cfRule></conditionalFormatting>"#,
-                r#"<dataValidations count="1"><dataValidation sqref="E6"><formula1>$E$6:$E$7</formula1></dataValidation></dataValidations>"#,
+                r#"<dataValidations count="1"><dataValidation sqref="B2"><formula1>$B$2:$B$3</formula1></dataValidation></dataValidations>"#,
                 r#"<hyperlinks><hyperlink ref="D6" r:id="rId1"/></hyperlinks></worksheet>"#,
             )
         );

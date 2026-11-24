@@ -29,6 +29,8 @@
 mod actions;
 mod app;
 mod axis;
+#[cfg(test)]
+mod blocked;
 mod calc;
 mod cells;
 mod cficon;
@@ -36,6 +38,7 @@ mod chart;
 mod complete;
 mod control;
 mod cube;
+mod dialog;
 mod draw;
 mod edit;
 mod fill;
@@ -48,11 +51,13 @@ mod loader;
 mod look;
 mod macros;
 mod menu;
+mod notes;
 mod objects;
 mod outline;
 mod paste;
 mod pivot;
 mod pointing;
+mod protect;
 mod replace;
 mod ribbon;
 mod search;
@@ -62,6 +67,7 @@ mod tabs;
 #[cfg(test)]
 mod testing;
 mod theme;
+mod valid;
 mod zoombar;
 
 use std::path::PathBuf;

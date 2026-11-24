@@ -396,6 +396,13 @@ pub fn plan(
     for r in &mut layout.cond {
         r.ranges = r.ranges.iter().flat_map(|x| op.split(*x)).collect();
     }
+    // Validação, notas e intervalos protegidos.
+    duck_core::valid::move_cells(&mut layout.validations, &op, &|f, dr, dc| crate::shift(f, dr, dc));
+    duck_core::notes::move_cells(&mut layout.notes, &op);
+    layout.protected_ranges.retain_mut(|p| {
+        p.ranges = p.ranges.iter().flat_map(|x| op.split(*x)).collect();
+        !p.ranges.is_empty()
+    });
     layout.links = layout
         .links
         .iter()
@@ -501,6 +508,10 @@ fn adjust_layout(l: &mut duck_core::Layout, op: &CellOp, own: bool, name: &str) 
             *s = n;
         }
     };
+    for v in &mut l.validations {
+        fix(&mut v.f1);
+        fix(&mut v.f2);
+    }
     for r in &mut l.cond {
         match &mut r.kind {
             duck_core::CfKind::CellIs { f1, f2, .. } => {

@@ -68,6 +68,9 @@ pub fn app(sheets: &[(&str, &[(&str, &str)])]) -> SheetsApp {
         macros: None,
         macros_ok: false,
         binary: None,
+        macro_free: Default::default(),
+        protection: None,
+        protection_changed: false,
     });
     for (i, (_, cells)) in sheets.iter().enumerate() {
         a.switch_sheet(i);
@@ -135,15 +138,15 @@ pub fn num(x: f64) -> CellValue {
 }
 
 /// O mouse, sem janela: mesmas rotinas que os eventos chamam.
-mod mouse {
+pub mod mouse {
     use super::*;
     use duck_platform::Modifiers;
 
-    const NONE: Modifiers = Modifiers { ctrl: false, shift: false, alt: false, logo: false };
-    const CTRL: Modifiers = Modifiers { ctrl: true, shift: false, alt: false, logo: false };
+    pub const NONE: Modifiers = Modifiers { ctrl: false, shift: false, alt: false, logo: false };
+    pub const CTRL: Modifiers = Modifiers { ctrl: true, shift: false, alt: false, logo: false };
 
     /// Um ponto dentro da célula (no meio dela).
-    fn at(a: &mut SheetsApp, cell: &str) -> (f32, f32) {
+    pub fn at(a: &mut SheetsApp, cell: &str) -> (f32, f32) {
         let want = parse_cell(cell).unwrap();
         let g = a.geom();
         let v = a.doc.as_ref().unwrap().current().unwrap().1;
@@ -161,7 +164,7 @@ mod mouse {
         ((xs[0] + xs[xs.len() - 1]) as f32 / 2.0, (ys[0] + ys[ys.len() - 1]) as f32 / 2.0)
     }
 
-    fn press(a: &mut SheetsApp, p: (f32, f32), mods: Modifiers, clicks: u8) {
+    pub fn press(a: &mut SheetsApp, p: (f32, f32), mods: Modifiers, clicks: u8) {
         let g = a.geom();
         if a.press_grip(&g, p.0, p.1, mods) || a.press_object(&g, p.0, p.1, mods) {
             return;
@@ -171,14 +174,14 @@ mod mouse {
         }
     }
 
-    fn drag(a: &mut SheetsApp, from: (f32, f32), to: &str, mods: Modifiers) {
+    pub fn drag(a: &mut SheetsApp, from: (f32, f32), to: &str, mods: Modifiers) {
         press(a, from, mods, 1);
         let p = at(a, to);
         a.mouse_move(p.0, p.1);
         a.mouse_up(mods);
     }
 
-    fn handle(a: &mut SheetsApp) -> (f32, f32) {
+    pub fn handle(a: &mut SheetsApp) -> (f32, f32) {
         let g = a.geom();
         let r = crate::fill::handle(&g, a.doc.as_ref().unwrap().current().unwrap().1).unwrap();
         ((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0)
@@ -245,8 +248,23 @@ mod mouse {
         assert!(a.doc.as_ref().unwrap().history.undo.is_empty());
     }
 
+    /// Seleciona a célula e dá um ponto na borda de baixo dela, longe da alça.
+    pub fn border(a: &mut SheetsApp, cell: &str) -> (f32, f32) {
+        let (r, c) = parse_cell(cell).unwrap();
+        a.go_to(r, c);
+        let (x, y) = at(a, cell);
+        let g = a.geom();
+        let v = a.doc.as_ref().unwrap().current().unwrap().1;
+        let y = (0..40).map(|d| y + d as f32).find(|&y| crate::fill::on_border(&g, v, x, y));
+        (x, y.unwrap())
+    }
+
+    pub fn mouse_up(a: &mut SheetsApp) {
+        a.mouse_up(NONE);
+    }
+
     /// Um ponto no cabeçalho, a `d` pixels da borda direita da coluna.
-    fn col_edge(a: &mut SheetsApp, c: u32, d: f32) -> (f32, f32) {
+    pub fn col_edge(a: &mut SheetsApp, c: u32, d: f32) -> (f32, f32) {
         let g = a.geom();
         let v = a.doc.as_ref().unwrap().current().unwrap().1;
         let q = &g.quads[1];
@@ -254,7 +272,7 @@ mod mouse {
         (x + d, (g.colhdr.y0 + g.colhdr.y1) / 2.0)
     }
 
-    fn row_edge(a: &mut SheetsApp, r: u32, d: f32) -> (f32, f32) {
+    pub fn row_edge(a: &mut SheetsApp, r: u32, d: f32) -> (f32, f32) {
         let g = a.geom();
         let v = a.doc.as_ref().unwrap().current().unwrap().1;
         let q = &g.quads[2];
@@ -262,15 +280,15 @@ mod mouse {
         ((g.rowhdr.x0 + g.rowhdr.x1) / 2.0, y + d)
     }
 
-    fn col_px(a: &SheetsApp, c: u32) -> u32 {
+    pub fn col_px(a: &SheetsApp, c: u32) -> u32 {
         a.doc.as_ref().unwrap().current().unwrap().1.cols.size(c)
     }
 
-    fn row_px(a: &SheetsApp, r: u32) -> u32 {
+    pub fn row_px(a: &SheetsApp, r: u32) -> u32 {
         a.doc.as_ref().unwrap().current().unwrap().1.rows.size(r)
     }
 
-    fn pull(a: &mut SheetsApp, from: (f32, f32), dx: f32, dy: f32) {
+    pub fn pull(a: &mut SheetsApp, from: (f32, f32), dx: f32, dy: f32) {
         press(a, from, NONE, 1);
         a.mouse_move(from.0 + dx / 2.0, from.1 + dy / 2.0);
         a.mouse_move(from.0 + dx, from.1 + dy);
@@ -360,7 +378,7 @@ mod mouse {
     const SHIFT: Modifiers = Modifiers { ctrl: false, shift: true, alt: false, logo: false };
 
     /// Põe objetos na aba ativa, cada um com a sua âncora, em pixels a 100%.
-    fn put(a: &mut SheetsApp, list: Vec<([f64; 4], duck_core::drawing::ObjectKind, bool)>) {
+    pub fn put(a: &mut SheetsApp, list: Vec<([f64; 4], duck_core::drawing::ObjectKind, bool)>) {
         use duck_core::drawing::{Anchor, DrawingAnchor, Object};
         let slot = &mut a.doc.as_mut().unwrap().sheets[0];
         let v = slot.view.as_ref().unwrap();
@@ -380,23 +398,23 @@ mod mouse {
         }
     }
 
-    fn chart() -> duck_core::drawing::ObjectKind {
+    pub fn chart() -> duck_core::drawing::ObjectKind {
         duck_core::drawing::ObjectKind::Chart(Box::default())
     }
 
-    fn rect_of(a: &SheetsApp, i: usize) -> [f64; 4] {
+    pub fn rect_of(a: &SheetsApp, i: usize) -> [f64; 4] {
         let (s, v) = a.doc.as_ref().unwrap().current().unwrap();
         crate::chart::anchor_rect(&s.layout.objects[i].anchor, v)
     }
 
     /// O ponto da aba (pixels a 100%) na tela.
-    fn on_screen(a: &mut SheetsApp, x: f64, y: f64) -> (f32, f32) {
+    pub fn on_screen(a: &mut SheetsApp, x: f64, y: f64) -> (f32, f32) {
         let g = a.geom();
         let q = &g.quads[3];
         (q.rect.x0 + ((x - q.ox) * g.g as f64) as f32, q.rect.y0 + ((y - q.oy) * g.g as f64) as f32)
     }
 
-    fn pull_to(a: &mut SheetsApp, from: (f64, f64), d: (f64, f64), mods: Modifiers) {
+    pub fn pull_to(a: &mut SheetsApp, from: (f64, f64), d: (f64, f64), mods: Modifiers) {
         let p = on_screen(a, from.0, from.1);
         let g = a.geom().g as f64;
         press(a, p, mods, 1);

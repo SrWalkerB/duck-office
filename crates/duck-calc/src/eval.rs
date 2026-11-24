@@ -88,6 +88,9 @@ pub struct Book<'a> {
     /// Maior número de linhas entre as abas (colunas inteiras em contas de
     /// matriz param aqui).
     pub max_rows: u32,
+    /// Célula (aba, linha, coluna) cujo valor em `local` vale mesmo sem
+    /// fórmula: o valor que o usuário quer pôr nela (validação de dados).
+    pub forced: Option<(u32, u32, u32)>,
 }
 
 impl<'a> Book<'a> {
@@ -108,6 +111,7 @@ impl<'a> Book<'a> {
             local: None,
             path: None,
             max_rows,
+            forced: None,
         };
         b.set_now(now_serial());
         b
@@ -130,11 +134,19 @@ impl<'a> Book<'a> {
 
     /// Linhas usadas da aba.
     pub fn used_rows(&self, sid: Sid) -> u32 {
-        self.sheet(sid).map_or(0, |s| s.rows())
+        let n = self.sheet(sid).map_or(0, |s| s.rows());
+        match self.forced {
+            Some((s, r, _)) if sid == Sid::Local(s) => n.max(r + 1),
+            _ => n,
+        }
     }
 
     pub fn used_cols(&self, sid: Sid) -> u32 {
-        self.sheet(sid).map_or(0, |s| s.cols())
+        let n = self.sheet(sid).map_or(0, |s| s.cols());
+        match self.forced {
+            Some((s, _, c)) if sid == Sid::Local(s) => n.max(c + 1),
+            _ => n,
+        }
     }
 
     /// Valor da célula (com os resultados novos por cima).
@@ -142,7 +154,7 @@ impl<'a> Book<'a> {
     pub fn get(&self, sid: Sid, row: u32, col: u32) -> V<'a> {
         let Some(sheet) = self.sheet(sid) else { return V::Empty };
         let c = sheet.cell(row, col, self.shared);
-        if c.formula
+        if (c.formula || self.forced.is_some())
             && let Sid::Local(s) = sid
         {
             if let Some(l) = self.local
@@ -163,11 +175,12 @@ impl<'a> Book<'a> {
     /// linha. `f` devolve `false` para parar.
     pub fn each(&self, r: &Rng, mut f: impl FnMut(u32, u32, V<'a>) -> bool) {
         let Some(sheet) = self.sheet(r.sheet) else { return };
-        let last_row = r.r1.min(sheet.rows().saturating_sub(1));
-        if sheet.rows() == 0 || r.r0 > last_row {
+        let rows = self.used_rows(r.sheet);
+        let last_row = r.r1.min(rows.saturating_sub(1));
+        if rows == 0 || r.r0 > last_row {
             return;
         }
-        let last_col = r.c1.min(sheet.cols().saturating_sub(1));
+        let last_col = r.c1.min(self.used_cols(r.sheet).saturating_sub(1));
         let local = self.local.map(|l| l.read().unwrap());
         for col in r.c0..=last_col {
             let over = match (self.overlay, r.sheet) {
@@ -335,6 +348,16 @@ impl Engine {
                 .iter()
                 .map(|s| (0..s.formula_texts_stored()).map(|_| OnceLock::new()).collect())
                 .collect(),
+            names: (0..book.extras.names.len()).map(|_| OnceLock::new()).collect(),
+            index: Cache::default(),
+        }
+    }
+
+    /// Motor sem as fórmulas das células: para avaliar uma fórmula solta
+    /// (validação de dados), que só precisa dos nomes definidos.
+    pub fn names_only(book: &Book) -> Self {
+        Self {
+            defs: Vec::new(),
             names: (0..book.extras.names.len()).map(|_| OnceLock::new()).collect(),
             index: Cache::default(),
         }
@@ -623,23 +646,7 @@ impl<'e> Eval<'e> {
                     Err(e) => V::Err(e),
                 }
             }
-            Node::Name(i) => {
-                if self.depth > 32 {
-                    return V::Err(CellError::Ref);
-                }
-                let Some(nf) = self.eng.name_formula(self.book, *i) else { return V::Err(CellError::Name) };
-                let saved = std::mem::replace(&mut self.f, nf);
-                let base = {
-                    let top = self.locals_len();
-                    std::mem::replace(&mut self.local_base, top)
-                };
-                self.depth += 1;
-                let v = self.eval(nf.root);
-                self.depth -= 1;
-                self.local_base = base;
-                self.f = saved;
-                v
-            }
+            Node::Name(i) => self.name(*i),
             Node::Array { rows, cols, start } => {
                 let ids = f.call_args(*start, rows * cols);
                 let v = ids.iter().map(|&i| self.eval(i)).collect();
@@ -663,6 +670,23 @@ impl<'e> Eval<'e> {
                 }
             }
         }
+    }
+
+    /// Valor do nome definido `i`.
+    pub fn name(&mut self, i: u32) -> V<'e> {
+        if self.depth > 32 {
+            return V::Err(CellError::Ref);
+        }
+        let Some(nf) = self.eng.name_formula(self.book, i) else { return V::Err(CellError::Name) };
+        let saved = std::mem::replace(&mut self.f, nf);
+        let top = self.locals_len();
+        let base = std::mem::replace(&mut self.local_base, top);
+        self.depth += 1;
+        let v = self.eval(nf.root);
+        self.depth -= 1;
+        self.local_base = base;
+        self.f = saved;
+        v
     }
 
     /// Chamada no modo matricial: item a item, se a função pede.

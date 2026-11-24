@@ -230,9 +230,17 @@ impl<'a> Patcher<'a> {
             if let Some(f) = fix {
                 tail = f.patched_tail(tail, self.sheet);
             }
+            let tail = super::tail::apply(&tail, self.sheet, self.rewrite_all).unwrap_or(tail);
             out.extend_from_slice(&tail);
         } else {
-            out.extend_from_slice(&seg[pos..]);
+            // Validação, proteção e notas saem do modelo por último. O fim da
+            // aba vem num trecho só: o que sobra depois do último `</row>`
+            // espera o fim do documento.
+            let last = if self.phase == Phase::Tail { &seg[pos..] } else { &[] };
+            match super::tail::apply(last, self.sheet, self.rewrite_all) {
+                Some(t) => out.extend_from_slice(&t),
+                None => out.extend_from_slice(&seg[pos..]),
+            }
         }
         let _ = eof;
     }

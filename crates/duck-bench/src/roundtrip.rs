@@ -461,16 +461,26 @@ fn check_tabs(src: &Path, out: &Path, wb: &duck_core::Workbook, args: &[String])
 
 /// Insere e apaga linhas e colunas na maior aba (como o app faz).
 fn restructure(wb: &mut duck_core::Workbook) -> (usize, f64) {
-    use duck_core::{Axis, Command, OpsHandle, Shift};
-    let sheets = &mut wb.sheets;
+    let sheets = &wb.sheets;
     let (i, _) = sheets
         .iter()
         .enumerate()
         .max_by_key(|(_, s)| s.rows() as u64 * s.cols() as u64)
         .unwrap_or((0, &sheets[0]));
-    let s = &mut sheets[i];
-    let name = s.name.clone();
     let t = Instant::now();
+    // A maior, e as que têm validação ou notas (que andam junto).
+    let rules = |s: &Sheet| !s.layout.validations.is_empty() || !s.layout.notes.is_empty();
+    let list: Vec<usize> = (0..sheets.len()).filter(|&k| k == i || rules(&sheets[k])).collect();
+    for k in list {
+        restructure_sheet(wb, k);
+    }
+    (i, t.elapsed().as_secs_f64() * 1000.0)
+}
+
+fn restructure_sheet(wb: &mut duck_core::Workbook, k: usize) {
+    use duck_core::{Axis, Command, OpsHandle, Shift};
+    let s = &mut wb.sheets[k];
+    let name = s.name.clone();
     let rows = s.rows().max(2);
     let steps = [
         Shift { axis: Axis::Rows, at: rows / 2, n: 3, insert: true },
@@ -484,7 +494,39 @@ fn restructure(wb: &mut duck_core::Workbook) -> (usize, f64) {
         Command::Shift(shift, ops).apply(s);
         duck_calc::tabs::shift_names(&wb.extras, shift, &name).swap(&mut wb.extras);
     }
-    (i, t.elapsed().as_secs_f64() * 1000.0)
+}
+
+/// Uma nota, uma regra de validação e proteção novas na aba.
+fn edit_rules(s: &mut Sheet) {
+    use duck_core::{CellRange, Command, DataValidation, DvKind, Note, SheetProtection};
+    let mut notes = s.layout.notes.clone();
+    if duck_core::notes::at(&notes, 1, 1).is_none() {
+        notes.push(Note::new(
+            1,
+            1,
+            "duck-bench",
+            "nota <nova> & \"teste\"
+segunda linha",
+        ));
+    }
+    let mut rules = s.layout.validations.clone();
+    let mut v = DataValidation {
+        ranges: vec![CellRange { first_row: 1, first_col: 1, last_row: 9, last_col: 1 }],
+        kind: DvKind::List,
+        prompt: "Escolha <um> & \"só um\"".into(),
+        ..Default::default()
+    };
+    v.set_literal_items(&["um".into(), "dois, ou três".into()]);
+    rules.push(v);
+    Command::Group(vec![
+        Command::Notes(notes),
+        Command::Validations(rules),
+        Command::Protect(Some(Box::new(SheetProtection {
+            password: duck_xlsx::protect::new_password("teste"),
+            ..Default::default()
+        }))),
+    ])
+    .apply(s);
 }
 
 /// Edições sintéticas na maior aba: números, texto, fórmulas, apagar, uma
@@ -525,5 +567,6 @@ fn edit(sheets: &mut [Sheet], styles: &mut duck_core::Styles, n: usize) -> (usiz
         count += 1;
     }
     s.settle();
+    edit_rules(s);
     (i, count)
 }

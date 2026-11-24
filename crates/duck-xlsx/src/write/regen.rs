@@ -4,9 +4,10 @@
 //!
 //! - `<dimension>` e `<cols>` saem do modelo; `<mergeCells>` também;
 //! - atributos `ref`/`sqref`/`topLeftCell`/`activeCell` e os textos
-//!   `<xm:sqref>` (intervalos) e `<formula>`, `<formula1>`, `<formula2>`,
-//!   `<xm:f>` (fórmulas) são ajustados por cada mudança, em ordem;
-//! - formatação condicional, validação e links que ficaram sem intervalo saem.
+//!   `<xm:sqref>` (intervalos) e `<formula>`, `<xm:f>` (fórmulas) são
+//!   ajustados por cada mudança, em ordem;
+//! - formatação condicional e links que ficaram sem intervalo saem;
+//! - validação e intervalos protegidos saem do modelo (`tail`).
 //!
 //! O que o modelo não guarda nas células (`cm`, `vm`) e nas linhas
 //! (`outlineLevel`, `spans`) não volta nesta aba.
@@ -314,13 +315,7 @@ pub fn tail(orig: &[u8], sheet: &Sheet, sheet_name: &str, shifts: &[Shift]) -> V
                 merges_done = true;
             }
             // Elementos que somem se o intervalo sumiu.
-            b"conditionalFormatting"
-            | b"x14:conditionalFormatting"
-            | b"dataValidation"
-            | b"x14:dataValidation"
-            | b"hyperlink"
-            | b"ignoredError"
-            | b"protectedRange" => {
+            b"conditionalFormatting" | b"x14:conditionalFormatting" | b"hyperlink" | b"ignoredError" => {
                 let close = close_of(name);
                 let whole = &orig[i..close];
                 // `x14`: o intervalo está no texto de `<xm:sqref>`.
@@ -357,9 +352,8 @@ pub fn tail(orig: &[u8], sheet: &Sheet, sheet_name: &str, shifts: &[Shift]) -> V
     out
 }
 
-/// Dentro de um elemento: fórmulas (`<formula>`, `<formula1>`, `<formula2>`,
-/// `<xm:f>`) e listas de intervalo (`<xm:sqref>`) ajustadas; `<xm:sqref>`
-/// vazio some.
+/// Dentro de um elemento: fórmulas (`<formula>`, `<xm:f>`) e listas de
+/// intervalo (`<xm:sqref>`) ajustadas; `<xm:sqref>` vazio some.
 fn adjust_texts(body: &[u8], sheet_name: &str, shifts: &[Shift]) -> Vec<u8> {
     let mut out = Vec::with_capacity(body.len());
     let mut pos = 0;
@@ -377,7 +371,7 @@ fn adjust_texts(body: &[u8], sheet_name: &str, shifts: &[Shift]) -> Vec<u8> {
         }
         let name_len = body[i + 1..].iter().position(|&c| is_name_end(c)).unwrap_or(0);
         let name = &body[i + 1..i + 1 + name_len];
-        let is_formula = matches!(name, b"formula" | b"formula1" | b"formula2" | b"xm:f");
+        let is_formula = matches!(name, b"formula" | b"xm:f");
         let is_sqref = name == b"xm:sqref";
         if (is_formula || is_sqref) && body[end - 2] != b'/' {
             let mut close = b"</".to_vec();

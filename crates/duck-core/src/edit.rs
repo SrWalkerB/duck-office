@@ -59,6 +59,12 @@ pub struct Edits {
     pub shifts: Vec<crate::Shift>,
     /// Mesclagens mudadas (`<mergeCells>` é regravado).
     pub merges: bool,
+    /// Validação de dados mudada (`<dataValidations>` é regravado).
+    pub validations: bool,
+    /// Notas mudadas (as partes delas são regravadas).
+    pub notes: bool,
+    /// Proteção mudada (`<sheetProtection>` e `<protectedRanges>`).
+    pub protection: bool,
     /// Painéis congelados mudados (`<pane>` do `<sheetView>`).
     pub pane: bool,
     /// Filtro da aba mudado (`<autoFilter>`).
@@ -100,6 +106,9 @@ impl Edits {
             && !self.values
             && !self.formulas
             && !self.structure
+            && !self.validations
+            && !self.notes
+            && !self.protection
             && !self.merges
             && !self.pane
             && !self.filter
@@ -675,6 +684,14 @@ pub enum Command {
     Outline(Box<crate::outline::Outline>),
     /// Painéis congelados (`None` = sem).
     Pane(Option<crate::Pane>),
+    /// As regras de validação da aba.
+    Validations(Vec<crate::DataValidation>),
+    /// As notas da aba.
+    Notes(Vec<crate::Note>),
+    /// Proteção da planilha.
+    Protect(Option<Box<crate::SheetProtection>>),
+    /// Proteção da pasta: não mexe na aba (quem guarda a pasta aplica).
+    BookProtect(Option<Box<crate::BookProtection>>),
     /// Filtro da aba (`table = None`) ou de uma tabela.
     SetFilter {
         table: Option<u32>,
@@ -759,6 +776,10 @@ impl Command {
                 if old.pivots != sheet.layout.pivots || old.objects != sheet.layout.objects {
                     sheet.mark_pivots();
                 }
+                sheet.edits.validations |= old.validations != sheet.layout.validations;
+                sheet.edits.notes |= old.notes != sheet.layout.notes;
+                sheet.edits.protection |= old.protection != sheet.layout.protection
+                    || old.protected_ranges != sheet.layout.protected_ranges;
                 // Tabelas que cresceram (linha acrescentada).
                 for (i, t) in sheet.layout.tables.iter().enumerate() {
                     if old.tables.get(i).is_some_and(|o| o.range != t.range || o.filter != t.filter) {
@@ -824,6 +845,21 @@ impl Command {
                 for (i, &p) in perm.iter().enumerate() {
                     inv[p as usize] = i as u32;
                 }
+                // As notas andam com as células classificadas.
+                let mut moved = false;
+                for n in &mut sheet.layout.notes {
+                    if let Some(&i) = n.row.checked_sub(r0).and_then(|k| inv.get(k as usize))
+                        && (c0..=c1).contains(&n.col)
+                        && r0 + i != n.row
+                    {
+                        n.move_to(r0 + i, n.col);
+                        moved = true;
+                    }
+                }
+                if moved {
+                    crate::notes::sort(&mut sheet.layout.notes);
+                    sheet.edits.notes = true;
+                }
                 Command::SortRows { r0, c0, c1, perm: inv }
             }
             Command::Anchors(list) => {
@@ -853,6 +889,21 @@ impl Command {
                 sheet.edits.pane = true;
                 Command::Pane(old)
             }
+            Command::Validations(list) => {
+                sheet.edits.validations = true;
+                Command::Validations(std::mem::replace(&mut sheet.layout.validations, list))
+            }
+            Command::Notes(mut list) => {
+                crate::notes::sort(&mut list);
+                sheet.edits.notes = true;
+                Command::Notes(std::mem::replace(&mut sheet.layout.notes, list))
+            }
+            Command::Protect(p) => {
+                sheet.edits.protection = true;
+                let old = std::mem::replace(&mut sheet.layout.protection, p.map(|b| *b));
+                Command::Protect(old.map(Box::new))
+            }
+            Command::BookProtect(p) => Command::BookProtect(p),
             Command::SetStyles(list) => {
                 let mut old = Vec::with_capacity(list.len());
                 for (r, c, st) in list {

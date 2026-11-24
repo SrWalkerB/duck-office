@@ -222,6 +222,11 @@ pub struct Doc {
     /// Módulos VBA (lidos na primeira macro) e se o usuário deixou executar.
     pub macros: Option<Vec<duck_vba::Module>>,
     pub macros_ok: bool,
+    /// Proteção da pasta, e se mudou desde o último salvamento.
+    pub protection: Option<duck_core::BookProtection>,
+    pub protection_changed: bool,
+    /// Abas que as macros podem mudar mesmo protegidas (`UserInterfaceOnly`).
+    pub macro_free: std::collections::HashSet<u32>,
 }
 
 /// Aviso de um `.xlsb` aberto, para a barra de status.
@@ -608,6 +613,16 @@ pub struct SheetsApp {
     pub recent: Vec<PathBuf>,
     /// Painel do filtro aberto.
     pub filter_panel: Option<crate::filter::Panel>,
+    /// Caixa de diálogo com campos (validação, nota, proteção, avisos).
+    pub dialog: Option<crate::dialog::Dialog>,
+    /// Lista suspensa da validação aberta.
+    pub dv_list: Option<crate::valid::ListBox>,
+    /// Célula com nota sob o mouse, e se todas as notas estão à vista.
+    pub hover_note: Option<(u32, u32)>,
+    pub show_notes: bool,
+    /// Comandos que são consequência de outro, já permitido: a proteção não
+    /// confere de novo.
+    pub unchecked: bool,
     /// Arquivo temporário da planilha nova (salvar pede o lugar).
     pub untitled_path: Option<PathBuf>,
     pub new_count: u32,
@@ -713,6 +728,11 @@ impl SheetsApp {
             untitled_path: None,
             new_count: 0,
             filter_panel: None,
+            dialog: None,
+            dv_list: None,
+            hover_note: None,
+            show_notes: false,
+            unchecked: false,
             images: Default::default(),
             mode,
             system: ColorScheme::Light,
@@ -807,6 +827,10 @@ impl SheetsApp {
             match m {
                 Msg::Opened { sheets, active, styles, strings, date1904, extras, binary, at } => {
                     self.images = Default::default();
+                    // O que estava aberto era do outro arquivo.
+                    self.dialog = None;
+                    self.dv_list = None;
+                    self.hover_note = None;
                     self.note("arquivo aberto", at);
                     self.remember_recent(&path);
                     let looks = Arc::new(Looks::new(&styles));
@@ -834,6 +858,9 @@ impl SheetsApp {
                         history: Default::default(),
                         dirty: false,
                         binary,
+                        protection: extras.protection.clone(),
+                        protection_changed: false,
+                        macro_free: Default::default(),
                         calc: crate::calc::Calc::new(extras),
                         pivots: Default::default(),
                         macros: None,
@@ -1204,6 +1231,14 @@ impl SheetsApp {
         if !extend && let Some(m) = v.merges.at(r, c) {
             (r, c) = (m.first_row, m.first_col);
         }
+        // Planilha protegida: pula as células que não dá para selecionar.
+        if !self.can_select(r, c) {
+            match self.next_selectable((r, c), dr, dc) {
+                Some(x) => (r, c) = x,
+                None => return,
+            }
+        }
+        let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) else { return };
         v.cur = (r, c);
         if !extend {
             v.anchor = v.cur;
@@ -1260,6 +1295,8 @@ impl SheetsApp {
             return;
         }
         doc.active = index;
+        self.dv_list = None;
+        self.hover_note = None;
         if let Some(ed) = &mut self.editor {
             ed.away = index != ed.sheet;
         }
@@ -1322,6 +1359,9 @@ impl SheetsApp {
         let Some(doc) = &self.doc else { return };
         let Some((sheet, v)) = doc.current() else { return };
         let (r, c) = v.cur;
+        if sheet.formula_hidden(&doc.styles, r, c) {
+            return;
+        }
         if let Some(f) = duck_calc::cell_formula(sheet, r, c) {
             out.push('=');
             out.push_str(&duck_calc::locale::to_pt(&f));
@@ -1411,6 +1451,14 @@ impl SheetsApp {
 
     fn mouse_down(&mut self, cx: &mut Context, x: f32, y: f32, mods: Modifiers, clicks: u8) {
         let g = self.geom();
+        // Caixa de diálogo aberta (pode ser um aviso por cima de outra caixa):
+        // só ela responde.
+        if let (Some(d), Some(text)) = (self.dialog.as_mut(), self.text.as_mut()) {
+            let l = d.layout(&g, text, text.default_style());
+            let o = d.click(&l, x, y);
+            self.dialog_event(o);
+            return;
+        }
         if let Some(mut f) = self.form.take() {
             let o = match self.text.as_mut() {
                 Some(text) => {
@@ -1427,7 +1475,10 @@ impl SheetsApp {
                 return;
             }
         }
-        // Caixa de diálogo aberta: só ela responde.
+        if self.dv_list.is_some() {
+            self.list_click(x, y);
+            return;
+        }
         if self.prompt.is_some() {
             let (_, input, ok, cancel) = crate::menu::prompt_rects(&g);
             if ok.contains(x, y) {
@@ -1479,6 +1530,9 @@ impl SheetsApp {
         }
         if g.toolbar.contains(x, y) {
             self.commit_edit();
+            if self.dialog.is_some() {
+                return;
+            }
             let (Some(text), tab) = (self.text.as_mut(), self.ribbon_tab) else { return };
             let ui = text.default_style();
             let lay = crate::ribbon::layout(&g, tab, text, ui);
@@ -1506,6 +1560,9 @@ impl SheetsApp {
                 return;
             }
             self.commit_edit();
+            if self.dialog.is_some() {
+                return;
+            }
             let bar = crate::zoombar::layout(&g);
             match bar.hit(x, y) {
                 Some((crate::ribbon::Act::Drop(d), _)) => self.open_drop(d, bar.menu_anchor(&g), &g),
@@ -1520,6 +1577,10 @@ impl SheetsApp {
         }
         if self.tab_edit.is_some() {
             self.tab_edit_commit();
+            // O nome foi recusado (a estrutura da pasta está protegida).
+            if self.dialog.is_some() {
+                return;
+            }
         }
         // Barra de fórmulas: edita a célula ativa ali.
         if g.formula.contains(x, y) && self.doc.as_ref().and_then(|d| d.current()).is_some() {
@@ -1551,6 +1612,10 @@ impl SheetsApp {
             if sheet != self.doc.as_ref().map(|d| d.active) && !g.tabs.contains(x, y) {
                 return;
             }
+            // O valor foi recusado pela validação.
+            if self.dialog.is_some() {
+                return;
+            }
         }
         // Barra de fórmulas: caixa de nome.
         if g.namebox.contains(x, y) {
@@ -1578,6 +1643,11 @@ impl SheetsApp {
             if g.grid.contains(x, y) && self.loader.is_none() {
                 self.pick_and_open(cx);
             }
+            return;
+        }
+        // Seta da lista suspensa da célula ativa.
+        if self.dv_arrow(&g).is_some_and(|r| r.contains(x, y)) {
+            self.open_list();
             return;
         }
         // Alças do objeto selecionado.
@@ -1768,6 +1838,10 @@ impl SheetsApp {
             {
                 (r, c) = (m.first_row, m.first_col);
             }
+            if !self.can_select(r, c) {
+                return;
+            }
+            let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) else { return };
             v.begin_area(add, mods.shift);
             v.cur = (r, c);
             if !mods.shift {
@@ -1786,12 +1860,15 @@ impl SheetsApp {
         self.mouse = (x, y);
         let Some(drag) = self.drag else {
             let g = self.geom();
-            if self.popup.is_some()
-                || self.prompt.is_some()
-                || self.filter_panel.is_some()
-                || self.form.is_some()
-            {
+            let modal = self.prompt.is_some() || self.form.is_some() || self.dialog.is_some();
+            if modal || self.popup.is_some() || self.dv_list.is_some() || self.filter_panel.is_some() {
+                self.hover_note = None;
                 return true;
+            }
+            let note = self.note_under(&g, x, y);
+            if note != self.hover_note {
+                self.hover_note = note;
+                self.redraw_later();
             }
             // Lista de sugestões: o item sob o mouse fica marcado.
             if self.editor.as_ref().is_some_and(|e| e.complete.list.is_some()) {
@@ -2126,12 +2203,21 @@ impl SheetsApp {
 
     fn key(&mut self, cx: &mut Context, key: Key, mods: Modifiers, text: Option<String>) -> bool {
         let ctrl = mods.ctrl || mods.logo;
+        // Caixa de diálogo: Enter confirma, Esc fecha, o resto vai para o campo.
+        if let Some(d) = &mut self.dialog {
+            let o = d.key(&key, mods, text.as_deref(), cx.clipboard());
+            self.dialog_event(o);
+            return true;
+        }
         if let Some(f) = &mut self.form {
             let o = f.key(&key, mods, text.as_deref(), cx.clipboard());
             self.form_event(o);
             return true;
         }
-        // Caixa de diálogo: Enter confirma, Esc fecha, o resto vai para o campo.
+        if self.dv_list.is_some() {
+            self.list_key(&key, mods, text.as_deref());
+            return true;
+        }
         if let Some(p) = &mut self.prompt {
             match key {
                 Key::Enter => self.prompt_ok(),
@@ -2270,6 +2356,7 @@ impl SheetsApp {
                 }
             },
             Key::F(3) => self.find_next(cx.waker(), shift),
+            Key::F(2) if shift => self.ask_note(),
             Key::F(2) => self.start_edit(None, false),
             Key::F(11) if shift => {
                 let at = self.doc.as_ref().map(|d| d.active);
@@ -2318,6 +2405,7 @@ impl SheetsApp {
                 }
             }
             Key::ArrowUp => self.move_cur(-1, 0, shift, ctrl),
+            Key::ArrowDown if mods.alt && self.open_list() => {}
             Key::ArrowDown => self.move_cur(1, 0, shift, ctrl),
             Key::ArrowLeft => self.move_cur(0, -1, shift, ctrl),
             Key::ArrowRight => self.move_cur(0, 1, shift, ctrl),
@@ -2631,7 +2719,10 @@ impl App for SheetsApp {
                     WheelDelta::Lines { x, y } => (x as f64 * 60.0, y as f64 * 60.0),
                     WheelDelta::Pixels { x, y } => (x / g.g as f64, y / g.g as f64),
                 };
-                if modifiers.ctrl {
+                if self.dialog.is_some() {
+                } else if let Some(l) = self.dv_list.as_mut().filter(|l| l.rect.contains(mx, my)) {
+                    l.scroll_by(if dy > 0.0 { -3 } else { 3 }, g.s);
+                } else if modifiers.ctrl {
                     // Roda de precisão e touchpad mandam pedaços: um passo por
                     // entalhe (60) acumulado.
                     if self.wheel_zoom * dy < 0.0 {
@@ -2671,7 +2762,8 @@ impl App for SheetsApp {
             }
             Event::MouseDown { button: MouseButton::Right, x, y, .. } => {
                 self.popup = None;
-                let busy = self.prompt.is_some() || self.form.is_some();
+                self.dv_list = None;
+                let busy = self.prompt.is_some() || self.form.is_some() || self.dialog.is_some();
                 if !busy && self.geom().tabs.contains(x as f32, y as f32) {
                     self.tab_context_menu(x as f32, y as f32);
                 } else if !busy {
@@ -2703,6 +2795,16 @@ impl App for SheetsApp {
 
     fn redraw(&mut self, cx: &mut Context) {
         let t0 = Instant::now();
+        // Num arraste, espera a vez do frame antes de montá-lo e trata primeiro
+        // o que chegou nesse tempo: o que se arrasta acompanha o mouse. (Fora
+        // dele não: ao redimensionar a janela, o quadro reservado envelhece.)
+        if self.drag.is_some()
+            && self.gfx.as_mut().is_some_and(|g| g.begin_frame())
+            && t0.elapsed() > Duration::from_millis(2)
+        {
+            self.redraw_later();
+            return;
+        }
         self.bench_before_frame();
         self.clamp_scroll();
         let tb = Instant::now();

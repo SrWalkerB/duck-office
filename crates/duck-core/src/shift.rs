@@ -435,7 +435,10 @@ impl Sheet {
         lost.extend(lossy);
 
         // 3. Layout.
-        shift_layout(&mut self.layout, s);
+        self.edits.validations |= !self.layout.validations.is_empty();
+        self.edits.notes |= !self.layout.notes.is_empty();
+        self.edits.protection |= !self.layout.protected_ranges.is_empty();
+        shift_layout(&mut self.layout, s, ops);
         // Referências das séries dos gráficos (sempre com o nome da aba).
         for o in &mut self.layout.objects {
             if let crate::drawing::ObjectKind::Chart(c) = &mut o.kind {
@@ -568,8 +571,9 @@ fn shift_column_rows(old: Column, c: u32, s: Shift, lost: &mut Vec<(u32, u32, Ra
     new
 }
 
-/// Larguras/alturas, mesclagens, formatação condicional, links e dimensão.
-pub fn shift_layout(l: &mut Layout, s: Shift) {
+/// Larguras/alturas, mesclagens, formatação condicional, validação, notas,
+/// links e dimensão.
+pub fn shift_layout(l: &mut Layout, s: Shift, ops: &dyn FormulaOps) {
     l.outline.shift(s);
     match s.axis {
         Axis::Rows => {
@@ -606,6 +610,12 @@ pub fn shift_layout(l: &mut Layout, s: Shift) {
         .iter()
         .filter_map(|h| s.range(h.range).map(|range| crate::Hyperlink { range, ..h.clone() }))
         .collect();
+    crate::valid::shift(&mut l.validations, s, ops);
+    crate::notes::shift(&mut l.notes, s);
+    l.protected_ranges.retain_mut(|p| {
+        p.ranges = p.ranges.iter().filter_map(|r| s.range(*r)).collect();
+        !p.ranges.is_empty()
+    });
     l.dimension = l.dimension.and_then(|d| s.range(d));
     let shift_filter = |f: &mut Option<crate::AutoFilter>| {
         if let Some(af) = f.take() {
