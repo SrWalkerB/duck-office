@@ -222,6 +222,13 @@ fn as_value(stack: &[Call], word: &str, last_arg: bool) -> bool {
     }
 }
 
+/// `,5` digitado sem o zero: a vírgula em `i` começa um número (e não separa,
+/// como em `SUM(A1,5)`).
+fn bare_decimal(s: &[char], i: usize) -> bool {
+    let before = s[..i].iter().rev().find(|c| !c.is_whitespace());
+    s.get(i + 1).is_some_and(char::is_ascii_digit) && before.is_none_or(|c| "(;+-*/^&=<>{\\".contains(*c))
+}
+
 fn translate(f: &str, to_pt: bool) -> String {
     let s: Vec<char> = f.chars().collect();
     let vars = find_vars(&s, if to_pt { ',' } else { ';' });
@@ -313,7 +320,8 @@ fn translate(f: &str, to_pt: bool) -> String {
                 i += 1;
             }
             _ if c.is_ascii_digit()
-                || (c == '.' && to_pt && s.get(i + 1).is_some_and(char::is_ascii_digit)) =>
+                || (c == '.' && to_pt && s.get(i + 1).is_some_and(char::is_ascii_digit))
+                || (c == ',' && !to_pt && bare_decimal(&s, i)) =>
             {
                 // Número: troca o separador decimal.
                 let st = i;

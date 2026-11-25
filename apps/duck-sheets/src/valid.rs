@@ -255,13 +255,20 @@ fn read_operand(kind: DvKind, text: &str, date1904: bool) -> Result<String, Stri
         return Err("Preencha o limite (um valor ou uma fórmula com =).".into());
     }
     if kind == DvKind::Custom {
-        return Ok(duck_calc::locale::from_pt(t.trim_start_matches('=')));
+        return rule_formula(t.trim_start_matches('='));
     }
     match parse_input(t, date1904, today()) {
-        Input::Formula(f) => Ok(duck_calc::locale::from_pt(&f)),
+        Input::Formula(f) => rule_formula(&f),
         Input::Value(CellValue::Number(x), _) => Ok(format!("{x}")),
         _ => Err(format!("\"{t}\" não é um valor válido: use um número, data, hora ou fórmula com =.")),
     }
+}
+
+/// Fórmula de uma regra (em português, sem `=`), como o arquivo guarda.
+fn rule_formula(pt: &str) -> Result<String, String> {
+    let f = duck_calc::locale::from_pt(pt.trim());
+    duck_calc::check::syntax(&f)?;
+    Ok(f)
 }
 
 fn relocate(f: &str, dr: i64, dc: i64) -> String {
@@ -573,6 +580,17 @@ impl SheetsApp {
             Some(Dialog::new(Kind::Invalid(Box::new(pending)), title, vec![Field::info(&body)], buttons));
     }
 
+    /// Aviso de que a fórmula digitada em `cell` não serve (`why`). Como um
+    /// valor que a validação não aceita: corrigir ou desistir.
+    pub fn ask_formula(&mut self, why: &str, cell: (u32, u32), text: String, all: bool) {
+        let Some(sheet) = self.doc.as_ref().map(|d| d.active) else { return };
+        let cmd = Command::SetCells(Vec::new());
+        let pending = Pending { sheet, cell, cmd, text, alert: DvAlert::Stop, all };
+        let kind = Kind::Invalid(Box::new(pending));
+        let buttons = ["Corrigir", "Cancelar"];
+        self.dialog = Some(Dialog::new(kind, "Há um erro na fórmula", vec![Field::info(why)], &buttons));
+    }
+
     /// Há um valor inválido à espera de resposta?
     pub fn answering(&self) -> bool {
         self.dialog.as_ref().is_some_and(|d| matches!(d.kind, Kind::Invalid(_)))
@@ -736,7 +754,10 @@ impl SheetsApp {
         let rule = match kind {
             DvKind::Any => None,
             DvKind::List => {
-                set_source(&mut v, a);
+                if let Err(e) = set_source(&mut v, a) {
+                    eprintln!("--edit validar: {e}");
+                    return;
+                }
                 Some(v)
             }
             _ => {
@@ -755,11 +776,11 @@ impl SheetsApp {
 
 /// Origem da lista: itens separados por `;`, ou `=` e um intervalo, nome ou
 /// fórmula.
-fn set_source(v: &mut DataValidation, text: &str) {
+fn set_source(v: &mut DataValidation, text: &str) -> Result<(), String> {
     let t = text.trim();
     match t.strip_prefix('=') {
         Some(f) => {
-            v.f1 = duck_calc::locale::from_pt(f.trim());
+            v.f1 = rule_formula(f)?;
             v.list12 = None;
         }
         None => {
@@ -768,6 +789,7 @@ fn set_source(v: &mut DataValidation, text: &str) {
             v.set_literal_items(&items);
         }
     }
+    Ok(())
 }
 
 /// A regra que está na caixa. `Ok(None)` = nenhuma (qualquer valor, sem
@@ -812,7 +834,7 @@ fn read_rule(d: &Dialog, date1904: bool) -> Result<Option<DataValidation>, Strin
             if a.trim().trim_matches(';').is_empty() {
                 return Err("Escreva os itens separados por ; ou = e um intervalo.".into());
             }
-            set_source(&mut v, &a);
+            set_source(&mut v, &a)?;
             if v.literal_items().is_some() && v.f1.encode_utf16().count() > 257 {
                 return Err("A lista escrita passa de 255 letras: use um intervalo.".into());
             }
@@ -900,16 +922,16 @@ mod tests {
             assert_eq!(show(kind, file), pt);
             if kind == DvKind::List {
                 let mut l = v(kind, "");
-                set_source(&mut l, pt);
+                set_source(&mut l, pt).unwrap();
                 assert_eq!(l.f1, file);
             } else {
                 assert_eq!(read(kind, pt).unwrap(), file);
             }
         }
         let mut l = v(DvKind::List, "");
-        set_source(&mut l, "a; b ;;c");
+        set_source(&mut l, "a; b ;;c").unwrap();
         assert_eq!(l.f1, "\"a,b,c\"");
-        set_source(&mut l, "=Frutas");
+        set_source(&mut l, "=Frutas").unwrap();
         assert_eq!(l.f1, "Frutas");
     }
 

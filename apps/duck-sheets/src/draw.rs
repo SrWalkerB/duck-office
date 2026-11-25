@@ -359,6 +359,8 @@ fn draw_camera(
 impl SheetsApp {
     pub fn build_frame(&mut self) {
         let th = self.theme();
+        // Cores da planilha: podem ser as claras com a interface escura.
+        let sheet_th = self.sheet_theme();
         let geom = self.geom();
         self.ensure_font_styles(geom.g);
         let header_style = self.header_style(geom.g);
@@ -376,7 +378,8 @@ impl SheetsApp {
         // Referências da fórmula em edição: no texto e na grade.
         let (refs, ref_colors) = self.editor_refs();
         let spans = crate::pointing::spans(&refs, &ref_colors, th);
-        let outlines = self.outlines(&refs, &ref_colors, th);
+        let cell_spans = crate::pointing::spans(&refs, &ref_colors, sheet_th);
+        let outlines = self.outlines(&refs, &ref_colors, sheet_th);
 
         let (vthumb, hthumb) = (self.vthumb(&geom), self.hthumb(&geom));
         let selected = self.selected_object().map(|o| o.2);
@@ -395,7 +398,7 @@ impl SheetsApp {
                     view,
                     looks: &doc.looks,
                     styles: &doc.styles,
-                    th,
+                    th: sheet_th,
                     strings: &doc.strings,
                     date1904: doc.date1904,
                     fonts: &self.font_styles,
@@ -408,38 +411,39 @@ impl SheetsApp {
                     tables: table_looks(sheet, &doc.styles),
                 };
                 // Fundo da grade.
-                p.fill(geom.grid, &geom.grid, th.paper);
+                p.fill(geom.grid, &geom.grid, sheet_th.paper);
                 let octx = crate::chart::ObjCtx {
                     styles: &doc.styles,
                     font: self.font_styles.first().copied().unwrap_or(ui),
                     g: geom.g,
                     date1904: doc.date1904,
                     images: &self.images.uv,
-                    th,
+                    th: sheet_th,
                     moving: self.moving,
                 };
                 for q in geom.quads.iter().rev() {
                     if !q.rect.is_empty() {
                         draw_cells(&mut p, &cx, q, &mut buf, &mut buf2);
-                        crate::notes::draw_marks(&mut p, &sheet.layout.notes, view, q, geom.g, th);
+                        crate::notes::draw_marks(&mut p, &sheet.layout.notes, view, q, geom.g, sheet_th);
                         let (images, today) = (&self.images.uv, self.today);
                         let mut live = |p: &mut Painter, range: &str, r: Rect, clip: &Rect| {
-                            draw_camera(p, doc, images, today, px, range, r, clip, th)
+                            draw_camera(p, doc, images, today, px, range, r, clip, sheet_th)
                         };
                         crate::chart::draw_objects(&mut p, &octx, &sheet.layout.objects, view, q, &mut live);
                     }
                 }
                 if let Some(rect) = selected {
-                    crate::objects::draw_selection(&mut p, &geom, rect, th);
+                    crate::objects::draw_selection(&mut p, &geom, rect, sheet_th);
                 }
                 crate::pointing::draw_outlines(&mut p, &geom, view, &outlines, px);
                 if let Some(m) = self.marked.as_ref().filter(|m| m.sheet == doc.active) {
-                    crate::pointing::draw_marked(&mut p, &geom, view, &m.areas, px, th);
+                    crate::pointing::draw_marked(&mut p, &geom, view, &m.areas, px, sheet_th);
                 }
                 if let Some(a) = self.drag_area {
-                    crate::pointing::draw_outlines(&mut p, &geom, view, &[(a, th.selection, true)], px);
+                    let mark = [(a, sheet_th.selection, true)];
+                    crate::pointing::draw_outlines(&mut p, &geom, view, &mark, px);
                 } else if self.editor.is_none() {
-                    crate::fill::draw_handle(&mut p, &geom, view, th);
+                    crate::fill::draw_handle(&mut p, &geom, view, sheet_th);
                 }
                 // Linhas dos painéis congelados.
                 if view.frozen_rows > 0 {
@@ -447,7 +451,7 @@ impl SheetsApp {
                     p.fill(
                         Rect::new(geom.rowhdr.x0, y - px, geom.grid.x1, y),
                         &Rect::everything(),
-                        th.frozen_line,
+                        sheet_th.frozen_line,
                     );
                 }
                 if view.frozen_cols > 0 {
@@ -455,11 +459,11 @@ impl SheetsApp {
                     p.fill(
                         Rect::new(x - px, geom.colhdr.y0, x, geom.grid.y1),
                         &Rect::everything(),
-                        th.frozen_line,
+                        sheet_th.frozen_line,
                     );
                 }
                 if view.headers {
-                    draw_headers(&mut p, &cx, &geom, header_style, &mut buf);
+                    draw_headers(&mut p, &cx, &geom, header_style, &mut buf, th);
                     // Borda que dá para arrastar; no arraste, até o fim da grade.
                     use crate::app::{Drag, Edge, edge_rects};
                     let dragged = match self.drag {
@@ -473,7 +477,7 @@ impl SheetsApp {
                     {
                         p.fill(bar, &Rect::everything(), th.selection);
                         if dragged.is_some() {
-                            p.fill(line, &geom.grid, th.selection);
+                            p.fill(line, &geom.grid, sheet_th.selection);
                         }
                     }
                 }
@@ -481,41 +485,51 @@ impl SheetsApp {
                 if let Some(ed) = &self.editor
                     && let Some((r, style, pad)) = crate::complete::cell_editor(ed, &geom, view, p.text, ui)
                 {
-                    let colors = InputColors { focus: th.selection, border: th.selection, ..th.input };
+                    let mark = sheet_th.selection;
+                    let colors = InputColors { focus: mark, border: mark, ..sheet_th.input };
                     match crate::complete::editor_lines(ed, r, pad, p.text, style) {
-                        Some(lines) => {
-                            ed.input.draw_lines(&mut p, r, style, pad, !ed.in_bar, &colors, &spans, &lines)
+                        Some(lines) => ed.input.draw_lines(
+                            &mut p,
+                            r,
+                            style,
+                            pad,
+                            !ed.in_bar,
+                            &colors,
+                            &cell_spans,
+                            &lines,
+                        ),
+                        None => {
+                            ed.input.draw_spans(&mut p, r, style, pad, !ed.in_bar, &colors, "", &cell_spans)
                         }
-                        None => ed.input.draw_spans(&mut p, r, style, pad, !ed.in_bar, &colors, "", &spans),
                     }
-                    p.stroke(r.inset(-px), &Rect::everything(), 2.0 * px, th.selection);
+                    p.stroke(r.inset(-px), &Rect::everything(), 2.0 * px, mark);
                 }
                 draw_scrollbars(&mut p, vthumb, &geom, self.drag, th);
                 // Notas, seta da lista e mensagem de entrada.
                 let notes = &sheet.layout.notes;
                 let body = self.font_styles.first().copied().unwrap_or(ui);
-                crate::notes::draw_visible(&mut p, &geom, body, notes, view, self.show_notes, th);
+                crate::notes::draw_visible(&mut p, &geom, body, notes, view, self.show_notes, sheet_th);
                 if let Some(r) = dv_arrow {
-                    crate::valid::draw_arrow(&mut p, r, &geom, th);
+                    crate::valid::draw_arrow(&mut p, r, &geom, sheet_th);
                 }
                 if self.dv_list.is_none()
                     && self.dialog.is_none()
                     && let Some((cell, title, text)) = &dv_prompt
                 {
-                    crate::valid::draw_tip(&mut p, &geom, ui, *cell, title, text, th);
+                    crate::valid::draw_tip(&mut p, &geom, ui, *cell, title, text, sheet_th);
                 }
                 if let Some((r, c)) = self.hover_note
                     && let Some(n) = duck_core::notes::at(notes, r, c)
                     && let Some(cell) = cell_screen_rect(&geom, view, r, c)
                 {
-                    crate::notes::draw_hover(&mut p, &geom, ui, cell, n, th);
+                    crate::notes::draw_hover(&mut p, &geom, ui, cell, n, sheet_th);
                 }
             }
             None => {
                 p.fill(
                     geom.grid.intersect(&Rect::new(0.0, geom.fbar.y1, geom.w, geom.tabs.y0)),
                     &Rect::everything(),
-                    th.paper,
+                    sheet_th.paper,
                 );
                 let msg = if self.loader.is_some() || self.doc.is_some() {
                     if self.message.is_empty() { "Carregando…".to_string() } else { self.message.clone() }
@@ -525,7 +539,7 @@ impl SheetsApp {
                 };
                 let area = Rect::new(0.0, geom.fbar.y1, geom.w, geom.tabs.y0);
                 let big = ui.with_px(15.0 * s);
-                p.label(&msg, big, area, Align::Center, 0.0, th.muted);
+                p.label(&msg, big, area, Align::Center, 0.0, sheet_th.muted);
             }
         }
 
@@ -701,7 +715,7 @@ impl SheetsApp {
             headers: view.is_none_or(|v| v.1),
             colors: self.colors,
             num_fmt_name,
-            mode: self.mode,
+            mode: self.prefs.mode,
             show_notes: self.show_notes,
             protected,
         };
@@ -709,7 +723,7 @@ impl SheetsApp {
             .popup
             .as_ref()
             .is_some_and(|m| m.owner == Some(crate::ribbon::Act::Drop(crate::ribbon::Drop::File)));
-        crate::filter::draw_buttons(&mut p, &geom, &filter_buttons, th);
+        crate::filter::draw_buttons(&mut p, &geom, &filter_buttons, sheet_th);
         crate::ribbon::draw(
             &mut p,
             &geom,
@@ -1667,9 +1681,16 @@ fn decorate(p: &mut Painter, cx: &Ctx, seg: &Seg, x: f32, y: f32, w: f32, lh: f3
 // Cabeçalhos e barras de rolagem
 // ---------------------------------------------------------------------------
 
-fn draw_headers(p: &mut Painter, cx: &Ctx, geom: &Geom, style: TextStyle, buf: &mut String) {
+fn draw_headers(
+    p: &mut Painter,
+    cx: &Ctx,
+    geom: &Geom,
+    style: TextStyle,
+    buf: &mut String,
+    // O da interface, que pode não ser o das células.
+    th: &Theme,
+) {
     let v = cx.view;
-    let th = cx.th;
     let px = cx.px;
     let areas = v.areas();
     let (nr, nc) = (v.rows.len(), v.cols.len());

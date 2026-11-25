@@ -17,7 +17,6 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
 
 use duck_gfx::{Instance, KIND_DASH, KIND_GLYPH_ROT, KIND_IMAGE, KIND_LINE, KIND_SOLID, KIND_TRI};
 use duck_platform::ColorScheme;
@@ -236,7 +235,7 @@ pub static DARK: Theme = Theme {
 // Escolha do usuário
 // ---------------------------------------------------------------------------
 
-/// O que o usuário escolheu na aba Exibir.
+/// O que o usuário escolheu na aba Exibir ou nas configurações.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
     Light,
@@ -274,39 +273,6 @@ impl Mode {
             Mode::System => None,
         }
     }
-}
-
-const KEY: &str = "tema";
-
-/// Preferências do usuário (ao lado da lista de recentes), uma por linha:
-/// `chave=valor`.
-pub fn pref_file() -> Option<std::path::PathBuf> {
-    duck_platform::config_dir("duck-office").map(|d| d.join("preferencias.txt"))
-}
-
-/// O tema gravado no arquivo de preferências (padrão: o do sistema).
-pub fn load(file: &Path) -> Mode {
-    let text = std::fs::read_to_string(file).unwrap_or_default();
-    text.lines()
-        .filter_map(|l| l.split_once('='))
-        .find(|(k, _)| k.trim() == KEY)
-        .and_then(|(_, v)| Mode::parse(v))
-        .unwrap_or_default()
-}
-
-/// Grava o tema; as outras preferências do arquivo ficam.
-pub fn save(file: &Path, mode: Mode) -> std::io::Result<()> {
-    let old = std::fs::read_to_string(file).unwrap_or_default();
-    let mut text: String = old
-        .lines()
-        .filter(|l| l.split_once('=').is_none_or(|(k, _)| k.trim() != KEY) && !l.trim().is_empty())
-        .map(|l| format!("{l}\n"))
-        .collect();
-    text.push_str(&format!("{KEY}={}\n", mode.name()));
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(file, text)
 }
 
 // ---------------------------------------------------------------------------
@@ -787,22 +753,5 @@ mod tests {
         assert_eq!(Mode::parse(" Escuro "), Some(Mode::Dark));
         assert_eq!(Mode::parse("azul"), None);
         assert_eq!(Mode::System.frame(), None);
-    }
-
-    #[test]
-    fn remembered_between_runs() {
-        let dir = std::env::temp_dir().join(format!("duck-tema-{}", std::process::id()));
-        let file = dir.join("preferencias.txt");
-        // Sem arquivo: o do sistema.
-        assert_eq!(load(&file), Mode::System);
-        save(&file, Mode::Dark).unwrap();
-        assert_eq!(load(&file), Mode::Dark);
-        // Outras preferências ficam, e valor estranho vira o padrão.
-        std::fs::write(&file, "outra=1\ntema=azul\n").unwrap();
-        assert_eq!(load(&file), Mode::System);
-        save(&file, Mode::Light).unwrap();
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "outra=1\ntema=claro\n");
-        assert_eq!(load(&file), Mode::Light);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

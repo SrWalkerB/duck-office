@@ -1113,8 +1113,12 @@ fn main() {
         sheet.active = (r, 1);
         sheet.scroll_y = sheet.rows.offset(r) as f64 - 300.0;
     }
-    let config =
-        WindowConfig { title: "duck-sheets · million_rows (F0)".into(), width: 1440.0, height: 900.0 };
+    let config = WindowConfig {
+        title: "duck-sheets · million_rows (F0)".into(),
+        width: 1440.0,
+        height: 900.0,
+        ..Default::default()
+    };
     if let Err(e) = duck_platform::run(config, &mut sheet) {
         eprintln!("erro: {e}");
         std::process::exit(1);

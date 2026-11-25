@@ -37,12 +37,16 @@ impl SheetsApp {
             return;
         }
         if doc.macros.is_none() {
-            let bin = duck_xlsx::Package::open(&doc.path).ok().and_then(|p| p.read("xl/vbaProject.bin").ok());
+            let bin = doc.book().ok().and_then(|b| b.read_part("xl/vbaProject.bin"));
             doc.macros = Some(bin.map(|b| duck_vba::modules(&b)).unwrap_or_default());
         }
         let modules = doc.macros.clone().unwrap_or_default();
         if modules.is_empty() {
             self.message = "O arquivo não tem macros".into();
+            return;
+        }
+        if !self.prefs.macros {
+            self.message = "As macros estão desligadas (Arquivo → Configurações)".into();
             return;
         }
         // Uma pergunta por arquivo, como o aviso de segurança do Excel.
@@ -306,7 +310,11 @@ impl Backend for Ctx<'_> {
             }
             let (value, formula) = match value {
                 CellValue::Text(t) if t.starts_with('=') && t.len() > 1 => {
-                    (CellValue::Empty, Some(t[1..].to_string()))
+                    let f = match sh {
+                        Some((_, d)) => d.check_formula(s, &t[1..], row, col)?,
+                        None => t[1..].to_string(),
+                    };
+                    (CellValue::Empty, Some(f))
                 }
                 v => (v, None),
             };

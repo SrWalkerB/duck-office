@@ -20,7 +20,7 @@ use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, DeviceEvents, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, NamedKey};
-use winit::window::{CursorIcon, WindowId};
+use winit::window::{CursorIcon, WindowAttributes, WindowId};
 
 pub use raw_window_handle;
 
@@ -35,12 +35,46 @@ pub struct WindowConfig {
     /// Tamanho inicial em pixels lógicos (antes do fator de escala do SO).
     pub width: f64,
     pub height: f64,
+    /// Identidade do app no Linux (o nome do `.desktop`, sem a extensão).
+    pub app_id: String,
+    /// Ícone da janela no X11. O macOS usa o do `.app`, o Wayland o do
+    /// `.desktop` e o Windows o recurso 1 do `.exe`.
+    pub icon: Option<Icon>,
+}
+
+/// Imagem quadrada, RGBA de 8 bits.
+#[derive(Clone, Debug)]
+pub struct Icon {
+    pub rgba: Vec<u8>,
+    pub size: u32,
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
-        Self { title: "duck".into(), width: 1280.0, height: 800.0 }
+        Self { title: "duck".into(), width: 1280.0, height: 800.0, app_id: "duck".into(), icon: None }
     }
+}
+
+/// Ícone e identidade da janela.
+#[cfg(windows)]
+fn identity(attrs: WindowAttributes, _: &WindowConfig) -> WindowAttributes {
+    use winit::platform::windows::{IconExtWindows, WindowAttributesExtWindows};
+    let load = |px: u32| winit::window::Icon::from_resource(1, Some(PhysicalSize::new(px, px))).ok();
+    attrs.with_window_icon(load(32)).with_taskbar_icon(load(256))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn identity(attrs: WindowAttributes, config: &WindowConfig) -> WindowAttributes {
+    use winit::platform::wayland::WindowAttributesExtWayland;
+    let icon = config.icon.as_ref();
+    let icon = icon.and_then(|i| winit::window::Icon::from_rgba(i.rgba.clone(), i.size, i.size).ok());
+    // O mesmo campo vale para o X11 (`WM_CLASS`).
+    attrs.with_window_icon(icon).with_name(&config.app_id, &config.app_id)
+}
+
+#[cfg(target_os = "macos")]
+fn identity(attrs: WindowAttributes, _: &WindowConfig) -> WindowAttributes {
+    attrs
 }
 
 #[derive(Debug)]
@@ -144,8 +178,11 @@ pub enum Cursor {
 }
 
 mod clock;
+mod console;
+mod opened;
 
 pub use clock::{LocalTime, local_time};
+pub use console::attach_console;
 
 /// Esquema de cores do sistema (e da moldura da janela).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,13 +360,32 @@ pub fn config_dir(app: &str) -> Option<PathBuf> {
     base.map(|b| b.join(app))
 }
 
+/// Pasta de dados do app `app` que ficam neste computador (não é criada aqui):
+/// `%LOCALAPPDATA%\app` no Windows, `$XDG_STATE_HOME/app` (ou
+/// `~/.local/state/app`) no Linux, `~/Library/Application Support/app` no macOS.
+pub fn state_dir(app: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"));
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")));
+    base.map(|b| b.join(app))
+}
+
 /// Registra o programa `exe` no "Abrir com" do sistema para as extensões
 /// `exts`, só para o usuário atual (o programa padrão não muda).
 ///
 /// - Windows: `HKCU\Software\Classes` (ProgId `name.Arquivo`, `OpenWithProgids`
 ///   de cada extensão e `Applications\<exe>`).
 /// - Linux: um `.desktop` em `~/.local/share/applications` com os tipos MIME.
-pub fn register_file_types(exe: &Path, name: &str, exts: &[&str]) -> Result<(), String> {
+///
+/// `icon` (PNG de 256 × 256) é o do programa no Linux; no Windows é o do `.exe`.
+pub fn register_file_types(exe: &Path, name: &str, exts: &[&str], icon: &[u8]) -> Result<(), String> {
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    let _ = icon;
     let exe = exe.to_string_lossy().into_owned();
     #[cfg(windows)]
     {
@@ -339,6 +395,7 @@ pub fn register_file_types(exe: &Path, name: &str, exts: &[&str]) -> Result<(), 
         let classes = r"HKCU\Software\Classes";
         let mut calls: Vec<Vec<String>> = vec![
             vec![format!(r"{classes}\{prog}"), "/ve".into(), "/d".into(), format!("Planilha ({name})")],
+            vec![format!(r"{classes}\{prog}\DefaultIcon"), "/ve".into(), "/d".into(), format!("\"{exe}\",0")],
             vec![format!(r"{classes}\{prog}\shell\open\command"), "/ve".into(), "/d".into(), cmd.clone()],
             vec![
                 format!(r"{classes}\Applications\{file}\shell\open\command"),
@@ -366,12 +423,11 @@ pub fn register_file_types(exe: &Path, name: &str, exts: &[&str]) -> Result<(), 
             ]);
         }
         for args in calls {
-            let out = std::process::Command::new("reg")
-                .arg("add")
-                .args(&args)
-                .arg("/f")
-                .output()
-                .map_err(|e| e.to_string())?;
+            // Sem abrir um terminal na tela.
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let mut reg = std::process::Command::new("reg");
+            std::os::windows::process::CommandExt::creation_flags(&mut reg, CREATE_NO_WINDOW);
+            let out = reg.arg("add").args(&args).arg("/f").output().map_err(|e| e.to_string())?;
             if !out.status.success() {
                 return Err(String::from_utf8_lossy(&out.stderr).into_owned());
             }
@@ -390,14 +446,17 @@ pub fn register_file_types(exe: &Path, name: &str, exts: &[&str]) -> Result<(), 
                 _ => "application/octet-stream",
             })
             .collect();
-        let dir = std::env::var_os("XDG_DATA_HOME")
+        let data = std::env::var_os("XDG_DATA_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-            .ok_or("pasta do usuário não encontrada")?
-            .join("applications");
+            .ok_or("pasta do usuário não encontrada")?;
+        let icons = data.join("icons/hicolor/256x256/apps");
+        std::fs::create_dir_all(&icons).map_err(|e| e.to_string())?;
+        std::fs::write(icons.join(format!("{name}.png")), icon).map_err(|e| e.to_string())?;
+        let dir = data.join("applications");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let desktop = format!(
-            "[Desktop Entry]\nType=Application\nName={name}\nExec=\"{exe}\" %f\nMimeType={};\nTerminal=false\nCategories=Office;Spreadsheet;\n",
+            "[Desktop Entry]\nType=Application\nName={name}\nExec=\"{exe}\" %f\nIcon={name}\nStartupWMClass={name}\nMimeType={};\nTerminal=false\nCategories=Office;Spreadsheet;\n",
             mime.join(";")
         );
         std::fs::write(dir.join(format!("{name}.desktop")), desktop).map_err(|e| e.to_string())?;
@@ -553,6 +612,8 @@ pub enum Event {
     SchemeChanged(ColorScheme),
     /// Arquivo arrastado e solto na janela.
     FileDropped(PathBuf),
+    /// O sistema pediu para abrir um arquivo (duplo clique no Finder).
+    OpenFile(PathBuf),
     /// Pedido de [`Waker::wake`].
     Wake,
     CloseRequested,
@@ -645,6 +706,8 @@ pub fn run<A: App>(config: WindowConfig, app: &mut A) -> Result<(), Error> {
     // encheriam a fila de mensagens.
     event_loop.listen_device_events(DeviceEvents::Never);
 
+    opened::listen(event_loop.create_proxy());
+
     let mut runner = Runner {
         app,
         config,
@@ -722,6 +785,11 @@ impl<A: App> Runner<'_, A> {
 impl<A: App> ApplicationHandler<()> for Runner<'_, A> {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _: ()) {
         self.dispatch(event_loop, Event::Wake);
+        if self.window.is_some() {
+            for path in opened::take() {
+                self.dispatch(event_loop, Event::OpenFile(path));
+            }
+        }
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -732,6 +800,7 @@ impl<A: App> ApplicationHandler<()> for Runner<'_, A> {
             .with_title(self.config.title.clone())
             .with_inner_size(LogicalSize::new(self.config.width, self.config.height))
             .with_min_inner_size(PhysicalSize::new(200, 150));
+        let attrs = identity(attrs, &self.config);
         match event_loop.create_window(attrs) {
             Ok(w) => {
                 let window = Window { inner: Arc::new(w), pending: Arc::default() };

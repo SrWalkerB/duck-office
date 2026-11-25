@@ -71,7 +71,8 @@ impl SheetsApp {
             .find(|c| c.id == id)
             .map(|c| c.part.clone())
             .ok_or("Cache da tabela dinâmica não encontrado")?;
-        let c = duck_xlsx::Book::open(&doc.path)
+        let c = doc
+            .book()
             .ok()
             .and_then(|b| b.read_cube_cache(&part))
             .ok_or("A tabela dinâmica não é do Modelo de Dados")?;
@@ -86,7 +87,8 @@ impl SheetsApp {
         let doc = self.doc.as_mut().ok_or("sem planilha")?;
         let sheets = sheets_of(doc)?;
         if doc.pivots.cube.def.is_none() {
-            let def = duck_xlsx::Book::open(&doc.path)
+            let def = doc
+                .book()
                 .ok()
                 .and_then(|b| b.read_model())
                 .ok_or("O arquivo não tem um Modelo de Dados que o duck-sheets leia")?;

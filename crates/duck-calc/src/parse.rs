@@ -165,6 +165,7 @@ impl Formula {
 
 /// Tabela do Excel vista pelo compilador.
 pub struct TableInfo<'a> {
+    pub name: &'a str,
     pub sheet: u32,
     pub range: CellRange,
     pub header_rows: u32,
@@ -1300,6 +1301,7 @@ mod tests {
             static COLS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
             let cols = COLS.get_or_init(|| vec!["Nome".into(), "Valor".into()]);
             (name == "T").then(|| TableInfo {
+                name: "T",
                 sheet: 0,
                 range: CellRange { first_row: 0, first_col: 2, last_row: 10, last_col: 3 },
                 header_rows: 1,

@@ -180,7 +180,17 @@ O que entra na primeira versão: tudo das fases F0 a F5. O que fica para depois:
 
 - [x] Versão 1.0.0, "Sobre o duck-sheets" no menu Arquivo e `duck-sheets --version`.
 - [x] Pacotes (`scripts/package.sh`, fluxo `.github/workflows/release.yml` numa etiqueta `v*`): Windows (`.zip`), Linux (`.tar.gz` com `.desktop`) e macOS (`.app` com os tipos de arquivo, sem assinatura).
+- [x] **Cópias de recuperação** e registro de erros: o que não foi salvo não se perde se o programa quebrar ou o computador desligar.
+- [x] **Arquivo mudado por outro programa**: salvar pergunta, e nunca mistura os dois.
+- [x] Windows sem terminal atrás da janela, sem depender do `VCRUNTIME140.dll`, com ícone e informações de versão.
+- [x] Ícone no `.app` do macOS e no Linux; duplo clique no Finder (`application:openFiles:`).
+- [x] Etiqueta com sufixo (`v1.0.0-rc1`) publica como pré-lançamento.
+- [ ] Testar num Mac o duplo clique no Finder e os acentos (o app não trata IME).
+- [ ] Ver na janela a cópia de recuperação sendo oferecida, e os ícones na barra de tarefas.
 - [ ] Teste manual de teclado e mouse na janela nos três sistemas.
+- [ ] Arquivos salvos abertos no Excel.
+- [ ] Licenças das dependências nos pacotes.
+- [ ] Repositório público, página no ar e etiqueta `v1.0.0-rc1` de ensaio.
 - [ ] Publicar a etiqueta `v1.0.0`.
 
 ## ✅ F6 · Planilhas de painel reais
@@ -201,6 +211,7 @@ Tudo o que as duas planilhas reais de teste usam, com os mesmos resultados do Ex
 
 - [x] **Autocompletar fórmulas** na célula e na barra: as funções que o motor calcula (a lista sai da tabela do `duck-calc`), nomes definidos, tabelas e colunas, sem diferenciar maiúsculas nem acentos; assinatura com o argumento atual em destaque; teclado e mouse.
 - [x] **Modo escuro**: tema claro, escuro ou o do sistema (aba Exibir), lembrado entre execuções e trocado com a janela aberta. A planilha escurece só na tela; o arquivo salvo é idêntico nos dois temas.
+- [x] **Configurações** (Ctrl+,): tema, células escuras ou claras no tema escuro, direção do Enter, sugestões de fórmulas, arquivos recentes e macros; com prévia, cancelar e restaurar padrões.
 - [x] **Referências por clique**: clicar, arrastar ou andar com as setas escreve a referência (células, colunas e linhas inteiras, outras abas); F4, cores no texto e na grade, e o parêntese que falta fechado ao confirmar.
 - [x] **Abas**: criar, renomear, excluir, duplicar, mover, cor, ocultar e reexibir, pelo mouse ou pelo menu da guia. Fórmulas, nomes, gráficos, dinâmicas e segmentações ajustados; gravado no `workbook.xml`, nas relações e nos tipos; desfazer e refazer.
 - [x] **Alça de preenchimento**, duplo clique, Ctrl+D e Ctrl+R, com as séries em português.
@@ -213,7 +224,8 @@ Tudo o que as duas planilhas reais de teste usam, com os mesmos resultados do Ex
 - [ ] Excluir uma aba quando outra tem segmentação ligada a uma tabela dela; deslocar células que cortam uma tabela: hoje são recusados com aviso.
 - [ ] Recortar e colar entre abas como mover (hoje cola uma cópia).
 - [ ] Ctrl+clique para somar outra referência com `;`; arrastar o contorno colorido para mudar a referência; cores para nomes e tabelas.
-- [ ] Recusar (ou perguntar sobre) uma fórmula que não dá para ler, como `=SOMA(`: hoje ela é gravada como foi digitada.
+- [x] **Fórmulas conferidas ao digitar**: a que o Excel não leria é recusada, com o motivo (antes ia para o arquivo como estava); `[@Coluna]` é gravado com o nome da tabela. Nas planilhas de teste, 10,25 milhões de fórmulas conferidas e nenhuma recusada.
+- [ ] Digitar `A1#` (área despejada), `@` fora de tabela e referências a outro arquivo: hoje são recusados com aviso.
 - [x] **Objetos**: selecionar, arrastar e redimensionar gráficos, imagens, formas, grupos e segmentações; desfaz, e o arquivo salvo só muda o desenho.
 - [x] **Largura e altura pela borda** em abas sem painéis congelados (não funcionava), para todas as colunas ou linhas selecionadas.
 - [x] **Marca do que está copiado** (borda tracejada).

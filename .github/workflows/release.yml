@@ -2,6 +2,7 @@ name: Release
 
 # Uma etiqueta `v*` (ex.: v1.0.0) compila o duck-sheets nos três sistemas,
 # empacota (scripts/package.sh) e publica os arquivos numa release do GitHub.
+# Com um sufixo (ex.: v1.0.0-rc1), como pré-lançamento.
 on:
   push:
     tags: ["v*"]
@@ -43,3 +44,4 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

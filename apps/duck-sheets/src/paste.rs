@@ -642,6 +642,8 @@ impl SheetsApp {
         let Some((sheet, v)) = doc.current() else { return };
         let cfx = CfCtx { sheet, shared: &doc.strings, today };
         let mut changes = Vec::new();
+        // Com `=`, mas que não dá para ler como fórmula: fica como texto.
+        let mut broken = 0u64;
         for r in area.first_row..=area.last_row {
             for c in area.first_col..=area.last_col {
                 let (i, j) = ((r - area.first_row) % rows, (c - area.first_col) % cols);
@@ -655,7 +657,13 @@ impl SheetsApp {
                 let base = if current.style == 0 { v.blank_style(r, c) } else { current.style };
                 let (value, formula, style) =
                     match parse_input(field, doc.date1904, duck_core::input::today()) {
-                        Input::Formula(f) => (CellValue::Empty, Some(duck_calc::locale::from_pt(&f)), base),
+                        Input::Formula(f) => match doc.file_formula(active, &f, r, c) {
+                            Ok(f) => (CellValue::Empty, Some(f), base),
+                            Err(_) => {
+                                broken += 1;
+                                (CellValue::Text(field.to_string()), None, base)
+                            }
+                        },
                         Input::Value(value, fmt) => {
                             let mut style = base;
                             let cur = styles.xfs.get(base as usize).map_or(0, |x| x.num_fmt);
@@ -693,6 +701,10 @@ impl SheetsApp {
         if self.run_step(vec![(active, Command::SetCells(changes))]) {
             self.select_range(area);
             self.message = format!("{} células coladas", fmt_int(n));
+            if broken > 0 {
+                let n = fmt_int(broken);
+                self.message.push_str(&format!(" · {n} com erro na fórmula ficaram como texto"));
+            }
         }
     }
 

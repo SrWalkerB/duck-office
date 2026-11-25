@@ -409,7 +409,8 @@ impl crate::app::SheetsApp {
         if c.external {
             return Err("Tabela dinâmica do Modelo de Dados".into());
         }
-        let rec = duck_xlsx::Book::open(&doc.path)
+        let rec = doc
+            .book()
             .ok()
             .and_then(|b| b.read_pivot_records(&mut c))
             .ok_or("Não foi possível ler os registros da tabela dinâmica")?;

@@ -2,12 +2,24 @@
 # Empacota o duck-sheets já compilado em release (cargo build --release -p duck-sheets)
 # para o sistema atual, em dist/:
 #   Windows: duck-sheets-<versão>-windows-x64.zip   (duck-sheets.exe)
-#   Linux:   duck-sheets-<versão>-linux-x64.tar.gz  (binário + .desktop)
+#   Linux:   duck-sheets-<versão>-linux-x64.tar.gz  (binário, .desktop e ícone)
 #   macOS:   duck-sheets-<versão>-macos.zip         (duck-sheets.app, sem assinatura)
+# A versão é a da etiqueta (v1.0.0-rc1 → 1.0.0-rc1) ou a do Cargo.toml.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+if [[ "${GITHUB_REF_NAME:-}" == v* ]]; then
+  TAG="${GITHUB_REF_NAME#v}"
+  if [[ "${TAG%%-*}" != "$VERSION" ]]; then
+    echo "a etiqueta v$TAG não é da versão $VERSION do Cargo.toml" >&2
+    exit 1
+  fi
+  VERSION="$TAG"
+fi
+# No Info.plist só cabem números.
+NUMBER="${VERSION%%-*}"
+ASSETS=apps/duck-sheets/assets
 OS=$(uname -s)
 ARCH=$(uname -m)
 T="${CARGO_TARGET_DIR:-target}"
@@ -16,6 +28,12 @@ rm -rf dist && mkdir -p dist/stage
 case "$OS" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
     NAME="duck-sheets-$VERSION-windows-x64"
+    # O runtime do C vai dentro do .exe (.cargo/config.toml): sem isso ele não
+    # abre num Windows sem o "Visual C++ Redistributable".
+    if grep -qai 'vcruntime140' "$T/release/duck-sheets.exe"; then
+      echo "o .exe depende do VCRUNTIME140.dll: compile sem RUSTFLAGS" >&2
+      exit 1
+    fi
     cp "$T/release/duck-sheets.exe" LICENSE dist/stage/
     powershell -NoProfile -Command "Compress-Archive -Path dist/stage/* -DestinationPath dist/$NAME.zip -Force"
     ;;
@@ -23,12 +41,15 @@ case "$OS" in
     NAME="duck-sheets-$VERSION-linux-$ARCH"
     mkdir -p "dist/stage/$NAME"
     cp "$T/release/duck-sheets" LICENSE "dist/stage/$NAME/"
+    cp "$ASSETS/icon-256.png" "dist/stage/$NAME/duck-sheets.png"
     cat > "dist/stage/$NAME/duck-sheets.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=duck-sheets
 Comment=Planilhas .xlsx, .xlsm, .xlsb e .csv
 Exec=duck-sheets %f
+Icon=duck-sheets
+StartupWMClass=duck-sheets
 Terminal=false
 Categories=Office;Spreadsheet;
 MimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.ms-excel.sheet.macroEnabled.12;application/vnd.ms-excel.sheet.binary.macroEnabled.12;text/csv;
@@ -38,8 +59,9 @@ EOF
   Darwin)
     NAME="duck-sheets-$VERSION-macos-$ARCH"
     APP="dist/stage/duck-sheets.app"
-    mkdir -p "$APP/Contents/MacOS"
+    mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
     cp "$T/release/duck-sheets" "$APP/Contents/MacOS/"
+    cp "$ASSETS/icon.icns" "$APP/Contents/Resources/duck-sheets.icns"
     cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -48,8 +70,9 @@ EOF
   <key>CFBundleName</key><string>duck-sheets</string>
   <key>CFBundleDisplayName</key><string>duck-sheets</string>
   <key>CFBundleIdentifier</key><string>dev.duck-office.sheets</string>
-  <key>CFBundleVersion</key><string>$VERSION</string>
-  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleIconFile</key><string>duck-sheets</string>
+  <key>CFBundleVersion</key><string>$NUMBER</string>
+  <key>CFBundleShortVersionString</key><string>$NUMBER</string>
   <key>CFBundleExecutable</key><string>duck-sheets</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>

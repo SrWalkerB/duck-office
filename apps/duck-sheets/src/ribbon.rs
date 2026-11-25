@@ -31,6 +31,8 @@ pub enum Act {
     Recent(u8),
     /// Registrar o duck-sheets no "Abrir com" do sistema.
     Register,
+    /// Configurações do app.
+    Settings,
     /// Versão, licença e o adaptador gráfico.
     About,
     Quit,
@@ -382,6 +384,7 @@ const QUICK: &[Item] = &[
     b(Act::Save, "Salvar", "Salvar (Ctrl+S)"),
     b(Act::Undo, "Desfazer", "Desfazer (Ctrl+Z)"),
     b(Act::Redo, "Refazer", "Refazer (Ctrl+Y)"),
+    b(Act::Settings, "Configurações", "Tema, edição, arquivos recentes e macros (Ctrl+,)"),
 ];
 
 const TAB_NAMES: [(&str, Option<Tab>); 6] = [

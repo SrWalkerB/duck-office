@@ -71,6 +71,11 @@ jobs:
           ./target/release/duck-bench roundtrip target/synth.xlsb --edit 500
           ./target/release/duck-bench roundtrip target/synth.xlsb --estrutura --abas --celulas
 
+      # As fórmulas da vitrine, digitadas de novo, passam na conferência.
+      - name: Fórmulas digitadas
+        shell: bash
+        run: ./target/release/duck-bench conferir-formulas target/vitrine.xlsx
+
       # Contagens e acertos da vitrine (formas, gráficos, fórmulas, links,
       # salvar) contra a linha de base do repositório.
       - name: Regressão

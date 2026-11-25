@@ -570,7 +570,9 @@ impl SheetsApp {
     pub fn refresh_complete(&mut self, typed: bool) {
         let Some(mut ed) = self.editor.take() else { return };
         let at = (ed.sheet, ed.row, ed.col);
-        ed.complete.update(&ed.input.text, ed.input.cursor(), typed, || self.complete_source(at));
+        ed.complete.update(&ed.input.text, ed.input.cursor(), typed && self.prefs.suggest, || {
+            self.complete_source(at)
+        });
         self.editor = Some(ed);
     }
 

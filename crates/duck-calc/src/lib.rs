@@ -22,6 +22,7 @@ pub mod valid;
 
 pub mod cellops;
 pub mod chartdata;
+pub mod check;
 pub mod dynarr;
 pub mod editing;
 pub mod eval;

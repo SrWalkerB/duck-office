@@ -10,6 +10,7 @@
 //! duck-bench conferir-pacote ARQUIVO                         procura erros de pacote (relações, tipos, ids, nomes)
 //! duck-bench gen-showcase SAIDA.xlsx                         planilha de vitrine (formatos, bordas, painéis)
 //! duck-bench calc [ARQUIVO] [--hoje AAAA-MM-DD]              calcula cada fórmula e compara com o Excel (F4)
+//! duck-bench conferir-formulas [ARQUIVO]                     as fórmulas do arquivo passam na conferência do que se digita
 //! ```
 //!
 //! Sem ARQUIVO, usa `reference = "..."` de `bench.local.toml` (fora do git:
@@ -92,6 +93,7 @@ fn main() {
         },
         "regress" => regress::cmd(rest),
         "calc" => calc::cmd(rest),
+        "conferir-formulas" => calc::cmd_check(rest),
         "objetos" => calc::cmd_objects(rest),
         "emf" => emf::cmd_emf(rest),
         "dinamicas" => calc::cmd_pivots(rest),

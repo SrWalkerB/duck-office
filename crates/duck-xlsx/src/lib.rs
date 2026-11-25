@@ -25,6 +25,7 @@ pub mod pivot;
 #[doc(hidden)]
 mod shape;
 pub mod sheet;
+mod source;
 pub mod write;
 mod xlsb;
 pub mod xml;
@@ -42,6 +43,7 @@ use duck_par::InFlight;
 
 pub use package::Package;
 pub use sheet::SheetReport;
+pub use source::{OnDisk, Source};
 pub use write::{SaveOptions, SaveReport, TabOrigin, TabOut, TabPlan, save_file};
 
 #[derive(Debug)]
@@ -165,7 +167,10 @@ pub struct Book {
 impl Book {
     /// Abre o zip e lê `workbook.xml` (rápido: só o diretório central e uma parte pequena).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
-        let pkg = Package::open(path.as_ref())?;
+        Self::from_package(Package::open(path.as_ref())?)
+    }
+
+    pub fn from_package(pkg: Package) -> Result<Self, Error> {
         let meta = parts::read_workbook(&pkg)?;
         Ok(Self { pkg, meta, slicer_caches: Default::default(), persons: Default::default() })
     }

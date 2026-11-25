@@ -491,6 +491,7 @@ impl SheetsApp {
     pub fn scripted_refusal(&mut self) {
         let Some(d) = self.dialog.take() else { return };
         let why = match d.kind {
+            Kind::Invalid(_) if d.title == "Há um erro na fórmula" => "recusado: erro na fórmula",
             Kind::Invalid(_) => "recusado pela validação",
             Kind::Message => "recusado (aviso)",
             _ => "caixa aberta",

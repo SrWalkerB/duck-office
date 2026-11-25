@@ -9,7 +9,7 @@
 //! - Salvar roda numa thread e grava por remendo, com conferência antes de
 //!   substituir o arquivo (`duck_xlsx::save_file`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
@@ -49,6 +49,9 @@ pub struct SaveJob {
     dest: PathBuf,
     started: Instant,
 }
+
+/// Respostas de "outro programa mudou o arquivo".
+const CHANGED_BUTTONS: [&str; 3] = ["Salvar uma cópia…", "Salvar por cima", "Cancelar"];
 
 /// Um passo de desfazer/refazer: comandos (aba, comando), aplicados em
 /// ordem. Inserir linhas numa aba também ajusta fórmulas de outras abas:
@@ -231,6 +234,7 @@ impl SheetsApp {
         doc.history.undo.push(vec![(idx, inverse)]);
         doc.history.redo.clear();
         doc.dirty = true;
+        doc.changes += 1;
         self.after_change(idx, aff);
         if filter_changed {
             self.refresh_table_slicers();
@@ -303,6 +307,7 @@ impl SheetsApp {
         doc.history.undo.push(inverse);
         doc.history.redo.clear();
         doc.dirty = true;
+        doc.changes += 1;
         self.after_step(touched, book, lists_only);
         if shifted || book {
             self.init_spills();
@@ -412,6 +417,7 @@ impl SheetsApp {
         let (undo_list, redo_list) = (&mut doc.history.undo, &mut doc.history.redo);
         if undo { redo_list } else { undo_list }.push(inverse);
         doc.dirty = true;
+        doc.changes += 1;
         self.after_step(touched, book, lists_only);
         if shifted || book {
             self.init_spills();
@@ -695,16 +701,26 @@ impl SheetsApp {
         }
         let mut rich = None;
         let today = self.today;
+        let Some(date1904) = self.doc.as_ref().map(|d| d.date1904) else { return true };
+        let mut input = parse_input(&text, date1904, duck_core::input::today());
+        if let Input::Formula(f) = &mut input {
+            match self.file_formula(f, r, c) {
+                Ok(x) => *f = x,
+                Err(e) => {
+                    self.ask_formula(&e, (r, c), text, false);
+                    return true;
+                }
+            }
+        }
         let Some(doc) = &mut self.doc else { return true };
         let Some((sheet, v)) = doc.current() else { return true };
         let cell = sheet.cell(r, c, &doc.strings);
         let base = if cell.style == 0 { v.blank_style(r, c) } else { cell.style };
-        let change = match parse_input(&text, doc.date1904, duck_core::input::today()) {
+        let change = match input {
             Input::Formula(f) => {
                 // Valor provisório (o recálculo em segundo plano dá o certo).
                 let cx = CfCtx { sheet, shared: &doc.strings, today };
                 let value = cx.eval_formula(&f, r, c).unwrap_or(CellValue::Empty);
-                let f = duck_calc::locale::from_pt(&f);
                 CellChange { row: r, col: c, value, formula: Some(f), style: Some(base) }
             }
             Input::Value(value, fmt) => {
@@ -825,7 +841,10 @@ impl SheetsApp {
                 self.refresh_complete(false);
             }
             Key::Enter if ctrl => self.commit_edit_all(),
-            Key::Enter => mv(self, if shift { -1 } else { 1 }, 0),
+            Key::Enter => {
+                let (dr, dc) = self.prefs.enter.step(shift);
+                mv(self, dr, dc);
+            }
             Key::Char(c) if ctrl && matches!(c.as_str(), ";" | ":") => self.insert_now(shift),
             Key::Tab => mv(self, 0, if shift { -1 } else { 1 }),
             Key::ArrowUp if ed.enter_mode => mv(self, -1, 0),
@@ -959,6 +978,10 @@ impl SheetsApp {
         let mut clipboard = String::new();
         for e in &edits {
             self.scripted_refusal();
+            // Para testar a cópia de recuperação e o registro de erros.
+            if e == "quebrar" {
+                panic!("quebra de teste (--edit quebrar)");
+            }
             // `validar:`, `nota:`, `proteger=`... (ver `scripted_rules`).
             if self.scripted_rules(e)
                 || self.scripted_tabs(e)
@@ -1222,7 +1245,7 @@ impl SheetsApp {
         if let Some(dest) = self.opts.save_to.clone() {
             // Os valores calculados entram no arquivo salvo.
             self.calc_finish();
-            self.save_to(dest);
+            self.save_to(dest, false);
         }
     }
 
@@ -1243,7 +1266,8 @@ impl SheetsApp {
         let src = doc.path.clone();
         let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("xlsx").to_ascii_lowercase();
         // Planilha nova: a primeira vez pede o lugar.
-        let untitled = self.untitled_path.as_deref() == Some(src.as_path());
+        let recovered = self.recovery.is_adopted(&src);
+        let untitled = self.untitled_path.as_deref() == Some(src.as_path()) || recovered;
         // Pasta binária: só se salva noutro formato, sem o que não foi lido.
         let binary = doc.binary.clone();
         if let Some(out) = &binary {
@@ -1258,7 +1282,7 @@ impl SheetsApp {
         let dest = if save_as || untitled || binary.is_some() {
             let Some(w) = &self.window else { return };
             let exts = match binary {
-                Some(_) => binary_exts(duck_xlsx::Package::open(&src).is_ok_and(|p| has_macros(&p))),
+                Some(_) => binary_exts(doc.book().is_ok_and(|b| b.read_part("xl/vbaProject.bin").is_some())),
                 None => vec![ext.as_str()],
             };
             let name = match (untitled, binary.is_some()) {
@@ -1270,7 +1294,12 @@ impl SheetsApp {
                 ),
                 _ => src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
             };
-            let dir = if untitled { None } else { src.parent() };
+            let hint = self.recovery.adopted.as_ref().filter(|_| recovered).map(crate::recovery::suggestion);
+            let (dir, name) = match hint {
+                Some((dir, name)) => (dir, name),
+                None => (src.parent().filter(|_| !untitled).map(Path::to_path_buf), name),
+            };
+            let dir = dir.as_deref();
             let label = if binary.is_some() { "Planilhas do Excel" } else { "Mesmo formato" };
             let filter: &[(&str, &[&str])] = &[(label, &exts)];
             let Some(mut d) = w.save_file("Salvar como", dir, &name, filter) else { return };
@@ -1290,12 +1319,51 @@ impl SheetsApp {
             }
             src.clone()
         };
-        self.save_to(dest);
+        self.save_to(dest, false);
     }
 
-    /// Salva em `dest` (o próprio arquivo ou uma cópia).
-    pub fn save_to(&mut self, dest: PathBuf) {
+    /// Outro programa mudou o arquivo em que se vai salvar: pergunta.
+    fn ask_changed(&mut self, dest: PathBuf) {
+        let name = self.file_label(&dest);
+        self.message = "Outro programa mudou o arquivo: nada foi salvo".into();
+        if self.unattended() {
+            // Ninguém para responder: sai sem salvar.
+            self.error = Some("outro programa mudou o arquivo".into());
+            self.doc = None;
+            if let Some(w) = &self.waker {
+                w.wake();
+            }
+            return;
+        }
+        let text = format!(
+            "Outro programa mudou \"{name}\" depois que ele foi aberto aqui. Salvar por cima apaga o que \
+             o outro programa gravou. Com uma cópia, os dois ficam."
+        );
+        self.dialog = Some(crate::dialog::Dialog::new(
+            crate::dialog::Kind::Changed(dest),
+            "O arquivo mudou",
+            vec![crate::dialog::Field::info(&text)],
+            &CHANGED_BUTTONS,
+        ));
+    }
+
+    /// Resposta a [`Self::ask_changed`].
+    pub fn changed_answer(&mut self, dest: PathBuf, button: usize) {
+        match button {
+            0 => self.save(true),
+            1 => self.save_to(dest, true),
+            _ => {}
+        }
+    }
+
+    /// Salva em `dest` (o próprio arquivo ou uma cópia). `overwrite` = mesmo
+    /// que outro programa o tenha mudado.
+    pub fn save_to(&mut self, dest: PathBuf, overwrite: bool) {
         self.commit_edit();
+        // O que se digitava foi recusado: o aviso espera a resposta.
+        if self.answering() {
+            return;
+        }
         if let Some(doc) = &mut self.doc {
             doc.calc.cancel();
         }
@@ -1304,6 +1372,12 @@ impl SheetsApp {
             return;
         }
         let src = doc.path.clone();
+        let source = doc.source.clone();
+        if !overwrite
+            && source.as_ref().is_some_and(|s| s.is(&dest) && s.on_disk() == duck_xlsx::OnDisk::Changed)
+        {
+            return self.ask_changed(dest);
+        }
         if crate::loader::is_csv(&src) {
             self.save_csv(&src, dest);
             return;
@@ -1320,7 +1394,7 @@ impl SheetsApp {
             .name("duck-save".into())
             .spawn(move || {
                 let pool = duck_par::pool(0);
-                let r = pool.install(|| {
+                let save = || {
                     let refs: Vec<Option<&Sheet>> = sheets.iter().map(|s| s.as_deref()).collect();
                     duck_xlsx::save_file(
                         &src,
@@ -1328,12 +1402,21 @@ impl SheetsApp {
                         &refs,
                         &strings,
                         &styles,
-                        &duck_xlsx::SaveOptions { tabs, book_protection, ..Default::default() },
+                        &duck_xlsx::SaveOptions {
+                            tabs,
+                            book_protection,
+                            source,
+                            overwrite,
+                            ..Default::default()
+                        },
                     )
-                });
+                    .map_err(|e| e.to_string())
+                };
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pool.install(save)))
+                    .unwrap_or_else(|_| Err("erro interno (registrado em erros.txt)".into()));
                 // As abas voltam a ter um dono só antes de avisar a janela.
                 drop(sheets);
-                let _ = tx.send(r.map_err(|e| e.to_string()));
+                let _ = tx.send(r);
                 waker.wake();
             })
             .expect("thread de salvar");
@@ -1351,8 +1434,10 @@ impl SheetsApp {
                 if let Some(s) = doc.sheets.first_mut().and_then(sheet_mut) {
                     s.clear_edits();
                 }
+                doc.source = crate::recovery::reopen(&dest);
                 doc.path = dest;
                 doc.dirty = false;
+                self.recovery.saved(doc.changes);
                 self.message = format!("Salvo em {} ms (CSV: só os valores)", t.elapsed().as_millis());
                 self.update_title();
             }
@@ -1384,7 +1469,9 @@ impl SheetsApp {
                     st.xf_base.clear();
                     st.new_num_fmts.clear();
                     doc.path = job.dest.clone();
+                    doc.source = rep.source.clone();
                     doc.dirty = false;
+                    self.recovery.saved(doc.changes);
                     // De um `.xlsb`: daqui em diante é o arquivo novo.
                     doc.binary = None;
                     doc.protection_changed = false;
@@ -1577,10 +1664,6 @@ impl SheetsApp {
 }
 
 /// O pacote tem projeto VBA?
-fn has_macros(pkg: &duck_xlsx::Package) -> bool {
-    pkg.entry("xl/vbaProject.bin").is_some()
-}
-
 /// Extensões em que um `.xlsb` pode ser salvo (a primeira é a sugerida).
 fn binary_exts(macros: bool) -> Vec<&'static str> {
     if macros { vec!["xlsm", "xlsx"] } else { vec!["xlsx"] }

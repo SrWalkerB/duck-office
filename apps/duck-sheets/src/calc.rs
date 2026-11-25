@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use duck_calc::recalc::{SpillOut, Spills, Uncalculated};
@@ -79,6 +79,8 @@ pub struct Calc {
     stale: bool,
     pending: Pending,
     job: Option<Job>,
+    /// Cópia de recuperação sendo gravada (também lê as abas).
+    pub snapshot: Option<crate::recovery::Job>,
     /// Último cálculo (para a barra de status).
     pub last: Option<(Duration, u64, usize)>,
     /// Matrizes dinâmicas: a área que cada uma ocupa (as células dela são do
@@ -151,10 +153,18 @@ impl Calc {
     /// Para o cálculo em andamento (antes de editar ou salvar): o que ele
     /// cobria volta para a fila.
     pub fn cancel(&mut self) {
+        self.stop_snapshot();
         let Some(job) = self.job.take() else { return };
         job.cancel.store(true, Ordering::Relaxed);
         let _ = job.handle.join();
         self.pending.add(job.covers);
+    }
+
+    /// Desiste da cópia de recuperação em andamento.
+    pub fn stop_snapshot(&mut self) {
+        if let Some(job) = self.snapshot.take() {
+            job.stop();
+        }
     }
 
     /// Começa um cálculo se há algo pendente e nenhum em andamento.
@@ -227,7 +237,22 @@ impl Calc {
     /// Resultado de um cálculo que terminou (`block` = espera ele terminar).
     pub fn poll(&mut self, block: bool) -> Option<Done> {
         let job = self.job.as_ref()?;
-        let done = if block { job.rx.recv().ok()? } else { job.rx.try_recv().ok()? };
+        let done = match if block {
+            job.rx.recv().map_err(|_| true)
+        } else {
+            job.rx.try_recv().map_err(|e| e == TryRecvError::Disconnected)
+        } {
+            Ok(d) => d,
+            // A thread quebrou: os valores ficam como estavam.
+            Err(true) => {
+                if let Some(job) = self.job.take() {
+                    let _ = job.handle.join();
+                }
+                self.stale = true;
+                return None;
+            }
+            Err(false) => return None,
+        };
         let job = self.job.take().unwrap();
         let _ = job.handle.join();
         self.engine = Some(done.engine.clone());
@@ -259,6 +284,8 @@ impl crate::app::SheetsApp {
         // Planilha nova ainda não salva: sem caminho (CÉL("nome.arquivo") dá "").
         let path = if self.untitled_path.as_ref() == Some(&doc.path) {
             String::new()
+        } else if let Some(e) = self.recovery.adopted.as_ref().filter(|e| e.path() == doc.path) {
+            e.original().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()
         } else {
             doc.path.to_string_lossy().into_owned()
         };
@@ -459,6 +486,7 @@ impl crate::app::SheetsApp {
         let spills = done.spills;
         let uncalculated = uncalculated_message(&done.uncalculated);
         let Some(doc) = &mut self.doc else { return };
+        doc.calc.stop_snapshot();
         let changed = done.overlay.len();
         let mut per_sheet: Vec<Vec<(u32, u32, duck_core::CellValue)>> = vec![Vec::new(); doc.sheets.len()];
         for (s, r, c, v) in done.overlay.drain() {

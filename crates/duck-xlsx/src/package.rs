@@ -68,11 +68,14 @@ pub struct Package {
 
 impl Package {
     pub fn open(path: &Path) -> Result<Self, Error> {
-        let file = File::open(path)?;
+        Self::from_file(&File::open(path)?)
+    }
+
+    pub fn from_file(file: &File) -> Result<Self, Error> {
         // SAFETY: o arquivo é só lido. Se outro processo alterá-lo durante a
         // leitura, o conteúdo lido pode ficar inconsistente (como em qualquer
         // leitor), mas não há escrita através do mapeamento.
-        let mmap = unsafe { Mmap::map(&file)? };
+        let mmap = unsafe { Mmap::map(file)? };
         Self::from_mmap(mmap)
     }
 

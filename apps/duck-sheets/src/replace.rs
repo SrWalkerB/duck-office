@@ -284,7 +284,11 @@ impl SheetsApp {
                 let mut st = None;
                 let (value, formula) = match input {
                     Input::Formula(f) => {
-                        let f = duck_calc::locale::from_pt(&f);
+                        let f = doc.file_formula(i, &f, r, c).map_err(|e| {
+                            let mut at = String::new();
+                            crate::app::cell_name(r, c, &mut at);
+                            format!("Nada mudou: a fórmula de {at} ficaria com erro. {e}")
+                        })?;
                         (cfx.eval_formula(&f, r, c).unwrap_or(CellValue::Empty), Some(f))
                     }
                     Input::Value(v, fmt) => {

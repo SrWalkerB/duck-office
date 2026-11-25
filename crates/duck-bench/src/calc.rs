@@ -936,3 +936,47 @@ pub fn cmd_cell(args: &[String]) -> Res {
     }
     Ok(())
 }
+
+/// `duck-bench conferir-formulas [ARQUIVO]`: as fórmulas do arquivo, como se
+/// fossem digitadas de novo (mostradas em português e lidas de volta), têm de
+/// passar na conferência do que se digita. Só contagens e formas.
+pub fn cmd_check(args: &[String]) -> Res {
+    let path = crate::file_arg(args)?;
+    let (wb, _) = duck_xlsx::open(&path, &Options::default()).map_err(|e| e.to_string())?;
+    let book = Book::new(wb.sheets.iter().collect(), &wb.shared_strings, &wb.extras, wb.date1904);
+    let mut cells: Vec<(u32, u32, u32)> = Vec::new();
+    for (s, sh) in wb.sheets.iter().enumerate() {
+        cells.extend(sh.formula_positions().map(|(r, c)| (s as u32, r, c)));
+    }
+    let t = Instant::now();
+    // (motivo sem o que está entre aspas, forma) → quantidade.
+    let refused = cells
+        .par_chunks(4096)
+        .map(|ch| {
+            let mut out: HashMap<(String, String), u64> = HashMap::new();
+            for &(s, r, c) in ch {
+                let Some(f) = duck_calc::cell_formula(&wb.sheets[s as usize], r, c) else { continue };
+                let typed = duck_calc::locale::from_pt(&duck_calc::locale::to_pt(&f));
+                if let Err(e) = duck_calc::check::prepare(&typed, s, r, c, &book) {
+                    let why = e.split('"').step_by(2).collect::<Vec<_>>().join("…");
+                    let why = why.split(". As que tem").next().unwrap_or_default().to_string();
+                    *out.entry((why, formula_shape(&f))).or_default() += 1;
+                }
+            }
+            out
+        })
+        .reduce(HashMap::new, |mut a, b| {
+            for (k, n) in b {
+                *a.entry(k).or_default() += n;
+            }
+            a
+        });
+    let total: u64 = refused.values().sum();
+    println!("{} fórmulas conferidas em {} ms; {total} recusadas", cells.len(), t.elapsed().as_millis());
+    let mut list: Vec<_> = refused.into_iter().collect();
+    list.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    for ((why, shape), n) in list.iter().take(20) {
+        println!("  {n:>9}  {why}  {shape}");
+    }
+    if total > 0 { Err("fórmulas do arquivo recusadas".into()) } else { Ok(()) }
+}

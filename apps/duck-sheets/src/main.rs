@@ -26,6 +26,10 @@
 //! inicial, depois de carregar tudo) e salvam numa cópia: para testar a
 //! edição e o salvamento sem mexer na janela (a lista está no README).
 
+// Sem um terminal atrás da janela no Windows; as opções que imprimem usam o
+// de quem chamou (`attach_console`).
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod actions;
 mod app;
 mod axis;
@@ -58,15 +62,18 @@ mod paste;
 mod pivot;
 mod pointing;
 mod protect;
+mod recovery;
 mod replace;
 mod ribbon;
 mod search;
+mod settings;
 mod shape;
 mod tablestyle;
 mod tabs;
 #[cfg(test)]
 mod testing;
 mod theme;
+mod typed;
 mod valid;
 mod zoombar;
 
@@ -124,6 +131,9 @@ pub struct Opts {
     /// Tema desta execução (sem gravar a escolha). Sem isto vale a
     /// preferência; em `--screenshot` e `--bench`, o claro.
     pub theme: Option<theme::Mode>,
+    /// No tema escuro, células escuras (`--planilha escura`) ou como no
+    /// arquivo (`clara`), só nesta execução.
+    pub dark_sheet: Option<bool>,
     /// Texto digitado na célula ativa, com teclas e cliques entre chaves (ver
     /// `scripted_typing`).
     pub typing: Option<String>,
@@ -160,6 +170,17 @@ fn parse_args() -> Opts {
                     eprintln!("--tema: use claro, escuro ou sistema (veio \"{v}\")");
                 }
             }
+            "--planilha" => {
+                let v = val().unwrap_or_default();
+                o.dark_sheet = match v.as_str() {
+                    "escura" => Some(true),
+                    "clara" => Some(false),
+                    _ => None,
+                };
+                if o.dark_sheet.is_none() {
+                    eprintln!("--planilha: use clara ou escura (veio \"{v}\")");
+                }
+            }
             "--version" | "--versao" => {
                 println!("duck-sheets {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -172,16 +193,62 @@ fn parse_args() -> Opts {
     o
 }
 
+/// O ícone da janela, onde ele não vem do pacote.
+fn icon() -> Option<duck_platform::Icon> {
+    if cfg!(not(target_os = "linux")) {
+        return None;
+    }
+    let bytes = include_bytes!("../assets/icon-64.png");
+    let mut reader = png::Decoder::new(std::io::Cursor::new(&bytes[..])).read_info().ok()?;
+    let mut rgba = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut rgba).ok()?;
+    rgba.truncate(info.buffer_size());
+    (info.color_type == png::ColorType::Rgba).then_some(duck_platform::Icon { rgba, size: info.width })
+}
+
+/// O programa quebrou: guarda o que não estava salvo e avisa. O erro já está
+/// no registro (ver [`recovery::install_log`]).
+fn crashed(mut app: app::SheetsApp) -> ! {
+    let kept =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.recovery_emergency())).unwrap_or(false);
+    if !app.unattended() {
+        let mut text = String::from("O duck-sheets encontrou um erro e precisa fechar.");
+        if kept {
+            text.push_str(
+                " As alterações não salvas foram guardadas: abra o duck-sheets de novo para recuperá-las.",
+            );
+        }
+        if let Some(f) = recovery::log_file() {
+            text.push_str(&format!("\n\nOs detalhes do erro estão em {}", f.display()));
+        }
+        duck_platform::message_box("duck-sheets", &text);
+    }
+    // Sem destrutores: o estado pode estar pela metade.
+    std::process::exit(101);
+}
+
 fn main() {
     configure_allocator();
+    recovery::install_log();
+    let options = std::env::args().skip(1).any(|a| a.starts_with("--"));
+    if options || std::env::var_os("DUCK_TRACE").is_some() {
+        duck_platform::attach_console();
+    }
     let t0 = Instant::now();
     // Leitura e busca usam os núcleos físicos (hyperthreads quase não ajudam
     // no parse e aumentam a memória em trânsito).
     let _ = rayon::ThreadPoolBuilder::new().num_threads(duck_par::physical_cores()).build_global();
     let opts = parse_args();
     let mut app = app::SheetsApp::new(t0, opts);
-    let config = duck_platform::WindowConfig { title: "duck-sheets".into(), width: 1440.0, height: 900.0 };
-    let run = duck_platform::run(config, &mut app);
+    let config = duck_platform::WindowConfig {
+        title: "duck-sheets".into(),
+        width: 1440.0,
+        height: 900.0,
+        app_id: "duck-sheets".into(),
+        icon: icon(),
+    };
+    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| duck_platform::run(config, &mut app)));
+    let Ok(run) = run else { crashed(app) };
     app.cleanup();
     if let Err(e) = run {
         eprintln!("erro: {e}");

@@ -1,0 +1,4 @@
+# O .exe leva o runtime do C junto: sem isto ele não abre num Windows sem o
+# "Visual C++ Redistributable" (VCRUNTIME140.dll).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

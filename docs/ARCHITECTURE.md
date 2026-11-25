@@ -512,7 +512,8 @@ Tendência inicial: **container próprio com codificação de colunas inspirada 
 - **Objetos** (gráficos, formas, segmentações, controles): as mesmas regras, aplicadas às instâncias que cada um acabou de desenhar. O fundo de um texto é o último retângulo ou triângulo embaixo dele; o das linhas e das outras partes, o fundo do objeto (uma linha de gráfico não muda de cor ao cruzar uma barra). Assim `chart.rs` e `shape.rs` não sabem de tema. Imagens não mudam.
 - As contas ficam num cache por (cor, fundo): no escuro a montagem do frame custa de 2% a 5% a mais.
 - **Sistema**: `duck-platform` expõe o esquema de cores (`Window::color_scheme`, `set_color_scheme` para a barra de título) e o evento `SchemeChanged`. No Windows e no macOS a troca chega com a janela aberta; onde o sistema não informa, vale o claro. As caixas nativas (abrir, salvar, perguntas) seguem o sistema.
-- A escolha (aba Exibir) vai para `preferencias.txt`, ao lado dos recentes. `--screenshot` e `--bench` sem `--tema` usam sempre o claro, para não depender da preferência de quem roda.
+- **Interface escura com a planilha clara** é uma opção: `SheetsApp::theme` dá as cores da interface (faixa, barras, cabeçalhos) e `sheet_theme` as das células e do que fica por cima delas. São o mesmo tema, a não ser com essa opção.
+- A escolha (aba Exibir ou Configurações) vai para `preferencias.txt`, ao lado dos recentes, com as outras configurações (`settings.rs`). `--screenshot` e `--bench` sem `--tema` usam sempre o claro, para não depender da preferência de quem roda.
 
 **Alternativas rejeitadas.**
 
@@ -523,6 +524,24 @@ Tendência inicial: **container próprio com codificação de colunas inspirada 
 **Consequências.** No tema escuro a cor na tela não é a do arquivo: quem está escolhendo cores para imprimir ou mandar a alguém confere no claro (um clique na aba Exibir). A paleta de cores do menu mostra as originais.
 
 ---
+
+## ADR-016 · O arquivo aberto fica aberto
+
+**Contexto.** Salvar por remendo (ADR-014) copia do original o que não mudou, e as dinâmicas, imagens e macros são lidas dele sob demanda. Tudo isso reabria o arquivo pelo caminho: se outro programa o trocasse, o resultado misturava os dois, e o trabalho do outro sumia sem aviso.
+
+**Decisão.** `duck_xlsx::Source` segura o arquivo aberto desde a leitura, e é dele que saem as releituras e o salvamento. Quem salva trocando o arquivo (um temporário renomeado por cima) deixa o de antes legível pelo nosso; tamanho e data dizem que o do disco mudou, e salvar pergunta. No Windows o arquivo é aberto sem deixar os outros escreverem dentro dele (leitura e troca continuam livres), a não ser que alguém já o tenha aberto para escrita. No Linux e no macOS uma escrita por dentro é percebida, e salvar é recusado em vez de ler pela metade.
+
+Depois de salvar, o arquivo conferido continua aberto com o nome final. Reabri-lo custava um segundo numa planilha de 18 MB: a primeira abertura depois de gravar ou renomear espera o antivírus do Windows.
+
+## ADR-017 · Cópias de recuperação
+
+**Contexto.** Uma quebra (`panic`) ou falta de luz perdia tudo desde o último salvamento.
+
+**Decisão.** Uma cópia inteira da planilha, pelo mesmo caminho de salvar, com compressão rápida e sem a conferência, numa thread e só com o usuário parado. As abas não podem estar em uso durante uma edição: a cópia é cancelada como o cálculo (`Calc::cancel`), e a escrita em andamento falha de propósito (`SaveOptions::cancel`). Num `panic` da janela, `main` pega a quebra e grava uma última cópia; como o estado pode estar pela metade, ela só substitui uma anterior se conferir. Leitura, salvamento e cálculo em segundo plano que quebram viram uma mensagem de erro, não uma janela parada.
+
+Cada cópia tem um arquivo travado enquanto o processo vive: na abertura, as que dá para travar são as que ficaram sem dono. Um diário de comandos seria menor, mas os comandos não são serializáveis e a cópia inteira abre em qualquer programa.
+
+**Conferência de fórmulas** (`duck-calc/src/check.rs`): o compilador é tolerante (o que não entende vira `#NOME?`), e gravar o texto assim faz o Excel acusar o arquivo. A conferência é outra gramática, a do arquivo, mais larga que a do motor, e vale para o que se digita, cola, substitui ou escreve por macro. As fórmulas que já estão no arquivo não passam por ela.
 
 ## Roadmap
 

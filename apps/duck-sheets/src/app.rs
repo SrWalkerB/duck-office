@@ -20,7 +20,8 @@ use crate::axis::Axis;
 use crate::loader::{Loader, Msg, drain};
 use crate::look::{Looks, edit_text, show};
 use crate::search::{self, SearchJob, SearchResult};
-use crate::theme::{Mode, Theme};
+use crate::settings::Prefs;
+use crate::theme::{LIGHT, Mode, Theme};
 
 // ---------------------------------------------------------------------------
 // Parâmetros (pixels lógicos)
@@ -198,6 +199,9 @@ pub struct Slot {
 
 pub struct Doc {
     pub path: PathBuf,
+    /// O arquivo como estava ao abrir (ou ao salvar): de onde vem o que não
+    /// mudou.
+    pub source: Option<Arc<duck_xlsx::Source>>,
     pub sheets: Vec<Slot>,
     pub active: usize,
     pub styles: Arc<Styles>,
@@ -212,6 +216,8 @@ pub struct Doc {
     pub history: crate::edit::History,
     /// Há alterações não salvas.
     pub dirty: bool,
+    /// Quantas alterações já houve (a cópia de recuperação sabe até onde foi).
+    pub changes: u64,
     /// Aberto de um `.xlsb`: o que o arquivo tem e não é lido (salvar gera um
     /// `.xlsx`/`.xlsm` sem isso).
     pub binary: Option<String>,
@@ -241,6 +247,14 @@ fn binary_note(left_out: &str) -> String {
 impl Doc {
     pub fn slot(&self) -> &Slot {
         &self.sheets[self.active]
+    }
+
+    /// O arquivo de origem, para ler mais partes dele.
+    pub fn book(&self) -> Result<duck_xlsx::Book, duck_xlsx::Error> {
+        match &self.source {
+            Some(s) => s.book(),
+            None => duck_xlsx::Book::open(&self.path),
+        }
     }
 
     /// Aba ativa e a exibição dela, se já tiver dados.
@@ -568,7 +582,7 @@ pub struct SheetsApp {
     pinch: f64,
     pub bench: Option<Bench>,
     pub screenshot_pending: bool,
-    error: Option<String>,
+    pub(crate) error: Option<String>,
     pub buf: String,
     pub buf2: String,
     /// `DUCK_TRACE=1`: imprime eventos e frames dos primeiros segundos.
@@ -628,9 +642,11 @@ pub struct SheetsApp {
     pub new_count: u32,
     /// Imagens das abas no atlas da GPU.
     pub images: crate::images::Images,
-    /// Tema escolhido e o esquema de cores do sistema.
-    pub mode: Mode,
+    /// Configurações e o esquema de cores do sistema.
+    pub prefs: Prefs,
     pub system: ColorScheme,
+    /// Cópias de recuperação.
+    pub recovery: crate::recovery::Recovery,
     /// O mouse estava sobre a lista de sugestões.
     complete_hover: bool,
 }
@@ -657,11 +673,17 @@ impl SheetsApp {
         });
         let screenshot_pending = opts.screenshot.is_some();
         // Medições e screenshots não dependem da preferência de quem roda.
-        let mode = match opts.theme {
-            Some(m) => m,
-            None if opts.bench || screenshot_pending => Mode::Light,
-            None => crate::theme::pref_file().map(|f| crate::theme::load(&f)).unwrap_or_default(),
+        let mut prefs = if opts.bench || screenshot_pending || opts.save_to.is_some() {
+            Prefs { mode: Mode::Light, ..Default::default() }
+        } else {
+            crate::settings::file().map(|f| Prefs::load(&f)).unwrap_or_default()
         };
+        // Sem ninguém olhando não há cópias de recuperação (só num teste delas).
+        let alone = opts.bench || screenshot_pending || opts.save_to.is_some();
+        let asked = std::env::var_os("DUCK_RECUPERACAO").is_some();
+        let copies = if alone && !asked { None } else { crate::recovery::dir() };
+        prefs.mode = opts.theme.unwrap_or(prefs.mode);
+        prefs.dark_sheet = opts.dark_sheet.unwrap_or(prefs.dark_sheet);
         Self {
             t0,
             opts,
@@ -734,19 +756,26 @@ impl SheetsApp {
             show_notes: false,
             unchecked: false,
             images: Default::default(),
-            mode,
+            prefs,
             system: ColorScheme::Light,
+            recovery: crate::recovery::Recovery::new(copies),
             complete_hover: false,
         }
     }
 
     /// Cores em uso.
     pub fn theme(&self) -> &'static Theme {
-        self.mode.theme(self.system)
+        self.prefs.mode.theme(self.system)
+    }
+
+    /// As da planilha (células e o que fica por cima delas): as mesmas, ou as
+    /// claras com a interface escura.
+    pub fn sheet_theme(&self) -> &'static Theme {
+        if self.prefs.dark_sheet { self.theme() } else { &LIGHT }
     }
 
     /// Medição ou teste pela linha de comando: ninguém para responder.
-    fn unattended(&self) -> bool {
+    pub(crate) fn unattended(&self) -> bool {
         self.opts.bench || self.opts.screenshot.is_some() || self.opts.save_to.is_some()
     }
 
@@ -786,6 +815,11 @@ impl SheetsApp {
         if !self.confirm_discard() {
             return;
         }
+        // A de antes foi salva ou descartada.
+        if let Some(d) = &mut self.doc {
+            d.calc.stop_snapshot();
+        }
+        self.recovery.forget();
         self.editor = None;
         self.form = None;
         self.painter = None;
@@ -815,6 +849,26 @@ impl SheetsApp {
         self.loader = Some(Loader::start(path, waker, t0, want));
     }
 
+    /// O sistema pediu para abrir `path` com o app já rodando: aqui, se só há
+    /// uma planilha nova intocada; senão, noutra janela.
+    fn open_elsewhere(&mut self, path: PathBuf, waker: duck_platform::Waker) {
+        // O macOS também repete o que veio na linha de comando.
+        let now = self.doc.as_ref().map(|d| &d.path).or(self.loader.as_ref().map(|l| &l.path));
+        let full = |p: &PathBuf| p.canonicalize().ok();
+        let same = now.is_some_and(|p| *p == path || (full(p).is_some() && full(p) == full(&path)));
+        if same || self.unattended() {
+            return;
+        }
+        let blank = self.untitled_path.as_ref() == now && self.doc.as_ref().is_none_or(|d| !d.dirty);
+        if blank {
+            return self.open(path, waker);
+        }
+        let exe = std::env::current_exe();
+        if let Err(e) = exe.and_then(|x| std::process::Command::new(x).arg(&path).spawn()) {
+            duck_platform::message_box("Não foi possível abrir outra janela", &e.to_string());
+        }
+    }
+
     /// Mensagens da leitura em segundo plano.
     fn poll_loader(&mut self) -> bool {
         let Some(loader) = &self.loader else { return false };
@@ -825,10 +879,10 @@ impl SheetsApp {
         let path = loader.path.clone();
         for m in msgs {
             match m {
-                Msg::Opened { sheets, active, styles, strings, date1904, extras, binary, at } => {
+                Msg::Opened { source, sheets, active, styles, strings, date1904, extras, binary, at } => {
                     self.images = Default::default();
                     // O que estava aberto era do outro arquivo.
-                    self.dialog = None;
+                    self.dialog.take_if(|d| !d.stays());
                     self.dv_list = None;
                     self.hover_note = None;
                     self.note("arquivo aberto", at);
@@ -837,6 +891,7 @@ impl SheetsApp {
                     let mdw = self.measure_mdw(&looks);
                     self.doc = Some(Doc {
                         path: path.clone(),
+                        source: Some(source),
                         sheets: sheets
                             .into_iter()
                             .map(|info| Slot {
@@ -857,6 +912,7 @@ impl SheetsApp {
                         finished: None,
                         history: Default::default(),
                         dirty: false,
+                        changes: 0,
                         binary,
                         protection: extras.protection.clone(),
                         protection_changed: false,
@@ -895,6 +951,7 @@ impl SheetsApp {
                     self.refresh_charts();
                     self.load_images();
                     self.init_spills();
+                    self.recovery_loaded();
                     self.scripted_edits();
                     self.calc_kick();
                 }
@@ -906,6 +963,10 @@ impl SheetsApp {
                             self.error = Some(e);
                         } else {
                             duck_platform::message_box("Não foi possível abrir o arquivo", &e);
+                            // Uma cópia de recuperação que não abre fica na pasta.
+                            if self.recovery.is_adopted(&path) {
+                                self.recovery.adopted = None;
+                            }
                             // Nada aberto: volta para uma planilha em branco.
                             if self.untitled_path.as_deref() != Some(path.as_path()) {
                                 self.new_file();
@@ -2337,6 +2398,7 @@ impl SheetsApp {
                     self.namebox.select_all();
                 }
                 "o" => self.pick_and_open(cx),
+                "," if !shift => self.ask_settings(),
                 "a" => {
                     if let Some(v) = self.doc.as_mut().and_then(|d| d.view_mut()) {
                         v.anchor = (0, 0);
@@ -2410,7 +2472,12 @@ impl SheetsApp {
             Key::ArrowLeft => self.move_cur(0, -1, shift, ctrl),
             Key::ArrowRight => self.move_cur(0, 1, shift, ctrl),
             Key::Tab => self.move_cur(0, if shift { -1 } else { 1 }, false, false),
-            Key::Enter => self.move_cur(if shift { -1 } else { 1 }, 0, false, false),
+            Key::Enter => {
+                let (dr, dc) = self.prefs.enter.step(shift);
+                if (dr, dc) != (0, 0) {
+                    self.move_cur(dr, dc, false, false);
+                }
+            }
             Key::PageUp if ctrl => self.cycle_sheet(false),
             Key::PageDown if ctrl => self.cycle_sheet(true),
             Key::PageUp => {
@@ -2602,7 +2669,7 @@ impl App for SheetsApp {
         self.scale = window.scale_factor() as f32;
         self.waker = Some(cx.waker());
         self.system = window.color_scheme().unwrap_or(ColorScheme::Light);
-        window.set_color_scheme(self.mode.frame());
+        window.set_color_scheme(self.prefs.mode.frame());
         self.window = Some(window.clone());
         // A leitura começa já: corre junto com a GPU e as fontes.
         match self.opts.path.clone() {
@@ -2614,6 +2681,9 @@ impl App for SheetsApp {
             }
             // Sem arquivo: planilha em branco, como no Excel.
             _ => self.new_file(),
+        }
+        if !self.unattended() {
+            self.recovery_offer();
         }
         let (w, h) = window.inner_size();
         let vsync = !self.opts.bench;
@@ -2640,6 +2710,9 @@ impl App for SheetsApp {
     }
 
     fn event(&mut self, cx: &mut Context, event: Event) {
+        if matches!(event, Event::Key { .. } | Event::MouseDown { .. } | Event::Wheel { .. }) {
+            self.recovery.input();
+        }
         let redraw = match event {
             Event::Wake => {
                 if self.trace {
@@ -2660,6 +2733,7 @@ impl App for SheetsApp {
                     cx.exit();
                     return;
                 }
+                self.recovery_poll();
                 let b = self.poll_search() | saved.is_some() | self.poll_calc() | self.poll_images();
                 if a && let Some(q) = self.opts.find.take() {
                     // `--find`: busca assim que a aba ativa chegar.
@@ -2677,12 +2751,12 @@ impl App for SheetsApp {
             }
             Event::SchemeChanged(s) => {
                 self.system = s;
-                self.mode == Mode::System
+                self.prefs.mode == Mode::System
             }
             // O Windows repinta a moldura com as cores do sistema quando
             // alguma configuração muda: repõe as do tema escolhido.
             Event::Focused(true) => {
-                if let (Some(w), Some(f)) = (&self.window, self.mode.frame()) {
+                if let (Some(w), Some(f)) = (&self.window, self.prefs.mode.frame()) {
                     w.set_color_scheme(Some(f));
                 }
                 false
@@ -2710,6 +2784,10 @@ impl App for SheetsApp {
             }
             Event::FileDropped(p) => {
                 self.open(p, cx.waker());
+                true
+            }
+            Event::OpenFile(p) => {
+                self.open_elsewhere(p, cx.waker());
                 true
             }
             Event::Wheel { delta, modifiers } => {
@@ -2783,6 +2861,7 @@ impl App for SheetsApp {
             }
             _ => false,
         };
+        self.recovery_arm();
         if redraw {
             self.clamp_scroll();
             self.redraw_later();

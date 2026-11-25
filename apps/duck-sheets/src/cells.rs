@@ -366,13 +366,20 @@ impl SheetsApp {
         }
         let text = crate::pointing::close_parens(&ed.input.text).unwrap_or(ed.input.text);
         let today = self.today;
+        let Some(date1904) = self.doc.as_ref().map(|d| d.date1904) else { return };
+        let mut input = parse_input(&text, date1904, duck_core::input::today());
+        if let Input::Formula(f) = &mut input {
+            match self.file_formula(f, ed.row, ed.col) {
+                Ok(x) => *f = x,
+                Err(e) => return self.ask_formula(&e, (ed.row, ed.col), text, true),
+            }
+        }
         let Some(doc) = self.doc.as_mut() else { return };
         let active = doc.active;
         let mut styles = doc.styles.clone();
         let before = styles.xfs.len();
         let Some((sheet, v)) = doc.current() else { return };
         let cfx = CfCtx { sheet, shared: &doc.strings, today };
-        let input = parse_input(&text, doc.date1904, duck_core::input::today());
         let mut changes = Vec::new();
         for (r0, c0, r1, c1) in areas {
             for r in r0..=r1.min(MAX_ROWS - 1) {
@@ -385,8 +392,7 @@ impl SheetsApp {
                     let base = if s == 0 { v.blank_style(r, c) } else { s };
                     changes.push(match &input {
                         Input::Formula(f) => {
-                            let f = duck_calc::locale::from_pt(f);
-                            let f = duck_calc::shift(&f, r as i64 - ed.row as i64, c as i64 - ed.col as i64);
+                            let f = duck_calc::shift(f, r as i64 - ed.row as i64, c as i64 - ed.col as i64);
                             let value = cfx.eval_formula(&f, r, c).unwrap_or(CellValue::Empty);
                             CellChange { row: r, col: c, value, formula: Some(f), style: Some(base) }
                         }

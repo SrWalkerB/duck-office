@@ -26,6 +26,12 @@ pub enum Kind {
     UnprotectSheet,
     ProtectBook,
     UnprotectBook,
+    /// Outro programa mudou o arquivo em que se ia salvar.
+    Changed(std::path::PathBuf),
+    /// Planilhas não salvas de uma execução que fechou sem aviso.
+    Recover,
+    /// Configurações do app; guarda as de antes de abrir.
+    Settings(Box<crate::settings::Prefs>),
 }
 
 pub enum Control {
@@ -157,6 +163,11 @@ impl Dialog {
 
     pub fn message(title: &str, text: &str) -> Self {
         Self::new(Kind::Message, title, vec![Field::info(text)], &["OK"])
+    }
+
+    /// Continua aberta quando outro arquivo abre.
+    pub fn stays(&self) -> bool {
+        matches!(self.kind, Kind::Settings(_) | Kind::Recover)
     }
 
     // --- valores ----------------------------------------------------------
@@ -513,14 +524,19 @@ impl SheetsApp {
         let keep = match o {
             Outcome::None => true,
             Outcome::Changed => {
-                if matches!(d.kind, Kind::Validation) {
-                    crate::valid::refresh(&mut d);
+                match d.kind {
+                    Kind::Validation => crate::valid::refresh(&mut d),
+                    Kind::Settings(_) => self.settings_changed(&mut d),
+                    _ => {}
                 }
                 true
             }
             Outcome::Cancel => {
-                if let Kind::Invalid(p) = d.kind.clone() {
-                    self.invalid_answer(*p, None);
+                match d.kind.clone() {
+                    Kind::Invalid(p) => self.invalid_answer(*p, None),
+                    Kind::Settings(before) => self.use_prefs(*before),
+                    Kind::Recover => self.recovery_answer(&d, None),
+                    _ => {}
                 }
                 false
             }
@@ -530,6 +546,26 @@ impl SheetsApp {
                     Kind::Message => false,
                     Kind::Invalid(p) => {
                         self.invalid_answer(*p, Some(i));
+                        false
+                    }
+                    Kind::Recover => {
+                        self.recovery_answer(&d, Some(i));
+                        false
+                    }
+                    Kind::Changed(dest) => {
+                        self.changed_answer(dest, i);
+                        false
+                    }
+                    Kind::Settings(before) if last => {
+                        self.use_prefs(*before);
+                        false
+                    }
+                    Kind::Settings(_) if i == crate::settings::RESET => {
+                        self.settings_reset(&mut d);
+                        true
+                    }
+                    Kind::Settings(before) => {
+                        self.settings_ok(&d, &before);
                         false
                     }
                     _ if last => false,

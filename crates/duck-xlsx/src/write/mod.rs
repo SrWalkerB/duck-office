@@ -28,13 +28,15 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use duck_core::{Sheet, StringTable, Styles};
 use rayon::prelude::*;
 
 use crate::xml::{attr, find_tag, for_each_attr};
-use crate::{Book, Error};
+use crate::{Book, Error, OnDisk, Source};
 use deflate::PartEncoder;
 use zipw::ZipWriter;
 
@@ -63,6 +65,14 @@ pub struct SaveOptions {
     /// As abas do modelo, se podem não ser as do arquivo (criadas, copiadas,
     /// excluídas, renomeadas, movidas, escondidas).
     pub tabs: Option<TabPlan>,
+    /// [`save_file`]: o arquivo aberto, de onde vêm as partes intactas (em vez
+    /// do que estiver no disco agora).
+    pub source: Option<Arc<Source>>,
+    /// [`save_file`]: salva por cima mesmo se outro programa mudou o arquivo
+    /// depois de aberto.
+    pub overwrite: bool,
+    /// Desiste no meio quando vira `true`.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl Default for SaveOptions {
@@ -74,7 +84,46 @@ impl Default for SaveOptions {
             verify: true,
             tabs: None,
             book_protection: None,
+            source: None,
+            overwrite: false,
+            cancel: None,
         }
+    }
+}
+
+/// Outro programa mudou o arquivo.
+const CHANGED: &str = "Outro programa mudou o arquivo depois que ele foi aberto aqui.";
+
+/// O arquivo de saída; com o pedido de desistir, as escritas falham.
+struct Output {
+    file: File,
+    cancel: Option<Arc<AtomicBool>>,
+}
+
+impl Output {
+    fn go_on(&self) -> std::io::Result<()> {
+        match &self.cancel {
+            Some(c) if c.load(Ordering::Relaxed) => Err(std::io::Error::other("cancelado")),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl Write for Output {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.go_on()?;
+        self.file.write(b)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.go_on()?;
+        self.file.flush()
+    }
+}
+
+impl Seek for Output {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(to)
     }
 }
 
@@ -102,6 +151,8 @@ pub struct SaveReport {
     pub part_renames: Vec<(usize, String, String)>,
     /// Releitura e conferência ([`save_file`]).
     pub verify: Duration,
+    /// O arquivo salvo, aberto (com [`SaveOptions::source`] e `verify`).
+    pub source: Option<Arc<Source>>,
 }
 
 /// O `.xlsb` só é salvo noutro formato.
@@ -397,7 +448,7 @@ impl Book {
             }
         }
 
-        let file = File::create(out)?;
+        let file = Output { file: File::create(out)?, cancel: opts.cancel.clone() };
         let mut zip = ZipWriter::new(BufWriter::with_capacity(1 << 20, file));
         for e in self.pkg.entries_in_order() {
             if Some(e.name.as_str()) == calc_chain {
@@ -498,8 +549,8 @@ impl Book {
         rep.sheet_parts = work.parts.clone();
         let (w, len) = zip.finish()?;
         let file = w.into_inner().map_err(|e| Error::Io(e.into_error()))?;
-        file.set_len(len)?;
-        file.sync_all()?;
+        file.file.set_len(len)?;
+        file.file.sync_all()?;
         rep.sheets_rewritten.sort_unstable();
         rep.bytes = len;
         rep.wall = t0.elapsed();
@@ -1048,7 +1099,10 @@ pub fn save_file(
     let tmp = temp_path(dest);
     let base = tmp.with_extension("duck-convertendo");
     let result = (|| {
-        let mut book = Book::open(src)?;
+        let mut book = match &opts.source {
+            Some(s) => s.book()?,
+            None => Book::open(src)?,
+        };
         let converted = book.is_binary();
         if converted {
             let ext = dest.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
@@ -1065,15 +1119,39 @@ pub fn save_file(
             // Todas as abas foram escritas agora: todas são conferidas.
             rep.sheets_rewritten = (0..sheets.len()).collect();
         }
+        let mut fresh = None;
         if opts.verify {
             let t = Instant::now();
-            verify(&tmp, sheets, shared, styles, &rep.sheets_rewritten)?;
+            // Aberto uma vez só: o mesmo arquivo conferido segue aberto com o
+            // nome final. (A primeira abertura depois de gravar ou renomear
+            // pode custar um segundo: o antivírus do Windows lê tudo.)
+            let file = Source::open(&tmp)?;
+            verify_book(&file.book()?, sheets, shared, styles, &rep.sheets_rewritten)?;
+            fresh = opts.source.as_ref().map(|_| file);
             rep.verify = t.elapsed();
         }
         if let Ok(meta) = std::fs::metadata(dest) {
             let _ = std::fs::set_permissions(&tmp, meta.permissions());
         }
-        std::fs::rename(&tmp, dest)?;
+        match &opts.source {
+            Some(s) => {
+                if !opts.overwrite && s.is(dest) && s.on_disk() == OnDisk::Changed {
+                    return Err(Error::Unsupported(CHANGED));
+                }
+                let kept = match s.replace(&tmp, dest) {
+                    Ok(()) => fresh,
+                    // Onde não dá para renomear um arquivo aberto: fecha antes.
+                    Err(_) if fresh.is_some() => {
+                        drop(fresh);
+                        s.replace(&tmp, dest)?;
+                        Some(Source::open(dest)?)
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                rep.source = kept.map(|f| Arc::new(f.moved(dest)));
+            }
+            None => std::fs::rename(&tmp, dest)?,
+        }
         Ok(rep)
     })();
     let _ = std::fs::remove_file(&base);
@@ -1091,7 +1169,16 @@ pub fn verify(
     styles: &Styles,
     which: &[usize],
 ) -> Result<(), Error> {
-    let book = Book::open(path)?;
+    verify_book(&Book::open(path)?, sheets, shared, styles, which)
+}
+
+fn verify_book(
+    book: &Book,
+    sheets: &[Option<&Sheet>],
+    shared: &StringTable,
+    styles: &Styles,
+    which: &[usize],
+) -> Result<(), Error> {
     if book.sheets().len() != sheets.len() {
         return Err(Error::Format(format!(
             "conferência: {} abas no arquivo salvo, {} no modelo",

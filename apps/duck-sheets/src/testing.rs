@@ -52,6 +52,7 @@ pub fn app(sheets: &[(&str, &[(&str, &str)])]) -> SheetsApp {
         .collect();
     a.doc = Some(Doc {
         path: "teste.xlsx".into(),
+        source: None,
         sheets: slots,
         active: 0,
         styles,
@@ -63,6 +64,7 @@ pub fn app(sheets: &[(&str, &[(&str, &str)])]) -> SheetsApp {
         finished: Some(Duration::ZERO),
         history: Default::default(),
         dirty: false,
+        changes: 0,
         calc: crate::calc::Calc::new(Arc::default()),
         pivots: Default::default(),
         macros: None,

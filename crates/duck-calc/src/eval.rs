@@ -314,6 +314,7 @@ impl Resolve for Book<'_> {
 
 fn table_info(sheet: u32, t: &duck_core::Table) -> TableInfo<'_> {
     TableInfo {
+        name: &t.name,
         sheet,
         range: t.range,
         header_rows: t.header_rows,

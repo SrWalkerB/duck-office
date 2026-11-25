@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use duck_core::{Sheet, StringTable, Styles};
 use duck_platform::Waker;
-use duck_xlsx::{Book, Options, SheetInfo};
+use duck_xlsx::{Options, SheetInfo, Source};
 
 /// XML lido para a prévia da aba ativa (algumas centenas a milhares de linhas).
 const PREVIEW_BYTES: usize = 4 << 20;
@@ -34,6 +34,8 @@ type Gate = Arc<(Mutex<bool>, Condvar)>;
 
 pub enum Msg {
     Opened {
+        /// O arquivo, que continua aberto.
+        source: Arc<Source>,
         sheets: Vec<SheetInfo>,
         active: usize,
         styles: Arc<Styles>,
@@ -88,7 +90,9 @@ impl Loader {
                     let _ = tx.send(m);
                     waker.wake();
                 };
-                if let Err(e) = load(&p, &send, &c, &g, t0, want) {
+                let run = || load(&p, &send, &c, &g, t0, want);
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+                if let Err(e) = r.unwrap_or_else(|_| Err("erro interno (registrado em erros.txt)".into())) {
                     send(Msg::Failed(e));
                 }
                 release_memory();
@@ -126,10 +130,11 @@ fn load(
     t0: Instant,
     want: Option<usize>,
 ) -> Result<(), String> {
+    let source = Source::open(path).map_err(|e| duck_xlsx::Error::from(e).to_string())?;
     if is_csv(path) {
-        return load_csv(path, send, t0);
+        return load_csv(path, source, send, t0);
     }
-    let book = Book::open(path).map_err(|e| e.to_string())?;
+    let book = source.book().map_err(|e| e.to_string())?;
     let sheets = book.sheets();
     let active = want.filter(|&i| i < sheets.len()).unwrap_or(book.active_sheet());
 
@@ -147,6 +152,7 @@ fn load(
         .filter_map(|c| c.source.as_ref().map(|(s, r)| (s.to_lowercase(), c.part.clone(), *r)))
         .collect();
     send(Msg::Opened {
+        source: Arc::new(source),
         sheets,
         active,
         styles: Arc::new(styles),
@@ -201,10 +207,11 @@ pub fn is_csv(path: &std::path::Path) -> bool {
         .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "csv" | "tsv" | "txt"))
 }
 
-fn load_csv(path: &PathBuf, send: &(dyn Fn(Msg) + Sync), t0: Instant) -> Result<(), String> {
+fn load_csv(path: &PathBuf, source: Source, send: &(dyn Fn(Msg) + Sync), t0: Instant) -> Result<(), String> {
     let sheet = duck_xlsx::csv::read_csv(path).map_err(|e| e.to_string())?;
     let bytes = std::fs::metadata(path).map_or(0, |m| m.len());
     send(Msg::Opened {
+        source: Arc::new(source),
         sheets: vec![SheetInfo { name: sheet.name.clone(), xml_bytes: bytes, ..Default::default() }],
         active: 0,
         styles: Arc::new(Styles::default()),

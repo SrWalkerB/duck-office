@@ -71,7 +71,15 @@ Colar especial (Ctrl+Alt+V): valores, fórmulas, formatos, larguras, sem bordas,
 
 Ctrl+clique e Ctrl+arrastar somam áreas à seleção, para formatar, limpar, preencher e copiar (quando as áreas se alinham, como no Excel); a caixa de nome aceita `A1:B2;D4`. A barra de status mostra soma, média, contagem, mínimo e máximo. Alt+= faz a AutoSoma, Ctrl+; e Ctrl+Shift+; escrevem a data e a hora, e inserir ou excluir células pode deslocar só as vizinhas.
 
-No tema escuro a planilha também escurece, só na tela: as cores gravadas no arquivo não mudam. A escolha fica em `preferencias.txt`, na pasta de configuração do usuário (`%APPDATA%\duck-office` ou `~/.config/duck-office`).
+No tema escuro a planilha também escurece, só na tela: as cores gravadas no arquivo não mudam.
+
+Configurações (no canto direito da faixa, em **Arquivo** ou com Ctrl+,): tema claro, escuro ou o do sistema; no escuro, células escuras ou como no arquivo; para onde vai o Enter; sugestões ao digitar fórmulas; lembrar os arquivos recentes; e macros, perguntar ou nunca executar. As mudanças já aparecem com a caixa aberta, e Cancelar desfaz. Fica tudo em `preferencias.txt`, na pasta de configuração do usuário (`%APPDATA%\duck-office` ou `~/.config/duck-office`).
+
+Uma fórmula que o Excel não leria (`=SOMA(`, uma aba ou tabela que não existe, argumentos a mais ou a menos) não entra na célula: uma caixa diz o que está errado e volta para o texto. Colada de outro programa, fica como texto.
+
+Recuperação: com alterações não salvas, o programa guarda de tempos em tempos (45 segundos depois da alteração, com o usuário parado) uma cópia da planilha na pasta do usuário (`%LOCALAPPDATA%\duck-office`, `~/.local/state/duck-office` ou `~/Library/Application Support/duck-office`), e mais uma se ele quebrar. Salvar, descartar ou fechar apaga a cópia; se sobrar uma, a próxima abertura oferece. As falhas do programa ficam em `erros.txt`, na mesma pasta: só neste computador, mas a mensagem pode ter um trecho de texto da planilha.
+
+Se outro programa mudar o arquivo aberto, salvar pergunta antes de passar por cima: dá para salvar uma cópia. No Windows, enquanto o arquivo está aberto aqui, os outros programas não escrevem dentro dele (o Excel o abre como somente leitura).
 
 O que se digita é lido como no Excel em português: `1.234,56`, `10%`, `R$ 10`, `22/11/2026`, `14:30`, `VERDADEIRO`, `=A1*2`. As fórmulas digitadas são calculadas na hora (e o que depende delas acompanha); uma função que o motor ainda não tem fica sem valor e o arquivo salvo pede ao Excel para recalcular ao abrir.
 
@@ -81,7 +89,7 @@ Pastas binárias (`.xlsb`): abrem com valores, fórmulas, formatos, nomes, tabel
 
 Validação de dados: a célula com lista mostra uma seta (clique ou Alt+↓; na lista, as setas e as letras escolhem), um valor que a regra não aceita é recusado ou pergunta, e a mensagem de entrada aparece ao selecionar; **Dados → Validação de dados** cria, edita e tira regras. Notas: a marca vermelha no canto mostra o texto ao passar o mouse; **Revisão → Nova nota** (Shift+F2) cria e edita, e as conversas do Excel 365 (marca roxa) aparecem só para leitura. Planilha protegida: só as células desbloqueadas e o que a proteção permite mudam; **Revisão** protege e desprotege a planilha e a estrutura da pasta, pedindo a senha que o arquivo guarda.
 
-Opções: `--sheet N` (aba inicial, 1 = primeira), `--cell B12`, `--zoom 80`, `--find texto`, `--novo` (planilha em branco), `--tema claro|escuro|sistema` (só nesta execução; em `--screenshot` e `--bench`, sem isto, vale o claro). Para testar a edição sem a janela: `--edit A1=valor` (também `copiar:A1:B2`, `colar:D5`, `inserir:A5:A6`, `formatar:negrito:A1:B2`, `mesclar-centralizar:A1:C1`, `ocultar-linhas:A3:A4`, `congelar:B2`, `largura=20:C1`..., e as da tabela abaixo), `--undo N`, `--save-to cópia.xlsx`; e, para screenshots, `--aba exibir`, `--menu bordas` (abre um menu) e `--digitar "=so"` (digita na célula ativa e deixa a edição aberta; `{baixo}`, `{shift-direita}`, `{tab}`, `{enter}`, `{esc}`, `{f2}`, `{f4}`... são teclas, `{clique:B2}`, `{shift-clique:B5}`, `{arrastar:B2:B10}`, `{coluna:B}`, `{linha:3}` e `{aba:Nome}` são cliques, e `{barra}` no começo edita na barra de fórmulas).
+Opções: `--sheet N` (aba inicial, 1 = primeira), `--cell B12`, `--zoom 80`, `--find texto`, `--novo` (planilha em branco), `--tema claro|escuro|sistema` (só nesta execução; em `--screenshot` e `--bench`, sem isto, vale o claro), `--planilha clara|escura` (as células no tema escuro). Para testar a edição sem a janela: `--edit A1=valor` (também `copiar:A1:B2`, `colar:D5`, `inserir:A5:A6`, `formatar:negrito:A1:B2`, `mesclar-centralizar:A1:C1`, `ocultar-linhas:A3:A4`, `congelar:B2`, `largura=20:C1`..., e as da tabela abaixo), `--undo N`, `--save-to cópia.xlsx`; e, para screenshots, `--aba exibir`, `--menu bordas` (abre um menu) e `--digitar "=so"` (digita na célula ativa e deixa a edição aberta; `{baixo}`, `{shift-direita}`, `{tab}`, `{enter}`, `{esc}`, `{f2}`, `{f4}`... são teclas, `{clique:B2}`, `{shift-clique:B5}`, `{arrastar:B2:B10}`, `{coluna:B}`, `{linha:3}` e `{aba:Nome}` são cliques, e `{barra}` no começo edita na barra de fórmulas).
 
 | `--edit` | O que faz |
 |---|---|
@@ -97,7 +105,9 @@ Opções: `--sheet N` (aba inicial, 1 = primeira), `--cell B12`, `--zoom 80`, `-
 
 `--menu` também abre `guia`, `guia-cor`, `guia-renomear`, `colar`, `preencher`, `caixa-colar`, `caixa-substituir`, `caixa-inserir`, `caixa-excluir` e `caixa-formatar-0` a `-4`.
 
-Também no `--edit`: `validar:B2:B9=lista|Sim;Não` (`inteiro|1|10`, `decimal`, `data`, `hora`, `texto`, `personalizada|=fórmula`, `nenhuma`), `lista:B2=1` (escolhe o item), `nota:B2=texto` (vazio tira), `nota-visivel:B2`, `proteger=senha`, `desproteger=senha`, `proteger-pasta=senha`, `desproteger-pasta=senha`, `formatar:bloquear:A1:B2`. No `--menu`: `lista`, `validacao`, `nota`, `nota-mouse`, `notas`, `proteger`, `proteger-pasta`; no `--aba`: `revisao`.
+Também no `--edit`: `validar:B2:B9=lista|Sim;Não` (`inteiro|1|10`, `decimal`, `data`, `hora`, `texto`, `personalizada|=fórmula`, `nenhuma`), `lista:B2=1` (escolhe o item), `nota:B2=texto` (vazio tira), `nota-visivel:B2`, `proteger=senha`, `desproteger=senha`, `proteger-pasta=senha`, `desproteger-pasta=senha`, `formatar:bloquear:A1:B2`. No `--menu`: `lista`, `validacao`, `nota`, `nota-mouse`, `notas`, `proteger`, `proteger-pasta`, `configuracoes`; no `--aba`: `revisao`.
+
+No Windows o programa não abre um terminal: com opções (`--version`, `--bench`...), ele escreve no terminal que o chamou. O PowerShell e o `cmd` não esperam ele terminar, a não ser com `| Out-Host` ou `start /wait`. `--edit quebrar` derruba o programa, para testar a recuperação; `DUCK_RECUPERACAO=pasta` troca a pasta das cópias.
 
 Medir (abre, rola a aba, mostra os tempos e sai) e screenshot (renderiza fora da tela depois de carregar tudo):
 
@@ -166,6 +176,12 @@ Conferir cada célula, fórmula e mesclagem contra o calamine (leitor independen
 
 ```
 cargo run --release -p duck-bench -- verify caminho/arquivo.xlsx
+```
+
+Conferir que as fórmulas do arquivo, digitadas de novo, seriam aceitas:
+
+```
+cargo run --release -p duck-bench -- conferir-formulas caminho/arquivo.xlsx
 ```
 
 Comparar a descompactação paralela com o zlib-rs na maior parte do zip:

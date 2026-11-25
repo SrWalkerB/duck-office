@@ -55,6 +55,7 @@ impl SheetsApp {
                 }
             }
             Act::Register => self.register_file_types(),
+            Act::Settings => self.ask_settings(),
             Act::About => {
                 let gpu = self
                     .gfx
@@ -190,6 +191,7 @@ impl SheetsApp {
                     Item::new("Salvar", Act::Save).key("Ctrl+S"),
                     Item::new("Salvar como…", Act::SaveAs).key("Ctrl+Shift+S"),
                     Item::sep(),
+                    Item::new("Configurações…", Act::Settings).key("Ctrl+,"),
                     Item::new("Adicionar ao \"Abrir com\" do sistema…", Act::Register),
                     Item::new("Sobre o duck-sheets", Act::About),
                     Item::sep(),
@@ -636,6 +638,9 @@ impl SheetsApp {
         if self.untitled_path.as_deref() == Some(path) {
             return format!("Planilha{}", self.new_count);
         }
+        if let Some(e) = self.recovery.adopted.as_ref().filter(|e| e.path() == path) {
+            return format!("{} (recuperada)", e.label());
+        }
         path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
     }
 
@@ -644,7 +649,11 @@ impl SheetsApp {
         if let Some(l) = self.loader.take() {
             l.cancel();
         }
+        if let Some(d) = &mut self.doc {
+            d.calc.stop_snapshot();
+        }
         self.doc = None;
+        self.recovery.forget();
         let dir = std::env::temp_dir().join("duck-sheets");
         for n in 1..=self.new_count {
             let _ = std::fs::remove_file(dir.join(format!("Planilha{n}-{}.xlsx", std::process::id())));
@@ -653,13 +662,21 @@ impl SheetsApp {
 
     /// Lembra o arquivo na lista de recentes (no topo).
     pub fn remember_recent(&mut self, path: &std::path::Path) {
-        if self.untitled_path.as_deref() == Some(path) {
+        // Execuções de teste não mexem na lista de quem as roda.
+        let temporary = self.untitled_path.as_deref() == Some(path) || self.recovery.is_adopted(path);
+        if !self.prefs.recent || self.unattended() || temporary {
             return;
         }
         let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         self.recent.retain(|x| *x != p);
         self.recent.insert(0, p);
         self.recent.truncate(MAX_RECENT);
+        save_recent(&self.recent);
+    }
+
+    /// Esvazia a lista de recentes.
+    pub fn forget_recent(&mut self) {
+        self.recent.clear();
         save_recent(&self.recent);
     }
 
@@ -674,7 +691,9 @@ impl SheetsApp {
             return;
         }
         let exe = std::env::current_exe().unwrap_or_default();
-        match duck_platform::register_file_types(&exe, "duck-sheets", &["xlsx", "xlsm", "xlsb", "csv"]) {
+        let icon = include_bytes!("../assets/icon-256.png");
+        match duck_platform::register_file_types(&exe, "duck-sheets", &["xlsx", "xlsm", "xlsb", "csv"], icon)
+        {
             Ok(()) => self.message = "duck-sheets adicionado ao \"Abrir com\"".into(),
             Err(e) => duck_platform::message_box("Não foi possível registrar", &e),
         }
@@ -736,6 +755,7 @@ impl SheetsApp {
             "congelar" => Drop::Freeze,
             "colar" => Drop::Paste,
             "preencher" => Drop::Fill,
+            "configuracoes" => return self.ask_settings(),
             "caixa-colar" => return self.ask_paste_special("a\tb".into()),
             "caixa-substituir" => return self.open_replace(),
             "caixa-inserir" => return self.ask_cells(true),
@@ -893,14 +913,9 @@ impl SheetsApp {
 
     /// Troca o tema e lembra a escolha para as próximas vezes.
     pub fn set_theme(&mut self, mode: Mode) {
-        self.mode = mode;
-        if let Some(w) = &self.window {
-            w.set_color_scheme(mode.frame());
-            if mode == Mode::System {
-                self.system = w.color_scheme().unwrap_or(self.system);
-            }
-        }
-        if let Some(Err(e)) = crate::theme::pref_file().map(|f| crate::theme::save(&f, mode)) {
+        self.use_prefs(crate::settings::Prefs { mode, ..self.prefs });
+        let saved = crate::settings::file().map(|f| crate::settings::write(&f, &[("tema", mode.name())]));
+        if let Some(Err(e)) = saved {
             self.message = format!("O tema mudou, mas não foi possível lembrar a escolha: {e}");
         }
     }
@@ -914,6 +929,9 @@ impl SheetsApp {
 
 /// Arquivo da lista de recentes.
 fn recent_file() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
     duck_platform::config_dir("duck-office").map(|d| d.join("recentes.txt"))
 }
 

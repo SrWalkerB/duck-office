@@ -145,13 +145,18 @@ impl crate::app::SheetsApp {
         if parts.is_empty() {
             return;
         }
-        let path = doc.path.clone();
+        let (path, source) = (doc.path.clone(), doc.source.clone());
         let Some(waker) = self.waker.clone() else { return };
         let (tx, rx) = channel();
         std::thread::Builder::new()
             .name("duck-imagens".into())
             .spawn(move || {
-                let Ok(book) = duck_xlsx::Book::open(&path) else { return };
+                let book = match &source {
+                    Some(s) => s.book(),
+                    None => duck_xlsx::Book::open(&path),
+                };
+                let Ok(book) = book else { return };
+                drop(source);
                 let out: Vec<Decoded> = parts
                     .into_iter()
                     .filter_map(|part| {
