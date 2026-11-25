@@ -84,7 +84,7 @@ Root: HKA; Subkey: "Software\Classes\{#Prog}\shell\open\command"; ValueType: str
 Root: HKA; Subkey: "Software\Classes\Applications\{#Exe}"; Flags: uninsdeletekey; Tasks: assoc
 Root: HKA; Subkey: "Software\Classes\Applications\{#Exe}\shell\open\command"; ValueType: string; ValueData: """{app}\{#Exe}"" ""%1"""; Tasks: assoc
 #define Ext(str E) \
-  "Root: HKA; Subkey: ""Software\Classes\." + E + "\OpenWithProgids""; ValueType: none; ValueName: """ + Prog + """; Flags: uninsdeletevalue; Tasks: assoc" + NewLine + \
+  "Root: HKA; Subkey: ""Software\Classes\." + E + "\OpenWithProgids""; ValueType: string; ValueName: """ + Prog + """; ValueData: """"; Flags: uninsdeletevalue; Tasks: assoc" + NewLine + \
   "Root: HKA; Subkey: ""Software\Classes\Applications\" + Exe + "\SupportedTypes""; ValueType: string; ValueName: ""." + E + """; ValueData: """"; Tasks: assoc" + NewLine + \
   "Root: HKA; Subkey: ""Software\" + Id + "\Capabilities\FileAssociations""; ValueType: string; ValueName: ""." + E + """; ValueData: """ + Prog + """; Tasks: assoc"
 #emit Ext("xlsx")

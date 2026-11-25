@@ -68,6 +68,8 @@ jobs:
             mkdir ensaio
             rsign generate -W -f -p ensaio/chave.pub -s ensaio/chave.key
             echo "chave=$(tail -1 ensaio/chave.pub)" >> "$GITHUB_OUTPUT"
+            # Para assinar dentro dos contêineres dos testes do Linux.
+            cp "$(command -v rsign)" ensaio/rsign
           fi
 
       - name: Testes
@@ -233,7 +235,7 @@ jobs:
 
   # Os textos são montados também no ensaio, para conferir.
   publicar:
-    name: ${{ github.ref_type == 'tag' && 'Publicar' || 'Montar a release (ensaio)' }}
+    name: Publicar
     needs: [preparar, pacote, testar-windows, testar-linux, testar-macos]
     runs-on: ubuntu-24.04
     permissions:

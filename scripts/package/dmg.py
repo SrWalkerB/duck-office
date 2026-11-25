@@ -9,7 +9,7 @@ format = "ULFO"
 filesystem = "HFS+"
 files = [app]
 symlinks = {"Aplicativos": "/Applications"}
-hide_extensions = [os.path.basename(app)]
+# Sem `hide_extensions`: o atributo do Finder no .app invalidaria a assinatura.
 icon = defines["icon"]
 # O dmgbuild junta o `dmg@2x.png` ao lado para as telas Retina.
 background = os.path.join(art, "dmg.png")

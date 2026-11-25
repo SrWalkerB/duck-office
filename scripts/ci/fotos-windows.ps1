@@ -17,6 +17,8 @@ Foto '1-boas-vindas'
 [Windows.Forms.SendKeys]::SendWait('{ENTER}')
 Foto '2-opcoes'
 [Windows.Forms.SendKeys]::SendWait('{ENTER}')
+Foto '3-tarefas'
+[Windows.Forms.SendKeys]::SendWait('{ENTER}')
 Foto '3-pronto'
 [Windows.Forms.SendKeys]::SendWait('{ENTER}')
 Start-Sleep 8

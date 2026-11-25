@@ -21,10 +21,12 @@ else
 fi
 confere "o pacote instalado abre" versao duck-sheets
 for f in applications/duck-sheets.desktop metainfo/duck-sheets.metainfo.xml \
-  icons/hicolor/256x256/apps/duck-sheets.png icons/hicolor/scalable/apps/duck-sheets.svg \
-  doc/duck-sheets/LICENCAS-DE-TERCEIROS.txt; do
+  icons/hicolor/256x256/apps/duck-sheets.png icons/hicolor/scalable/apps/duck-sheets.svg; do
   confere "/usr/share/$f" test -s "/usr/share/$f"
 done
+# As imagens de contêiner não gravam /usr/share/doc: confere o que o pacote leva.
+if command -v dpkg >/dev/null; then lista=$(dpkg -L duck-sheets); else lista=$(rpm -ql duck-sheets); fi
+confere "licenças no pacote" grep -q LICENCAS-DE-TERCEIROS.txt <<< "$lista"
 confere "nenhuma biblioteca faltando" bash -c '! ldd /usr/bin/duck-sheets | grep "not found"'
 
 mkdir -p /tmp/x && tar -C /tmp/x -xzf "$P.tar.gz"
@@ -37,9 +39,7 @@ confere "o AppImage abre" versao app
 
 # --- atualização de ponta a ponta (só no ensaio) -----------------------------
 if [[ -f ensaio/chave.key ]]; then
-  if ! command -v minisign >/dev/null; then
-    if command -v apt-get >/dev/null; then apt-get install -qy minisign >/dev/null; else dnf install -qy minisign; fi
-  fi
+  install -m 755 ensaio/rsign /tmp/rsign
   O=/tmp/origem
   mkdir -p $O
   nome=$(basename "$P.AppImage")
@@ -50,7 +50,7 @@ if [[ -f ensaio/chave.key ]]; then
   for c in beta estavel; do
     printf 'duck-sheets 1\nversao=99.0.0-beta.1\narquivo=linux-appimage|%s|%s|%s\n' \
       "$nome" "$(stat -c %s "$O/$nome")" "$soma" > $O/$c.txt
-    minisign -S -W -s ensaio/chave.key -x $O/$c.txt.minisig -m $O/$c.txt >/dev/null
+    /tmp/rsign sign -W -s ensaio/chave.key -x $O/$c.txt.minisig $O/$c.txt >/dev/null
   done
   export DUCK_ATUALIZACAO="file://$O" DUCK_RECUPERACAO=/tmp/estado
   cp $O/beta.txt /tmp/beta.txt

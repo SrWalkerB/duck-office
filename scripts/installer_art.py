@@ -81,7 +81,11 @@ def main():
     for w, h in [(164, 314), (246, 459), (328, 604), (410, 797)]:
         wizard(w * 2, h * 2, fonts).resize((w, h), Image.LANCZOS).save(OUT / f"lateral-{w}.png", optimize=True)
     for s in (55, 83, 110, 138):
-        draw_icon(s).save(OUT / f"topo-{s}.png", optimize=True)
+        # Com uma folga: o instalador encosta a imagem no canto da janela.
+        im = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+        n = round(s * 0.76)
+        im.paste(draw_icon(n), ((s - n) // 2, (s - n) // 2))
+        im.save(OUT / f"topo-{s}.png", optimize=True)
     for scale, name in ((1, "dmg.png"), (2, "dmg@2x.png")):
         im = dmg(scale * 2, fonts).resize((660 * scale, 420 * scale), Image.LANCZOS)
         im.save(OUT / name, optimize=True, dpi=(72 * scale, 72 * scale))
