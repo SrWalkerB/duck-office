@@ -1,6 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="8" fill="#2F6BFF"/>
-  <path d="M7 19c0-4.6 3.6-8.3 8.3-8.3 2.7 0 4.8 1.2 5.8 3.3l3.6.7c.8.1 1 1.1.3 1.5l-3.4 1.8c-.8 3.8-3.4 6.2-6.9 6.2C10.1 24.2 7 22.1 7 19z" fill="#fff"/>
-  <circle cx="17.6" cy="14.5" r="1.35" fill="#2F6BFF"/>
-  <path d="M21.6 15.5l3.5.6-3.4 1.8z" fill="#FFC21A"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs><linearGradient id="fundo" x2="0" y2="1"><stop stop-color="#15A86B"/><stop offset="1" stop-color="#0B6B4A"/></linearGradient></defs>
+  <rect width="512" height="512" rx="116" fill="url(#fundo)"/>
+  <rect x="112" y="104" width="92" height="92" rx="20" fill="#FFFFFF"/>
+  <rect x="112" y="210" width="92" height="92" rx="20" fill="#FFCB2E"/>
+  <rect x="112" y="316" width="92" height="92" rx="20" fill="#FFFFFF"/>
+  <path d="M218 124 Q218 104 238 104 H252 C342 104 400 168 400 256 C400 344 342 408 252 408 H238 Q218 408 218 388 V336 Q218 316 238 316 H246 C286 316 308 290 308 256 C308 222 286 196 246 196 H238 Q218 196 218 176 Z" fill="#FFFFFF"/>
 </svg>

@@ -56,6 +56,11 @@ impl SheetsApp {
             }
             Act::Register => self.register_file_types(),
             Act::Settings => self.ask_settings(),
+            Act::Update => {
+                if self.update_act() {
+                    cx.exit();
+                }
+            }
             Act::About => {
                 let gpu = self
                     .gfx
@@ -66,9 +71,9 @@ impl SheetsApp {
                     })
                     .unwrap_or_default();
                 duck_platform::info_box(
-                    "Sobre o duck-sheets",
+                    "Sobre o Duck Sheets",
                     &format!(
-                        "duck-sheets {}\nPlanilhas .xlsx, .xlsm, .xlsb e .csv, nativo e rápido.\n\nGráficos: {gpu}\nLicença MIT · duck-office",
+                        "Duck Sheets {}\nPlanilhas .xlsx, .xlsm, .xlsb e .csv, nativo e rápido.\n\nGráficos: {gpu}\nLicença MIT · duck-office",
                         env!("CARGO_PKG_VERSION")
                     ),
                 );
@@ -193,7 +198,8 @@ impl SheetsApp {
                     Item::sep(),
                     Item::new("Configurações…", Act::Settings).key("Ctrl+,"),
                     Item::new("Adicionar ao \"Abrir com\" do sistema…", Act::Register),
-                    Item::new("Sobre o duck-sheets", Act::About),
+                    Item::new(self.update_label(), Act::Update),
+                    Item::new("Sobre o Duck Sheets", Act::About),
                     Item::sep(),
                     Item::new("Sair", Act::Quit).key("Alt+F4"),
                 ]);
@@ -683,8 +689,8 @@ impl SheetsApp {
     fn register_file_types(&mut self) {
         let Some(w) = &self.window else { return };
         let ok = w.confirm(
-            "duck-sheets",
-            "Adicionar o duck-sheets ao \"Abrir com\" do sistema para arquivos .xlsx, .xlsm, .xlsb e .csv? \
+            "Duck Sheets",
+            "Adicionar o Duck Sheets ao \"Abrir com\" do sistema para arquivos .xlsx, .xlsm, .xlsb e .csv? \
              Isso registra este programa só para o seu usuário; o programa padrão continua o mesmo.",
         );
         if !ok {
@@ -692,9 +698,14 @@ impl SheetsApp {
         }
         let exe = std::env::current_exe().unwrap_or_default();
         let icon = include_bytes!("../assets/icon-256.png");
-        match duck_platform::register_file_types(&exe, "duck-sheets", &["xlsx", "xlsm", "xlsb", "csv"], icon)
-        {
-            Ok(()) => self.message = "duck-sheets adicionado ao \"Abrir com\"".into(),
+        match duck_platform::register_file_types(
+            &exe,
+            "duck-sheets",
+            "Duck Sheets",
+            &["xlsx", "xlsm", "xlsb", "csv"],
+            icon,
+        ) {
+            Ok(()) => self.message = "Duck Sheets adicionado ao \"Abrir com\"".into(),
             Err(e) => duck_platform::message_box("Não foi possível registrar", &e),
         }
     }
@@ -908,7 +919,7 @@ impl SheetsApp {
         if scripted {
             return true;
         }
-        self.window.as_ref().is_none_or(|w| w.confirm("duck-sheets", text))
+        self.window.as_ref().is_none_or(|w| w.confirm("Duck Sheets", text))
     }
 
     /// Troca o tema e lembra a escolha para as próximas vezes.

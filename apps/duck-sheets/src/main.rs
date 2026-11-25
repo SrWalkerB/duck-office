@@ -74,6 +74,7 @@ mod tabs;
 mod testing;
 mod theme;
 mod typed;
+mod update;
 mod valid;
 mod zoombar;
 
@@ -181,8 +182,9 @@ fn parse_args() -> Opts {
                     eprintln!("--planilha: use clara ou escura (veio \"{v}\")");
                 }
             }
+            "--atualizar" => std::process::exit(update::command()),
             "--version" | "--versao" => {
-                println!("duck-sheets {}", env!("CARGO_PKG_VERSION"));
+                println!("Duck Sheets {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             _ if !a.starts_with("--") && o.path.is_none() => o.path = Some(PathBuf::from(a)),
@@ -212,16 +214,16 @@ fn crashed(mut app: app::SheetsApp) -> ! {
     let kept =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.recovery_emergency())).unwrap_or(false);
     if !app.unattended() {
-        let mut text = String::from("O duck-sheets encontrou um erro e precisa fechar.");
+        let mut text = String::from("O Duck Sheets encontrou um erro e precisa fechar.");
         if kept {
             text.push_str(
-                " As alterações não salvas foram guardadas: abra o duck-sheets de novo para recuperá-las.",
+                " As alterações não salvas foram guardadas: abra o Duck Sheets de novo para recuperá-las.",
             );
         }
         if let Some(f) = recovery::log_file() {
             text.push_str(&format!("\n\nOs detalhes do erro estão em {}", f.display()));
         }
-        duck_platform::message_box("duck-sheets", &text);
+        duck_platform::message_box("Duck Sheets", &text);
     }
     // Sem destrutores: o estado pode estar pela metade.
     std::process::exit(101);
@@ -241,7 +243,7 @@ fn main() {
     let opts = parse_args();
     let mut app = app::SheetsApp::new(t0, opts);
     let config = duck_platform::WindowConfig {
-        title: "duck-sheets".into(),
+        title: "Duck Sheets".into(),
         width: 1440.0,
         height: 900.0,
         app_id: "duck-sheets".into(),
@@ -250,6 +252,9 @@ fn main() {
     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| duck_platform::run(config, &mut app)));
     let Ok(run) = run else { crashed(app) };
     app.cleanup();
+    if run.is_ok() && app.error().is_none() {
+        app.update_on_exit();
+    }
     if let Err(e) = run {
         eprintln!("erro: {e}");
         std::process::exit(1);

@@ -33,6 +33,8 @@ pub enum Act {
     Register,
     /// Configurações do app.
     Settings,
+    /// Procurar atualizações, ou reiniciar na versão nova.
+    Update,
     /// Versão, licença e o adaptador gráfico.
     About,
     Quit,

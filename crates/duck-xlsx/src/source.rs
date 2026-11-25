@@ -47,7 +47,7 @@ pub struct Source {
     stamp: Stamp,
 }
 
-const REWRITTEN: &str = "Outro programa regravou o arquivo enquanto ele estava aberto aqui, e o duck-sheets precisa do original para salvar. Copie o que mudou para outra planilha e abra o arquivo de novo.";
+const REWRITTEN: &str = "Outro programa regravou o arquivo enquanto ele estava aberto aqui, e o Duck Sheets precisa do original para salvar. Copie o que mudou para outra planilha e abra o arquivo de novo.";
 
 impl Source {
     pub fn open(path: &Path) -> io::Result<Self> {

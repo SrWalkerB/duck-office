@@ -53,7 +53,7 @@ impl SheetsApp {
         if !doc.macros_ok {
             if !self.ask(
                 "Este objeto executa uma macro gravada no arquivo. Ela só mexe nesta planilha \
-                 (o duck-sheets não dá às macros acesso a arquivos, à internet ou a outros programas). \
+                 (o Duck Sheets não dá às macros acesso a arquivos, à internet ou a outros programas). \
                  Executar as macros deste arquivo?",
             ) {
                 return;
@@ -104,7 +104,7 @@ impl SheetsApp {
         let kind = buttons & 7;
         if scripted {
             // Só os textos do próprio duck-sheets: o resto pode ter dados.
-            let own = text.find("O duck-sheets").map_or("", |i| &text[i..]);
+            let own = text.find("O Duck Sheets").map_or("", |i| &text[i..]);
             eprintln!("--macro: mensagem ({} caracteres) {own}", text.chars().count());
             return if kind >= 3 { 6 } else { 1 };
         }
@@ -463,7 +463,7 @@ impl Backend for Ctx<'_> {
     }
 
     fn delete_sheet(&mut self, _: usize) -> R<()> {
-        Err("O duck-sheets ainda não exclui abas por macro".into())
+        Err("O Duck Sheets ainda não exclui abas por macro".into())
     }
 
     fn tables(&self, s: usize) -> Vec<Table> {

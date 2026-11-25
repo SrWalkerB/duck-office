@@ -120,7 +120,7 @@ impl Entry {
 }
 
 /// Cria a pasta; onde há permissões, só o usuário entra.
-fn private_dir(dir: &Path) -> std::io::Result<()> {
+pub fn private_dir(dir: &Path) -> std::io::Result<()> {
     let mut b = std::fs::DirBuilder::new();
     b.recursive(true);
     #[cfg(unix)]
@@ -487,7 +487,7 @@ impl SheetsApp {
         let name = |e: &Entry| if e.label.is_empty() { "Planilha".to_string() } else { e.label.clone() };
         let fields = if found.len() == 1 {
             vec![Field::info(&format!(
-                "O duck-sheets fechou sem salvar \"{}\". Há uma cópia de {}, com as alterações até ali.",
+                "O Duck Sheets fechou sem salvar \"{}\". Há uma cópia de {}, com as alterações até ali.",
                 name(first),
                 first.when
             ))]
@@ -495,7 +495,7 @@ impl SheetsApp {
             let list: Vec<String> = found.iter().map(|e| format!("{} · {}", name(e), e.when)).collect();
             let list: Vec<&str> = list.iter().map(String::as_str).collect();
             vec![
-                Field::info("O duck-sheets fechou sem salvar estas planilhas. Escolha uma cópia:"),
+                Field::info("O Duck Sheets fechou sem salvar estas planilhas. Escolha uma cópia:"),
                 Field::choice("Cópia", &list, 0),
             ]
         };
@@ -560,7 +560,7 @@ pub fn install_log() {
         let thread = std::thread::current();
         let t = duck_platform::local_time();
         let text = format!(
-            "{:02}/{:02}/{} {:02}:{:02}:{:02} duck-sheets {} ({} {})\n{what}\nem {at}, thread {}\n{}\n\n",
+            "{:02}/{:02}/{} {:02}:{:02}:{:02} Duck Sheets {} ({} {})\n{what}\nem {at}, thread {}\n{}\n\n",
             t.day,
             t.month,
             t.year,

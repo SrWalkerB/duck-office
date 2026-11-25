@@ -5,8 +5,9 @@ bench.baseline.txt
 *.png
 !docs/**/*.png
 !site/img/*.png
-!apps/*/assets/*.png
+!apps/*/assets/**/*.png
 
 # Rascunhos visuais das sessões de brainstorming.
 .superpowers/
 /dist
+__pycache__/

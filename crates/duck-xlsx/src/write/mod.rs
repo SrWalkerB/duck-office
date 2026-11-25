@@ -157,7 +157,7 @@ pub struct SaveReport {
 
 /// O `.xlsb` só é salvo noutro formato.
 const XLSB_SAVE: &str =
-    "O duck-sheets não grava pastas binárias (.xlsb): salve como .xlsx (ou .xlsm, se tiver macros).";
+    "O Duck Sheets não grava pastas binárias (.xlsb): salve como .xlsx (ou .xlsm, se tiver macros).";
 
 /// Abas grandes usam o inflate paralelo para reler o original.
 const PARALLEL_INFLATE_MIN: usize = 8 * 1024 * 1024;

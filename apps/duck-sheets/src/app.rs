@@ -647,6 +647,8 @@ pub struct SheetsApp {
     pub system: ColorScheme,
     /// Cópias de recuperação.
     pub recovery: crate::recovery::Recovery,
+    /// Atualização automática.
+    pub updater: crate::update::Updater,
     /// O mouse estava sobre a lista de sugestões.
     complete_hover: bool,
 }
@@ -759,6 +761,7 @@ impl SheetsApp {
             prefs,
             system: ColorScheme::Light,
             recovery: crate::recovery::Recovery::new(copies),
+            updater: Default::default(),
             complete_hover: false,
         }
     }
@@ -835,7 +838,7 @@ impl SheetsApp {
         }
         let name = self.file_label(&path);
         if let Some(w) = &self.window {
-            w.set_title(&format!("{name} — duck-sheets"));
+            w.set_title(&format!("{name} — Duck Sheets"));
         }
         self.doc = None;
         self.find = None;
@@ -2685,6 +2688,7 @@ impl App for SheetsApp {
         if !self.unattended() {
             self.recovery_offer();
         }
+        self.update_start();
         let (w, h) = window.inner_size();
         let vsync = !self.opts.bench;
         match Gfx::new_with(self.gpu_early.take(), window.clone(), w, h, vsync, ATLAS) {
@@ -2734,7 +2738,11 @@ impl App for SheetsApp {
                     return;
                 }
                 self.recovery_poll();
-                let b = self.poll_search() | saved.is_some() | self.poll_calc() | self.poll_images();
+                let b = self.update_poll()
+                    | self.poll_search()
+                    | saved.is_some()
+                    | self.poll_calc()
+                    | self.poll_images();
                 if a && let Some(q) = self.opts.find.take() {
                     // `--find`: busca assim que a aba ativa chegar.
                     if self.doc.as_ref().is_some_and(|d| d.slot().data.is_some() && !d.slot().preview) {

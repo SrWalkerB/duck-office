@@ -590,7 +590,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "duck-bench"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "calamine",
  "duck-calc",
@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "duck-calc"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "duck-core",
  "libm",
@@ -622,11 +622,11 @@ dependencies = [
 
 [[package]]
 name = "duck-core"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 
 [[package]]
 name = "duck-dax"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "duck-calc",
  "duck-core",
@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "duck-deflate"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -644,11 +644,11 @@ dependencies = [
 
 [[package]]
 name = "duck-emf"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 
 [[package]]
 name = "duck-gfx"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "bytemuck",
  "log",
@@ -659,7 +659,7 @@ dependencies = [
 
 [[package]]
 name = "duck-par"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "memchr",
  "rayon",
@@ -668,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "duck-platform"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "arboard",
  "log",
@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "duck-sheets"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "duck-calc",
  "duck-core",
@@ -695,15 +695,17 @@ dependencies = [
  "libc",
  "libmimalloc-sys",
  "mimalloc",
+ "minisign-verify",
  "png",
  "rayon",
+ "sha2",
  "windows-sys 0.61.2",
  "zune-jpeg",
 ]
 
 [[package]]
 name = "duck-text"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "cosmic-text",
  "sys-locale",
@@ -711,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "duck-ui"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "duck-gfx",
  "duck-platform",
@@ -720,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "duck-vba"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "duck-calc",
  "duck-core",
@@ -728,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "duck-xlsx"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "calamine",
  "crc32fast",
@@ -1286,7 +1288,7 @@ dependencies = [
 
 [[package]]
 name = "million_rows"
-version = "1.0.0"
+version = "1.0.0-beta.1"
 dependencies = [
  "duck-gfx",
  "duck-platform",
@@ -1303,6 +1305,12 @@ checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
 dependencies = [
  "libmimalloc-sys",
 ]
+
+[[package]]
+name = "minisign-verify"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22f9645cb765ea72b8111f36c522475d2daa0d22c957a9826437e97534bc4e9e"
 
 [[package]]
 name = "miniz_oxide"

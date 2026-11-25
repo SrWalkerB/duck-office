@@ -622,7 +622,7 @@ impl SheetsApp {
     /// Cola texto de outro programa.
     fn paste_foreign(&mut self, text: &str, sel: CellRange, opts: PasteOpts) {
         if matches!(opts.what, What::Formats | What::Widths) {
-            self.message = "A cópia não veio do duck-sheets: não há formatos para colar".into();
+            self.message = "A cópia não veio do Duck Sheets: não há formatos para colar".into();
             return;
         }
         let tsv = parse_tsv(text);

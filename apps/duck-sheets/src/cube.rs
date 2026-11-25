@@ -91,7 +91,7 @@ impl SheetsApp {
                 .book()
                 .ok()
                 .and_then(|b| b.read_model())
-                .ok_or("O arquivo não tem um Modelo de Dados que o duck-sheets leia")?;
+                .ok_or("O arquivo não tem um Modelo de Dados que o Duck Sheets leia")?;
             doc.pivots.cube.def = Some(Arc::new(def));
         }
         let def = doc.pivots.cube.def.clone().expect("modelo");

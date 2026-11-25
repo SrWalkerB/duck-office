@@ -1,81 +1,85 @@
 #!/usr/bin/env bash
-# Empacota o duck-sheets já compilado em release (cargo build --release -p duck-sheets)
-# para o sistema atual, em dist/:
-#   Windows: duck-sheets-<versão>-windows-x64.zip   (duck-sheets.exe)
-#   Linux:   duck-sheets-<versão>-linux-x64.tar.gz  (binário, .desktop e ícone)
-#   macOS:   duck-sheets-<versão>-macos.zip         (duck-sheets.app, sem assinatura)
-# A versão é a da etiqueta (v1.0.0-rc1 → 1.0.0-rc1) ou a do Cargo.toml.
+# Empacota o duck-sheets já compilado em release para o sistema atual, em dist/:
+#   Windows: instalador (.exe) e versão portátil (.zip)
+#   Linux:   .AppImage, .deb, .rpm e .tar.gz
+#   macOS:   .dmg com o Duck Sheets.app (Apple Silicon e Intel; assinatura ad-hoc)
+#            e o .zip que o programa baixa para se atualizar
+#
+# Antes: cargo build --release --locked -p duck-sheets
+# (no macOS, para os dois alvos: aarch64-apple-darwin e x86_64-apple-darwin).
+# Precisa de: Python 3; Inno Setup 6.6+ (Windows); dmgbuild (macOS);
+# dpkg-deb, rpmbuild e strip (Linux).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
-if [[ "${GITHUB_REF_NAME:-}" == v* ]]; then
-  TAG="${GITHUB_REF_NAME#v}"
-  if [[ "${TAG%%-*}" != "$VERSION" ]]; then
-    echo "a etiqueta v$TAG não é da versão $VERSION do Cargo.toml" >&2
-    exit 1
-  fi
-  VERSION="$TAG"
+if [[ "${GITHUB_REF_TYPE:-}" == tag && "$GITHUB_REF_NAME" != "v$VERSION" ]]; then
+  echo "a etiqueta $GITHUB_REF_NAME não é da versão $VERSION do Cargo.toml" >&2
+  exit 1
 fi
-# No Info.plist só cabem números.
+# Só os números (1.0.0-beta.1 → 1.0.0), onde não cabe mais que isso.
 NUMBER="${VERSION%%-*}"
 ASSETS=apps/duck-sheets/assets
+LICENSES=LICENCAS-DE-TERCEIROS.txt
 OS=$(uname -s)
-ARCH=$(uname -m)
 T="${CARGO_TARGET_DIR:-target}"
+PY=$(command -v python3 || command -v python)
 rm -rf dist && mkdir -p dist/stage
+cp LICENSE dist/stage/
 
 case "$OS" in
   MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    NAME="duck-sheets-$VERSION-windows-x64"
+    EXE="$T/release/duck-sheets.exe"
     # O runtime do C vai dentro do .exe (.cargo/config.toml): sem isso ele não
     # abre num Windows sem o "Visual C++ Redistributable".
-    if grep -qai 'vcruntime140' "$T/release/duck-sheets.exe"; then
+    if grep -qai 'vcruntime140' "$EXE"; then
       echo "o .exe depende do VCRUNTIME140.dll: compile sem RUSTFLAGS" >&2
       exit 1
     fi
-    cp "$T/release/duck-sheets.exe" LICENSE dist/stage/
-    powershell -NoProfile -Command "Compress-Archive -Path dist/stage/* -DestinationPath dist/$NAME.zip -Force"
+    "$PY" scripts/licenses.py "dist/stage/$LICENSES" x86_64-pc-windows-msvc
+    cp "$EXE" dist/stage/
+    ZIP="duck-sheets-$VERSION-windows-x64-portatil.zip"
+    powershell -NoProfile -Command "Compress-Archive -Path dist/stage/* -DestinationPath 'dist/$ZIP' -Force"
+    cp "$ASSETS/icon.ico" dist/stage/
+    ISCC="${ISCC:-$(command -v iscc || echo '/c/Program Files (x86)/Inno Setup 6/ISCC.exe')}"
+    # Caminhos do Windows; o MSYS não mexe nas opções com barra.
+    MSYS_NO_PATHCONV=1 "$ISCC" /Qp "/DVersion=$VERSION" "/DNumber=$NUMBER" \
+      "/DStage=$(cygpath -wa dist/stage)" "/DArt=$(cygpath -wa $ASSETS/instalador)" \
+      "/DOut=$(cygpath -wa dist)" "$(cygpath -wa scripts/package/windows.iss)"
     ;;
   Linux)
-    NAME="duck-sheets-$VERSION-linux-$ARCH"
-    mkdir -p "dist/stage/$NAME"
-    cp "$T/release/duck-sheets" LICENSE "dist/stage/$NAME/"
-    cp "$ASSETS/icon-256.png" "dist/stage/$NAME/duck-sheets.png"
-    cat > "dist/stage/$NAME/duck-sheets.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=duck-sheets
-Comment=Planilhas .xlsx, .xlsm, .xlsb e .csv
-Exec=duck-sheets %f
-Icon=duck-sheets
-StartupWMClass=duck-sheets
-Terminal=false
-Categories=Office;Spreadsheet;
-MimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.ms-excel.sheet.macroEnabled.12;application/vnd.ms-excel.sheet.binary.macroEnabled.12;text/csv;
-EOF
-    tar -C dist/stage -czf "dist/$NAME.tar.gz" "$NAME"
+    "$PY" scripts/licenses.py "dist/stage/$LICENSES" x86_64-unknown-linux-gnu
+    cp "$T/release/duck-sheets" dist/stage/
+    bash scripts/package/linux.sh "$VERSION" "$NUMBER" dist/stage
     ;;
   Darwin)
-    NAME="duck-sheets-$VERSION-macos-$ARCH"
-    APP="dist/stage/duck-sheets.app"
+    NAME="duck-sheets-$VERSION-macos"
+    APP="dist/stage/Duck Sheets.app"
+    "$PY" scripts/licenses.py "dist/stage/$LICENSES" aarch64-apple-darwin x86_64-apple-darwin
     mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-    cp "$T/release/duck-sheets" "$APP/Contents/MacOS/"
+    lipo -create -output "$APP/Contents/MacOS/duck-sheets" \
+      "$T/aarch64-apple-darwin/release/duck-sheets" "$T/x86_64-apple-darwin/release/duck-sheets"
+    strip -x "$APP/Contents/MacOS/duck-sheets"
     cp "$ASSETS/icon.icns" "$APP/Contents/Resources/duck-sheets.icns"
+    cp LICENSE "dist/stage/$LICENSES" "$APP/Contents/Resources/"
     cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>duck-sheets</string>
-  <key>CFBundleDisplayName</key><string>duck-sheets</string>
+  <key>CFBundleName</key><string>Duck Sheets</string>
+  <key>CFBundleDisplayName</key><string>Duck Sheets</string>
   <key>CFBundleIdentifier</key><string>dev.duck-office.sheets</string>
   <key>CFBundleIconFile</key><string>duck-sheets</string>
   <key>CFBundleVersion</key><string>$NUMBER</string>
   <key>CFBundleShortVersionString</key><string>$NUMBER</string>
+  <key>CFBundleGetInfoString</key><string>Duck Sheets $VERSION</string>
   <key>CFBundleExecutable</key><string>duck-sheets</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleDevelopmentRegion</key><string>pt_BR</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
+  <key>NSHumanReadableCopyright</key><string>Licença MIT · duck-office</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>CFBundleDocumentTypes</key>
   <array>
@@ -90,11 +94,15 @@ EOF
 </dict>
 </plist>
 EOF
+    plutil -lint -s "$APP/Contents/Info.plist"
     # O binário sai do linker com assinatura ad-hoc só dele; o bundle precisa
-    # da sua, senão o macOS acusa "app danificado" ao abrir o .zip baixado.
+    # da sua, senão o macOS acusa "app danificado" ao abrir o que foi baixado.
     codesign --force -s - "$APP"
-    cp LICENSE "dist/stage/"
-    (cd dist/stage && zip -qry "../$NAME.zip" duck-sheets.app LICENSE)
+    codesign --verify --strict "$APP"
+    # O que o programa baixa para se atualizar.
+    ditto -c -k --keepParent "$APP" "dist/$NAME-atualizacao.zip"
+    "$PY" -m dmgbuild -s scripts/package/dmg.py -D app="$APP" -D art="$ASSETS/instalador" \
+      -D icon="$ASSETS/icon.icns" "Duck Sheets" "dist/$NAME.dmg"
     ;;
   *)
     echo "sistema não suportado: $OS" >&2

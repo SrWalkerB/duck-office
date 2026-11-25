@@ -21,7 +21,7 @@ impl VbErr {
     }
 
     pub fn unsupported(what: &str) -> Self {
-        Self::new(438, format!("O duck-sheets ainda não tem o recurso de macro: {what}"))
+        Self::new(438, format!("O Duck Sheets ainda não tem o recurso de macro: {what}"))
     }
 }
 
@@ -213,7 +213,7 @@ impl<'h, H: Host> Interp<'h, H> {
             Err(e) => {
                 return Err(VbErr::new(
                     1002,
-                    format!("A macro {} usa algo que o duck-sheets não entende: {e}", p.name),
+                    format!("A macro {} usa algo que o Duck Sheets não entende: {e}", p.name),
                 ));
             }
         };
@@ -1054,7 +1054,7 @@ impl<'h, H: Host> Interp<'h, H> {
                 } else {
                     return Err(VbErr::new(
                         429,
-                        format!("A macro usa outro programa ({t}), que o duck-sheets não abre"),
+                        format!("A macro usa outro programa ({t}), que o Duck Sheets não abre"),
                     ));
                 }
             }
@@ -1062,7 +1062,7 @@ impl<'h, H: Host> Interp<'h, H> {
                 let t = if n > 1 { s(1)? } else { s(0)? };
                 return Err(VbErr::new(
                     429,
-                    format!("A macro usa outro programa ({t}), que o duck-sheets não abre"),
+                    format!("A macro usa outro programa ({t}), que o Duck Sheets não abre"),
                 ));
             }
             _ => return Err(VbErr::unsupported(name)),

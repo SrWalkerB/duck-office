@@ -382,8 +382,15 @@ pub fn state_dir(app: &str) -> Option<PathBuf> {
 ///   de cada extensão e `Applications\<exe>`).
 /// - Linux: um `.desktop` em `~/.local/share/applications` com os tipos MIME.
 ///
+/// `name` identifica (registro, `.desktop`); `label` é o que se lê.
 /// `icon` (PNG de 256 × 256) é o do programa no Linux; no Windows é o do `.exe`.
-pub fn register_file_types(exe: &Path, name: &str, exts: &[&str], icon: &[u8]) -> Result<(), String> {
+pub fn register_file_types(
+    exe: &Path,
+    name: &str,
+    label: &str,
+    exts: &[&str],
+    icon: &[u8],
+) -> Result<(), String> {
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     let _ = icon;
     let exe = exe.to_string_lossy().into_owned();
@@ -394,7 +401,7 @@ pub fn register_file_types(exe: &Path, name: &str, exts: &[&str], icon: &[u8]) -
         let cmd = format!("\"{exe}\" \"%1\"");
         let classes = r"HKCU\Software\Classes";
         let mut calls: Vec<Vec<String>> = vec![
-            vec![format!(r"{classes}\{prog}"), "/ve".into(), "/d".into(), format!("Planilha ({name})")],
+            vec![format!(r"{classes}\{prog}"), "/ve".into(), "/d".into(), format!("Planilha ({label})")],
             vec![format!(r"{classes}\{prog}\DefaultIcon"), "/ve".into(), "/d".into(), format!("\"{exe}\",0")],
             vec![format!(r"{classes}\{prog}\shell\open\command"), "/ve".into(), "/d".into(), cmd.clone()],
             vec![
@@ -456,7 +463,7 @@ pub fn register_file_types(exe: &Path, name: &str, exts: &[&str], icon: &[u8]) -
         let dir = data.join("applications");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let desktop = format!(
-            "[Desktop Entry]\nType=Application\nName={name}\nExec=\"{exe}\" %f\nIcon={name}\nStartupWMClass={name}\nMimeType={};\nTerminal=false\nCategories=Office;Spreadsheet;\n",
+            "[Desktop Entry]\nType=Application\nName={label}\nExec=\"{exe}\" %f\nIcon={name}\nStartupWMClass={name}\nMimeType={};\nTerminal=false\nCategories=Office;Spreadsheet;\n",
             mime.join(";")
         );
         std::fs::write(dir.join(format!("{name}.desktop")), desktop).map_err(|e| e.to_string())?;
@@ -465,8 +472,8 @@ pub fn register_file_types(exe: &Path, name: &str, exts: &[&str], icon: &[u8]) -
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = (exe, name, exts);
-        Err("no macOS o duck-sheets.app do pacote já se registra para .xlsx, .xlsm, .xlsb e .csv".into())
+        let _ = (exe, name, label, exts);
+        Err("no macOS o aplicativo do pacote já se registra para .xlsx, .xlsm, .xlsb e .csv".into())
     }
 }
 

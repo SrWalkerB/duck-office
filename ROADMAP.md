@@ -189,7 +189,10 @@ O que entra na primeira versão: tudo das fases F0 a F5. O que fica para depois:
 - [ ] Ver na janela a cópia de recuperação sendo oferecida, e os ícones na barra de tarefas.
 - [ ] Teste manual de teclado e mouse na janela nos três sistemas.
 - [ ] Arquivos salvos abertos no Excel.
-- [ ] Licenças das dependências nos pacotes.
+- [x] **Nome e ícone**: Duck Sheets, um D com a haste feita de células.
+- [x] **Instaladores**: Windows (`.exe` e portátil), macOS (`.dmg` universal), Linux (`.AppImage`, `.deb`, `.rpm` e `.tar.gz`), com as licenças das bibliotecas.
+- [x] **Atualização automática**: manifesto assinado, baixada em segundo plano e instalada quando a última janela fecha; dá para desligar.
+- [ ] Assinatura paga do Windows e do macOS (hoje o sistema avisa que não conhece o programa).
 - [ ] Repositório público, página no ar e etiqueta `v1.0.0-rc1` de ensaio.
 - [ ] Publicar a etiqueta `v1.0.0`.
 

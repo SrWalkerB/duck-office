@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    # Estas têm o fluxo delas (release.yml) ou só o manifesto das atualizações.
+    branches-ignore: ["release/**", "atualizacoes"]
   pull_request:
 
 env:

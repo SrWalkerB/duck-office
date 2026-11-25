@@ -1,8 +1,8 @@
 # duck-office
 
-Suíte office nativa e focada em performance, para Windows, Linux e macOS. O primeiro app é o **duck-sheets** (planilhas compatíveis com `.xlsx`/`.xlsm`; abre também `.xlsb` e `.csv`), feito para abrir arquivos gigantes sem travar.
+Suíte office nativa e focada em performance, para Windows, Linux e macOS. O primeiro app é o **Duck Sheets** (planilhas compatíveis com `.xlsx`/`.xlsm`; abre também `.xlsb` e `.csv`), feito para abrir arquivos gigantes sem travar.
 
-Roadmap e status das fases: [ROADMAP.md](ROADMAP.md) · Decisões de arquitetura: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · Medições: [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
+Instalar: [docs/INSTALAR.md](docs/INSTALAR.md) · Novidades: [CHANGELOG.md](CHANGELOG.md) · Roadmap e status das fases: [ROADMAP.md](ROADMAP.md) · Decisões de arquitetura: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · Medições: [docs/BENCHMARKS.md](docs/BENCHMARKS.md)
 
 ## Estrutura
 
@@ -219,6 +219,22 @@ cargo run --release -p duck-bench -- gen sintetica.xlsx --rows 600000
 ```
 
 Sem caminho, o `duck-bench` usa `reference = "..."` de um `bench.local.toml` na raiz. Esse arquivo fica fora do git, porque a planilha de referência tem dados reais.
+
+## Publicar uma versão
+
+1. Suba a versão no `Cargo.toml` e descreva-a no `CHANGELOG.md`.
+2. Ensaie: um push numa branch `release/**` monta os instaladores, instala cada um numa máquina limpa e testa a atualização com uma chave de teste, sem publicar nada.
+3. Com o ensaio verde, crie a etiqueta `v` + a versão. O fluxo `release.yml` publica a release (pré-lançamento, se a versão tem sufixo) e põe o manifesto assinado na branch `atualizacoes`, onde os programas instalados o encontram.
+
+As atualizações são assinadas (minisign): a chave pública está em `apps/duck-sheets/assets/atualizacao.pub` e a secreta, no segredo `DUCK_UPDATE_SECRET_KEY` do repositório. Quem perde a secreta não consegue mais atualizar os programas já instalados. Para criar o par:
+
+```
+cargo install rsign2 --locked
+rsign generate -W -p apps/duck-sheets/assets/atualizacao.pub -s CAMINHO-FORA-DO-REPOSITORIO/duck-sheets.key
+gh secret set DUCK_UPDATE_SECRET_KEY < CAMINHO-FORA-DO-REPOSITORIO/duck-sheets.key
+```
+
+`--atualizar` procura, baixa e instala na hora. `DUCK_ATUALIZACAO=endereço` troca o lugar do manifesto e dos arquivos num ensaio (a assinatura continua valendo), e `DUCK_UPDATE_PUBKEY`, na compilação, troca a chave.
 
 ## Verificações
 

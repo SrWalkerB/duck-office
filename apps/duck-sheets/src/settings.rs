@@ -60,6 +60,8 @@ pub struct Prefs {
     pub recent: bool,
     /// Macros do arquivo: perguntar (`true`) ou nunca executar.
     pub macros: bool,
+    /// Baixar versões novas e instalar ao fechar.
+    pub update: bool,
 }
 
 impl Default for Prefs {
@@ -71,6 +73,7 @@ impl Default for Prefs {
             suggest: true,
             recent: true,
             macros: true,
+            update: true,
         }
     }
 }
@@ -80,7 +83,7 @@ fn yes(on: bool) -> &'static str {
 }
 
 impl Prefs {
-    fn pairs(&self) -> [(&'static str, &'static str); 6] {
+    fn pairs(&self) -> [(&'static str, &'static str); 7] {
         [
             ("tema", self.mode.name()),
             ("planilha-escura", yes(self.dark_sheet)),
@@ -88,6 +91,7 @@ impl Prefs {
             ("sugestoes", yes(self.suggest)),
             ("recentes", yes(self.recent)),
             ("macros", if self.macros { "perguntar" } else { "nunca" }),
+            ("atualizar", yes(self.update)),
         ]
     }
 
@@ -108,6 +112,7 @@ impl Prefs {
             "sugestoes" => put(&mut self.suggest),
             "recentes" => put(&mut self.recent),
             "macros" => put(&mut self.macros),
+            "atualizar" => put(&mut self.update),
             _ => {}
         }
     }
@@ -169,6 +174,7 @@ const ENTER: usize = 4;
 const SUGGEST: usize = 5;
 const RECENT: usize = 7;
 const MACROS: usize = 8;
+const UPDATE: usize = 10;
 
 const MODES: [Mode; 3] = [Mode::Light, Mode::Dark, Mode::System];
 
@@ -196,6 +202,8 @@ fn fields(p: &Prefs) -> Vec<Field> {
             &["Perguntar antes de executar", "Nunca executar"],
             usize::from(!p.macros),
         ),
+        Field::heading("Atualizações"),
+        Field::check("Baixar versões novas e instalar ao fechar", p.update),
     ];
     v[SHEET].show = p.mode != Mode::Light;
     v
@@ -210,6 +218,7 @@ fn read(d: &Dialog) -> Prefs {
         suggest: d.is_on(SUGGEST),
         recent: d.is_on(RECENT),
         macros: d.choice_of(MACROS) == 0,
+        update: d.is_on(UPDATE),
     }
 }
 
@@ -252,6 +261,7 @@ impl SheetsApp {
     pub fn use_prefs(&mut self, p: Prefs) {
         let mode = self.prefs.mode;
         self.prefs = p;
+        self.updater.enable(p.update);
         if p.mode != mode
             && let Some(w) = &self.window
         {
@@ -284,6 +294,7 @@ mod tests {
             suggest: false,
             recent: false,
             macros: false,
+            update: false,
         };
         all.save(&file, &d).unwrap();
         assert_eq!(Prefs::load(&file), all);

@@ -543,6 +543,14 @@ Cada cópia tem um arquivo travado enquanto o processo vive: na abertura, as que
 
 **Conferência de fórmulas** (`duck-calc/src/check.rs`): o compilador é tolerante (o que não entende vira `#NOME?`), e gravar o texto assim faz o Excel acusar o arquivo. A conferência é outra gramática, a do arquivo, mais larga que a do motor, e vale para o que se digita, cola, substitui ou escreve por macro. As fórmulas que já estão no arquivo não passam por ela.
 
+## ADR-018 · Atualização automática
+
+**Contexto.** Quem instala uma beta precisa receber as correções sem procurar por elas, e um canal que executa instaladores é o lugar mais sensível do programa.
+
+**Decisão.** Um manifesto de texto (versão, e nome, tamanho e SHA-256 de cada instalador), assinado com minisign, numa branch do repositório (`atualizacoes/beta.txt` e `estavel.txt`). A chave pública vai no programa; a secreta só existe no segredo do CI. A confiança está na assinatura, não no endereço: sem ela, ou com um arquivo que não confere, nada é guardado nem executado, e versões iguais ou menores são ignoradas.
+
+Quem baixa é o `curl` do sistema, para não carregar uma pilha de TLS. Aplicar é trocar a instalação inteira: o instalador silencioso no Windows, o `.app` por renomeação no macOS (com volta se falhar) e o arquivo no AppImage. Só quando a última janela fecha (uma trava compartilhada por janela), e nunca fechando outra à força. Pacotes do sistema, a versão portátil e instalações sem permissão de escrita só avisam; depois de duas tentativas sem sucesso, também.
+
 ## Roadmap
 
 | Fase | Entrega | Critério de pronto |

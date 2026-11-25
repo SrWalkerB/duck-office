@@ -1,6 +1,6 @@
 [package]
 name = "duck-sheets"
-description = "Visualizador de planilhas .xlsx/.xlsm nativo e rápido (F2)."
+description = "Editor de planilhas .xlsx, .xlsm, .xlsb e .csv nativo e rápido."
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -21,8 +21,10 @@ duck-vba = { path = "../../crates/duck-vba" }
 duck-xlsx = { path = "../../crates/duck-xlsx" }
 libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
 mimalloc = "0.1.52"
+minisign-verify = "0.2.5"
 png = "0.18.1"
 rayon = "1.12.0"
+sha2 = "0.11.1"
 zune-jpeg = "0.5.15"
 
 [target."cfg(windows)".dependencies]

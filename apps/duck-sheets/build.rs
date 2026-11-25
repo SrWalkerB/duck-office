@@ -103,12 +103,12 @@ fn version(v: &str) -> Vec<u8> {
         .collect();
     let strings: Vec<Vec<u8>> = [
         ("CompanyName", "duck-office"),
-        ("FileDescription", "duck-sheets"),
+        ("FileDescription", "Duck Sheets"),
         ("FileVersion", v),
         ("InternalName", "duck-sheets"),
         ("LegalCopyright", "Licença MIT"),
         ("OriginalFilename", "duck-sheets.exe"),
-        ("ProductName", "duck-sheets"),
+        ("ProductName", "Duck Sheets"),
         ("ProductVersion", v),
     ]
     .into_iter()

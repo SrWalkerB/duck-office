@@ -464,7 +464,7 @@ fn wrong(p: &Password, typed: &str) -> Option<&'static str> {
     match duck_xlsx::protect::check(p, typed) {
         Check::Ok => None,
         Check::Wrong => Some("Senha incorreta (maiúsculas e minúsculas contam)."),
-        Check::Unknown => Some("O arquivo guarda a senha num formato que o duck-sheets não sabe conferir."),
+        Check::Unknown => Some("O arquivo guarda a senha num formato que o Duck Sheets não sabe conferir."),
     }
 }
 

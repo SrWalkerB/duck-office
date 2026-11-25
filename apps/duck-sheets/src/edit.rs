@@ -494,7 +494,7 @@ impl SheetsApp {
         let (Some(w), Some(doc)) = (&self.window, &self.doc) else { return };
         let name = self.file_label(&doc.path);
         let dot = if doc.dirty { "• " } else { "" };
-        w.set_title(&format!("{dot}{name} — duck-sheets"));
+        w.set_title(&format!("{dot}{name} — Duck Sheets"));
     }
 
     /// As colunas que mudam junto com `col`: se ela está numa seleção de
@@ -1514,7 +1514,7 @@ impl SheetsApp {
         }
         let Some(w) = &self.window else { return true };
         let name = self.doc.as_ref().map(|d| self.file_label(&d.path)).unwrap_or_default();
-        match w.ask_save("duck-sheets", &format!("Salvar as alterações em {name}?")) {
+        match w.ask_save("Duck Sheets", &format!("Salvar as alterações em {name}?")) {
             SaveChoice::Discard => true,
             SaveChoice::Cancel => false,
             SaveChoice::Save => {
@@ -1672,7 +1672,7 @@ fn binary_exts(macros: bool) -> Vec<&'static str> {
 /// Pergunta antes de salvar um `.xlsb` noutro formato.
 fn binary_question(left_out: &str) -> String {
     let mut s = String::from(
-        "O duck-sheets não grava pastas binárias (.xlsb). As alterações vão para um arquivo novo, \
+        "O Duck Sheets não grava pastas binárias (.xlsb). As alterações vão para um arquivo novo, \
          .xlsx ou .xlsm, e o .xlsb fica como está.",
     );
     if !left_out.is_empty() {

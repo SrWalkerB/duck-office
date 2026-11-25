@@ -1,47 +1,313 @@
 name: Release
 
-# Uma etiqueta `v*` (ex.: v1.0.0) compila o duck-sheets nos três sistemas,
-# empacota (scripts/package.sh) e publica os arquivos numa release do GitHub.
-# Com um sufixo (ex.: v1.0.0-rc1), como pré-lançamento.
+# Uma etiqueta `v*` (ex.: v1.0.0) compila o Duck Sheets nos três sistemas, monta
+# os instaladores (scripts/package.sh), instala cada um numa máquina limpa e
+# publica a release e o manifesto assinado que faz os programas se atualizarem.
+# Com um sufixo (ex.: v1.0.0-beta.1), como pré-lançamento.
+#
+# Um push numa branch `release/**` é um ensaio: faz tudo, com uma chave de teste
+# e incluindo a atualização de ponta a ponta, e não publica nada.
 on:
   push:
     tags: ["v*"]
+    branches: ["release/**"]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
 
 env:
   CARGO_TERM_COLOR: always
+  RSIGN: 0.6.7
 
 jobs:
-  package:
-    name: ${{ matrix.os }}
+  preparar:
+    name: Conferir
+    runs-on: ubuntu-22.04
+    outputs:
+      versao: ${{ steps.v.outputs.versao }}
+      chave: ${{ steps.chave.outputs.chave }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Versão
+        id: v
+        run: |
+          versao=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$versao" ]]; then
+            echo "::error::a etiqueta $GITHUB_REF_NAME não é da versão $versao do Cargo.toml"
+            exit 1
+          fi
+          grep -q "^## $versao\b" CHANGELOG.md || { echo "::error::falta $versao no CHANGELOG.md"; exit 1; }
+          echo "versao=$versao" >> "$GITHUB_OUTPUT"
+
+      # Na etiqueta, a chave pública que vai no programa tem de ser a do par do
+      # segredo que assina. No ensaio, um par de teste que não vale nada.
+      - name: Chave das atualizações
+        id: chave
+        env:
+          SEGREDO: ${{ secrets.DUCK_UPDATE_SECRET_KEY }}
+        run: |
+          cargo install rsign2 --locked --version "$RSIGN" --quiet
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            [[ -n "$SEGREDO" ]] || { echo "::error::falta o segredo DUCK_UPDATE_SECRET_KEY"; exit 1; }
+            umask 077
+            printf '%s\n' "$SEGREDO" > "$RUNNER_TEMP/chave"
+            echo ensaio > "$RUNNER_TEMP/x"
+            rsign sign -W -s "$RUNNER_TEMP/chave" -x "$RUNNER_TEMP/x.minisig" "$RUNNER_TEMP/x"
+            rm "$RUNNER_TEMP/chave"
+            rsign verify -p apps/duck-sheets/assets/atualizacao.pub -x "$RUNNER_TEMP/x.minisig" "$RUNNER_TEMP/x"
+          else
+            mkdir ensaio
+            rsign generate -W -f -p ensaio/chave.pub -s ensaio/chave.key
+            echo "chave=$(tail -1 ensaio/chave.pub)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Testes
+        env:
+          RUSTFLAGS: -D warnings
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --locked
+          cargo test --workspace --locked
+          scripts/check-platform-deps.sh
+
+      - uses: actions/upload-artifact@v7
+        if: github.ref_type == 'branch'
+        with:
+          name: chave-de-ensaio
+          path: ensaio
+          retention-days: 3
+
+  pacote:
+    name: Pacote (${{ matrix.nome }})
+    needs: preparar
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          - { nome: windows, os: windows-2025 }
+          # A distribuição mais antiga disponível: o programa roda em glibc 2.35+.
+          - { nome: linux, os: ubuntu-22.04 }
+          - { nome: macos, os: macos-15 }
     runs-on: ${{ matrix.os }}
+    env:
+      DUCK_UPDATE_PUBKEY: ${{ needs.preparar.outputs.chave }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.nome == 'macos' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build
-        run: cargo build --release -p duck-sheets
-
-      - name: Conferência rápida
+      - name: Compilar
         shell: bash
         run: |
-          cargo build --release -p duck-bench
-          ./target/release/duck-bench gen-showcase target/vitrine.xlsx
-          ./target/release/duck-bench roundtrip target/vitrine.xlsx --edit 50
+          # Na etiqueta não há chave de ensaio: vale a do repositório.
+          [[ -n "$DUCK_UPDATE_PUBKEY" ]] || unset DUCK_UPDATE_PUBKEY
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            cargo build --release --locked -p duck-sheets --target aarch64-apple-darwin --target x86_64-apple-darwin
+          else
+            cargo build --release --locked -p duck-sheets
+          fi
 
-      - name: Pacote
+      - name: Ferramentas (Linux)
+        if: matrix.nome == 'linux'
+        run: sudo apt-get update -q && sudo apt-get install -qy rpm binutils
+
+      - name: Ferramentas (macOS)
+        if: matrix.nome == 'macos'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q dmgbuild==1.6.7
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Empacotar
         shell: bash
         run: scripts/package.sh
 
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v7
         with:
-          files: dist/*
-          generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          name: pacote-${{ matrix.nome }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  testar-windows:
+    name: Instalar (Windows)
+    needs: [preparar, pacote]
+    runs-on: windows-2025
+    env:
+      VERSAO: ${{ needs.preparar.outputs.versao }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: pacote-windows
+          path: pacote
+      - uses: actions/download-artifact@v8
+        if: github.ref_type == 'branch'
+        with:
+          name: chave-de-ensaio
+          path: ensaio
+
+      - name: Fotografar o instalador
+        if: github.ref_type == 'branch'
+        continue-on-error: true
+        timeout-minutes: 3
+        run: scripts/ci/fotos-windows.ps1 -Instalador (Resolve-Path pacote\*-instalador.exe) -Saida fotos
+
+      - name: Instalar, abrir e desinstalar
+        run: scripts/ci/testar-windows.ps1 -Versao $env:VERSAO -Pacotes pacote -Ensaio ensaio
+
+      - uses: actions/upload-artifact@v7
+        if: always() && github.ref_type == 'branch'
+        with:
+          name: fotos-windows
+          path: fotos
+          if-no-files-found: ignore
+          retention-days: 7
+
+  testar-linux:
+    name: Instalar (${{ matrix.imagem }})
+    needs: [preparar, pacote]
+    strategy:
+      fail-fast: false
+      matrix:
+        imagem: ["ubuntu:22.04", "ubuntu:24.04", "debian:12", "fedora:latest"]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: pacote-linux
+          path: pacote
+      - uses: actions/download-artifact@v8
+        if: github.ref_type == 'branch'
+        with:
+          name: chave-de-ensaio
+          path: ensaio
+      - name: Instalar e abrir
+        run: |
+          docker run --rm -v "$PWD:/t" -w /t -e VERSAO="${{ needs.preparar.outputs.versao }}" \
+            "${{ matrix.imagem }}" bash scripts/ci/testar-linux.sh
+
+  testar-macos:
+    name: Instalar (${{ matrix.os }})
+    needs: [preparar, pacote]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: pacote-macos
+          path: pacote
+      - uses: actions/download-artifact@v8
+        if: github.ref_type == 'branch'
+        with:
+          name: chave-de-ensaio
+          path: ensaio
+      - name: Instalar e abrir
+        env:
+          VERSAO: ${{ needs.preparar.outputs.versao }}
+        run: bash scripts/ci/testar-macos.sh
+      - uses: actions/upload-artifact@v7
+        if: always() && github.ref_type == 'branch'
+        with:
+          name: fotos-${{ matrix.os }}
+          path: fotos
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Os textos são montados também no ensaio, para conferir.
+  publicar:
+    name: ${{ github.ref_type == 'tag' && 'Publicar' || 'Montar a release (ensaio)' }}
+    needs: [preparar, pacote, testar-windows, testar-linux, testar-macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSAO: ${{ needs.preparar.outputs.versao }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pacote-*
+          path: pacotes
+          merge-multiple: true
+
+      - name: Notas, manifesto e somas
+        run: |
+          mkdir saida
+          python3 scripts/release.py notas pacotes "$VERSAO" "$GITHUB_REPOSITORY" saida/notas.md
+          python3 scripts/release.py manifesto pacotes "$VERSAO" saida/manifesto.txt
+          python3 scripts/release.py somas pacotes pacotes/SHA256SUMS.txt
+          cat saida/notas.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: github.ref_type == 'branch'
+        with:
+          name: textos-da-release
+          path: saida
+          retention-days: 7
+
+      - name: Assinar o manifesto
+        if: github.ref_type == 'tag'
+        env:
+          SEGREDO: ${{ secrets.DUCK_UPDATE_SECRET_KEY }}
+        run: |
+          cargo install rsign2 --locked --version "$RSIGN" --quiet
+          umask 077
+          printf '%s\n' "$SEGREDO" > "$RUNNER_TEMP/chave"
+          rsign sign -W -s "$RUNNER_TEMP/chave" -x saida/manifesto.txt.minisig -t "duck-sheets $VERSAO" saida/manifesto.txt
+          rm "$RUNNER_TEMP/chave"
+          rsign verify -p apps/duck-sheets/assets/atualizacao.pub -x saida/manifesto.txt.minisig saida/manifesto.txt
+
+      - name: Criar a release
+        if: github.ref_type == 'tag'
+        run: |
+          nome="Duck Sheets $VERSAO"
+          previa=()
+          if [[ "$VERSAO" == *-* ]]; then
+            previa=(--prerelease --latest=false)
+            nome="Duck Sheets ${VERSAO/-beta./ beta }"
+          fi
+          gh release create "$GITHUB_REF_NAME" pacotes/* --verify-tag --title "$nome" \
+            --notes-file saida/notas.md "${previa[@]}"
+
+      # Por último: só depois de a release existir os programas a procuram.
+      - name: Avisar os programas
+        if: github.ref_type == 'tag'
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git ls-remote --exit-code origin atualizacoes >/dev/null; then
+            git fetch -q --depth 1 origin atualizacoes
+            git worktree add -q ../atualizacoes FETCH_HEAD
+            git -C ../atualizacoes switch -q -c atualizacoes
+          else
+            git worktree add -q --orphan -b atualizacoes ../atualizacoes
+          fi
+          canais=(beta)
+          [[ "$VERSAO" == *-* ]] || canais+=(estavel)
+          for c in "${canais[@]}"; do
+            cp saida/manifesto.txt "../atualizacoes/$c.txt"
+            cp saida/manifesto.txt.minisig "../atualizacoes/$c.txt.minisig"
+          done
+          cd ../atualizacoes
+          git add -A
+          git commit -q -m "Duck Sheets $VERSAO"
+          git push -q origin atualizacoes

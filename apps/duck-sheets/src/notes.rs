@@ -16,7 +16,7 @@ fn author() -> String {
         .or_else(|_| std::env::var("USER"))
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "duck-sheets".into())
+        .unwrap_or_else(|| "Duck Sheets".into())
 }
 
 /// As marcas das notas nas células de um painel.

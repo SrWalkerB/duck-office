@@ -8,6 +8,6 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-duck-calc = { path = "../duck-calc", version = "1.0.0" }
-duck-core = { path = "../duck-core", version = "1.0.0" }
+duck-calc = { path = "../duck-calc" }
+duck-core = { path = "../duck-core" }
 rayon = "1.12.0"

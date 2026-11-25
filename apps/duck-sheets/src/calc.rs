@@ -546,9 +546,9 @@ fn uncalculated_message(list: &[Uncalculated]) -> Option<String> {
     let mut m = match &u.function {
         Some(f) if u.unknown => format!("A função {f} não existe: {cell} mostra {error}"),
         Some(f) if u.error == duck_core::CellError::Name => {
-            format!("O duck-sheets ainda não calcula a função {f}: {cell} mostra {error}")
+            format!("O Duck Sheets ainda não calcula a função {f}: {cell} mostra {error}")
         }
-        Some(f) => format!("O duck-sheets ainda não calcula {f} com esses argumentos: {cell} mostra {error}"),
+        Some(f) => format!("O Duck Sheets ainda não calcula {f} com esses argumentos: {cell} mostra {error}"),
         None => format!("A fórmula usa outro arquivo que não está disponível: {cell} mostra {error}"),
     };
     if list.len() > 1 {
