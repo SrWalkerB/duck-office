@@ -1,5 +1,12 @@
 # Novidades
 
+## 1.0.0-beta.2
+
+### Correções
+
+- **Filtro**: linhas digitadas logo embaixo de uma lista filtrada agora aparecem no painel do filtro e entram no filtro, como no Excel.
+- **Edição na célula**: enquanto você digita, o texto já aparece com o alinhamento (centro ou direita), a cor de fundo, a cor do texto e a fonte da célula.
+
 ## 1.0.0-beta.1
 
 A primeira versão do **Duck Sheets** para baixar: planilhas `.xlsx`, `.xlsm`, `.xlsb` e `.csv`, nativo no Windows, no Linux e no macOS.

@@ -590,7 +590,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "duck-bench"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "calamine",
  "duck-calc",
@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "duck-calc"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "duck-core",
  "libm",
@@ -622,11 +622,11 @@ dependencies = [
 
 [[package]]
 name = "duck-core"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 
 [[package]]
 name = "duck-dax"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "duck-calc",
  "duck-core",
@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "duck-deflate"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -644,11 +644,11 @@ dependencies = [
 
 [[package]]
 name = "duck-emf"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 
 [[package]]
 name = "duck-gfx"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "bytemuck",
  "log",
@@ -659,7 +659,7 @@ dependencies = [
 
 [[package]]
 name = "duck-par"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "memchr",
  "rayon",
@@ -668,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "duck-platform"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "arboard",
  "log",
@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "duck-sheets"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "duck-calc",
  "duck-core",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "duck-text"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "cosmic-text",
  "sys-locale",
@@ -713,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "duck-ui"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "duck-gfx",
  "duck-platform",
@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "duck-vba"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "duck-calc",
  "duck-core",
@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "duck-xlsx"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "calamine",
  "crc32fast",
@@ -1288,7 +1288,7 @@ dependencies = [
 
 [[package]]
 name = "million_rows"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 dependencies = [
  "duck-gfx",
  "duck-platform",
