@@ -1,0 +1,86 @@
+name: Site
+
+# Publica a pasta site/ no GitHub Pages quando ela muda no main e depois de cada
+# release (para os botões de baixar apontarem para a versão nova).
+#
+# Só publica com o Pages ligado: Settings › Pages › Source: GitHub Actions. Com
+# ele desligado, confere a página e para.
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", "scripts/site.py", "apps/duck-sheets/assets/icon.svg", ".github/workflows/site.yml"]
+  pull_request:
+    paths: ["site/**", "scripts/site.py", "apps/duck-sheets/assets/icon.svg", ".github/workflows/site.yml"]
+  # A release é criada com o GITHUB_TOKEN, que não dispara `on: release`.
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site-${{ github.event_name == 'pull_request' && github.ref || 'publicar' }}
+  cancel-in-progress: false
+
+jobs:
+  montar:
+    name: Montar e conferir
+    # Depois do fluxo Release, só se foi uma etiqueta (o ensaio é numa branch).
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: read
+    outputs:
+      publicar: ${{ steps.pages.outputs.publicar }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Página na versão mais nova
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=30" > releases.json
+          cp -r site _site
+          python3 scripts/site.py releases.json _site/index.html
+
+      - name: O Pages está ligado?
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          publicar=false
+          if [[ "$GITHUB_REF" == refs/heads/main && "$GITHUB_EVENT_NAME" != pull_request ]]; then
+            fonte=$(gh api "repos/$GITHUB_REPOSITORY/pages" --jq .build_type 2>/dev/null) || fonte=
+            if [[ "$fonte" == workflow ]]; then
+              publicar=true
+            else
+              echo "::notice::página conferida, mas não publicada: ligue em Settings › Pages › Source: GitHub Actions"
+            fi
+          fi
+          echo "publicar=$publicar" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-pages-artifact@v5
+        if: steps.pages.outputs.publicar == 'true'
+        with:
+          path: _site
+
+  publicar:
+    name: Publicar
+    needs: montar
+    if: needs.montar.outputs.publicar == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5
