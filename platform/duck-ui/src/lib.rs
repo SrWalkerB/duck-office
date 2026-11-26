@@ -355,6 +355,9 @@ pub struct TextInput {
     pub text: String,
     /// Aceita quebras de linha (quem insere é o app: Enter confirma).
     pub multiline: bool,
+    /// Onde fica o texto quando sobra espaço: 0 = esquerda, 0,5 = centro,
+    /// 1 = direita (cada linha, nas várias linhas).
+    pub align: f32,
     /// Posição do cursor (byte, sempre numa fronteira de caractere).
     cursor: usize,
     /// Outra ponta da seleção, se houver.
@@ -617,7 +620,26 @@ impl TextInput {
         let first = self.first_line(lines, r, lh);
         let k = first + ((y - r.y0 - 1.0) / lh).floor().max(0.0) as usize;
         let &(a, b) = lines.get(k).unwrap_or(lines.last().unwrap_or(&(0, 0)));
-        a + at_x(&self.text[a..b], x - r.x0 - pad, text, style)
+        let dx = self.offset(&self.text[a..b], r, pad, text, style);
+        a + at_x(&self.text[a..b], x - r.x0 - pad - dx, text, style)
+    }
+
+    /// Posição (byte) sob `x`, com o texto numa linha só desenhado em `r` por
+    /// [`TextInput::draw_spans`] (rolado até o cursor).
+    pub fn hit_line(&self, r: Rect, pad: f32, x: f32, text: &mut TextSystem, style: TextStyle) -> usize {
+        let caret = text.measure_styled(&self.text[..self.cursor], style);
+        let shift = (caret - (r.w() - 2.0 * pad)).max(0.0);
+        let dx = self.offset(&self.text, r, pad, text, style);
+        at_x(&self.text, x - r.x0 - pad + shift - dx, text, style)
+    }
+
+    /// Deslocamento de `line` pelo [`TextInput::align`] (0 se não sobra espaço).
+    fn offset(&self, line: &str, r: Rect, pad: f32, text: &mut TextSystem, style: TextStyle) -> f32 {
+        if self.align <= 0.0 {
+            return 0.0;
+        }
+        let free = r.w() - 2.0 * pad - text.measure_styled(line, style) - 1.0;
+        (free * self.align).max(0.0).floor()
     }
 
     /// Primeira linha à vista: a do cursor precisa caber.
@@ -644,12 +666,12 @@ impl TextInput {
         let lh = p.text.line_height_of(style);
         let inner = r.inset(1.0);
         let first = self.first_line(lines, r, lh);
-        let x = r.x0 + pad;
         for (k, &(a, b)) in lines.iter().enumerate().skip(first) {
             let y = (r.y0 + 1.0 + (k - first) as f32 * lh).floor();
             if y >= r.y1 {
                 break;
             }
+            let x = r.x0 + pad + self.offset(&self.text[a..b], r, pad, p.text, style);
             if let Some((sa, sb)) = self.selection().filter(|_| focused) {
                 let (sa, sb) = (sa.clamp(a, b), sb.clamp(a, b));
                 // Linha vazia ou quebra selecionada: um pedacinho.
@@ -720,7 +742,7 @@ impl TextInput {
         // Rola para o cursor ficar visível.
         let caret_x = p.text.measure_styled(&self.text[..self.cursor], style);
         let shift = (caret_x - (r.w() - 2.0 * pad)).max(0.0);
-        let x = x - shift;
+        let x = x - shift + self.offset(&self.text, r, pad, p.text, style);
         if let Some((a, b)) = self.selection().filter(|_| focused) {
             let xa = x + p.text.measure_styled(&self.text[..a], style);
             let xb = x + p.text.measure_styled(&self.text[..b], style);

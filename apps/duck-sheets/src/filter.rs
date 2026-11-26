@@ -52,7 +52,9 @@ impl Active {
 pub fn filters(sheet: &Sheet) -> Vec<Active> {
     let mut v = Vec::new();
     if let Some(af) = &sheet.layout.autofilter {
-        v.push(Active { target: Target::Sheet, filter: af.clone() });
+        let mut af = af.clone();
+        af.range.last_row = grow_down(sheet, &af.range);
+        v.push(Active { target: Target::Sheet, filter: af });
     }
     for (i, t) in sheet.layout.tables.iter().enumerate() {
         if let Some(f) = &t.filter
@@ -62,6 +64,18 @@ pub fn filters(sheet: &Sheet) -> Vec<Active> {
         }
     }
     v
+}
+
+/// Última linha do filtro da aba contando as linhas escritas logo embaixo
+/// dele: como no Excel, quem continua a lista entra no filtro (o intervalo
+/// guardado acompanha no próximo filtrar ou classificar).
+fn grow_down(sheet: &Sheet, r: &CellRange) -> u32 {
+    let max = sheet.rows().saturating_sub(1);
+    let mut last = r.last_row;
+    while last < max && (r.first_col..=r.last_col).any(|c| sheet.has_value(last + 1, c)) {
+        last += 1;
+    }
+    last
 }
 
 /// Texto mostrado na célula (é o que o filtro do Excel compara).
@@ -912,5 +926,27 @@ mod tests {
         a.toggle_filter();
         a.toggle_filter();
         assert!(a.doc.as_ref().unwrap().current().unwrap().0.layout.autofilter.is_none());
+    }
+
+    /// Linha escrita logo embaixo do filtro: entra na lista e no filtro.
+    #[test]
+    fn rows_typed_below_join_the_filter() {
+        let mut a = sales();
+        a.go_to(4, 1);
+        a.toggle_filter();
+        crate::testing::type_in(&mut a, "A7", "Convenção");
+        crate::testing::type_in(&mut a, "B7", "w");
+        let (s, _) = a.doc.as_ref().unwrap().current().unwrap();
+        let f = super::filters(s).remove(0);
+        assert_eq!(f.data_rows(), (3, 6));
+        let b = duck_ui::Rect::new(0.0, 0.0, 10.0, 10.0);
+        a.open_filter_panel(f, 0, b);
+        let p = a.filter_panel.as_ref().unwrap();
+        let names: Vec<&str> = p.items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(names, ["Convenção", "Norte", "Sul"]);
+        // Filtrar grava o intervalo maior; a linha de baixo não entra.
+        a.apply_filter_panel();
+        let (s, _) = a.doc.as_ref().unwrap().current().unwrap();
+        assert_eq!(s.layout.autofilter.as_ref().unwrap().range.last_row, 6);
     }
 }

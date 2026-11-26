@@ -486,21 +486,21 @@ impl SheetsApp {
                     && let Some((r, style, pad)) = crate::complete::cell_editor(ed, &geom, view, p.text, ui)
                 {
                     let mark = sheet_th.selection;
-                    let colors = InputColors { focus: mark, border: mark, ..sheet_th.input };
+                    // Fundo, cor do texto e alinhamento da célula.
+                    let mut colors = InputColors { focus: mark, border: mark, ..sheet_th.input };
+                    if let Some(f) = ed.look.fill {
+                        colors.background = sheet_th.fill(f);
+                    }
+                    if let Some(c) = ed.look.color {
+                        colors.text = sheet_th.ink(c, ed.look.fill);
+                    }
+                    let mut input = ed.input.clone();
+                    input.align = ed.look.align;
                     match crate::complete::editor_lines(ed, r, pad, p.text, style) {
-                        Some(lines) => ed.input.draw_lines(
-                            &mut p,
-                            r,
-                            style,
-                            pad,
-                            !ed.in_bar,
-                            &colors,
-                            &cell_spans,
-                            &lines,
-                        ),
-                        None => {
-                            ed.input.draw_spans(&mut p, r, style, pad, !ed.in_bar, &colors, "", &cell_spans)
+                        Some(lines) => {
+                            input.draw_lines(&mut p, r, style, pad, !ed.in_bar, &colors, &cell_spans, &lines)
                         }
+                        None => input.draw_spans(&mut p, r, style, pad, !ed.in_bar, &colors, "", &cell_spans),
                     }
                     p.stroke(r.inset(-px), &Rect::everything(), 2.0 * px, mark);
                 }

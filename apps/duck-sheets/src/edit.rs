@@ -41,6 +41,19 @@ pub struct Editor {
     pub point: Option<crate::pointing::Point>,
     /// Lista de sugestões e assinatura da função.
     pub complete: crate::complete::State,
+    /// Aparência da célula (o editor sobre ela usa a mesma).
+    pub look: EditLook,
+}
+
+/// Fonte, cores e alinhamento da célula editada.
+#[derive(Clone, Debug, Default)]
+pub struct EditLook {
+    pub font: Option<crate::look::FontLook>,
+    /// Preenchimento e cor do texto, como estão no arquivo.
+    pub fill: Option<duck_ui::Rgba>,
+    pub color: Option<duck_ui::Rgba>,
+    /// 0 = esquerda, 0,5 = centro, 1 = direita.
+    pub align: f32,
 }
 
 /// Salvamento em andamento.
@@ -638,9 +651,23 @@ impl SheetsApp {
         self.dv_list = None;
         let mut input = TextInput::new();
         input.multiline = true;
+        let mut look = EditLook::default();
         let wrap = self.doc.as_ref().and_then(|d| Some((d, d.current()?))).is_some_and(|(d, (s, v))| {
             let st = s.raw(row, col).style;
             let st = if st == 0 { v.blank_style(row, col) } else { st };
+            let l = d.looks.get(st);
+            use duck_core::HAlign;
+            look = EditLook {
+                font: d.looks.fonts.get(l.font as usize).cloned(),
+                fill: l.fill,
+                color: Some(l.color),
+                // "Geral" fica à esquerda enquanto digita, como no Excel.
+                align: match l.h {
+                    HAlign::Center | HAlign::CenterContinuous => 0.5,
+                    HAlign::Right => 1.0,
+                    _ => 0.0,
+                },
+            };
             d.styles.xfs.get(st as usize).is_some_and(|x| x.alignment.wrap)
         });
         let enter_mode = initial.is_some() && !in_bar;
@@ -668,6 +695,7 @@ impl SheetsApp {
             away: false,
             point: None,
             complete: Default::default(),
+            look,
         });
         // A lista só abre ao digitar; ao editar o que já existe, só a assinatura.
         self.refresh_complete(initial.is_some());
@@ -913,16 +941,14 @@ impl SheetsApp {
                 } else {
                     crate::complete::editor_lines(&ed, r, pad, text, style)
                 };
+                // Na célula, o texto segue o alinhamento dela (na barra, não).
+                ed.input.align = if ed.in_bar || ed.away { 0.0 } else { ed.look.align };
                 let at = match lines {
                     Some(l) => ed.input.hit(&l, r, pad, x, y, text, style),
-                    None => {
-                        // Uma linha, rolada até o cursor.
-                        let caret = text.measure_styled(&ed.input.text[..ed.input.cursor()], style);
-                        let shift = (caret - (r.w() - 2.0 * pad)).max(0.0);
-                        let one = [(0, ed.input.text.len())];
-                        ed.input.hit(&one, r, pad - shift, x, r.y0 + 2.0, text, style)
-                    }
+                    // Uma linha, rolada até o cursor.
+                    None => ed.input.hit_line(r, pad, x, text, style),
                 };
+                ed.input.align = 0.0;
                 if extend {
                     let a = ed.input.selection().map_or(ed.input.cursor(), |s| s.0);
                     ed.input.select(a, at);

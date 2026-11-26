@@ -672,6 +672,7 @@ mod tests {
             sheet: 0,
             away: false,
             point: None,
+            look: Default::default(),
             complete: Default::default(),
         }
     }

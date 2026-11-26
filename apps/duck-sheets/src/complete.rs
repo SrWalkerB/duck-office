@@ -733,16 +733,25 @@ pub fn cell_editor(
         return None;
     }
     let cell = crate::draw::cell_screen_rect(g, view, ed.row, ed.col)?;
-    let style = ui.with_px((11.0 * 96.0 / 72.0 * g.g).round().max(6.0));
+    // A fonte da célula (tamanho, negrito, itálico), como a grade desenha.
+    let style = match &ed.look.font {
+        Some(f) => text.style(&f.name, (f.pt * 96.0 / 72.0 * g.g).max(6.0), f.bold, f.italic),
+        None => ui.with_px((11.0 * 96.0 / 72.0 * g.g).round().max(6.0)),
+    };
     let pad = (3.0 * g.g).round().max(1.0);
     // Com quebra de texto, a largura é a da célula e o editor cresce para baixo.
-    let x1 = if ed.wrap {
-        cell.x1
+    // Sem quebra, o texto que não cabe alarga o editor: para a direita (texto
+    // à esquerda), para a esquerda (à direita) ou para os dois lados (centro).
+    let (x0, x1) = if ed.wrap {
+        (cell.x0, cell.x1)
     } else {
         let w = ed.input.text.split('\n').map(|l| text.measure_styled(l, style)).fold(0.0, f32::max);
-        (cell.x0 + w + 2.0 * pad + 8.0 * g.g).max(cell.x1).min(g.grid.x1)
+        let extra = (w + 2.0 * pad + 8.0 * g.g - cell.w()).max(0.0);
+        let x0 = (cell.x0 - extra * ed.look.align).max(g.grid.x0);
+        let x1 = (cell.x1 + extra - (cell.x0 - x0)).min(g.grid.x1).max(cell.x1);
+        (x0, x1)
     };
-    let r = Rect::new(cell.x0, cell.y0, x1, cell.y1);
+    let r = Rect::new(x0, cell.y0, x1, cell.y1);
     let y1 = match editor_lines(ed, r, pad, text, style) {
         Some(l) => (r.y0 + l.len() as f32 * text.line_height_of(style) + 2.0).max(r.y1).min(g.grid.y1),
         None => r.y1,
@@ -796,7 +805,11 @@ pub fn boxes(ed: &Editor, g: &Geom, view: &View, text: &mut TextSystem, ui: Text
     } else {
         let caret = text.measure_styled(&ed.input.text[..ed.input.cursor()], style);
         let shift = (caret - (rect.w() - 2.0 * pad)).max(0.0);
-        rect.x0 + pad - shift + text.measure_styled(&ed.input.text[..at], style)
+        // Célula centralizada ou à direita: o texto começa mais para dentro.
+        let free = rect.w() - 2.0 * pad - text.measure_styled(&ed.input.text, style) - 1.0;
+        let align = if ed.in_bar { 0.0 } else { ed.look.align };
+        let dx = (free * align).max(0.0).floor();
+        rect.x0 + pad - shift + dx + text.measure_styled(&ed.input.text[..at], style)
     };
     let win = Rect::new(0.0, 0.0, g.w, g.status.y1);
 
@@ -1160,6 +1173,7 @@ mod tests {
             sheet: 0,
             away: false,
             point: None,
+            look: Default::default(),
             complete: State::default(),
         };
         ed.complete.update(t, cursor, true, source);
