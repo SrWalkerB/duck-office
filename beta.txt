@@ -1,5 +1,5 @@
 duck-sheets 1
-versao=1.0.0-beta.1
-arquivo=windows-instalador|duck-sheets-1.0.0-beta.1-windows-x64-instalador.exe|7896114|4d08166829fc51327e42a4a6aa2a85addcef1ec1f08114caaf17ffe2b897735c
-arquivo=macos-app|duck-sheets-1.0.0-beta.1-macos-atualizacao.zip|13616141|dd5785505f4b3dcefc0d1b5864e5ae2fc9caf4e65e745844d52f16c9bd238bcb
-arquivo=linux-appimage|duck-sheets-1.0.0-beta.1-linux-x64.AppImage|8772088|bbfe669866a816f8ddea58cdddba590ed1448a6359bd989d0e444c583c53e673
+versao=1.0.0-beta.2
+arquivo=windows-instalador|duck-sheets-1.0.0-beta.2-windows-x64-instalador.exe|7897099|be9c39a9ffa34519a2b0361c846ea61825bd8d5baa7a5e99c73db92b868c00d6
+arquivo=macos-app|duck-sheets-1.0.0-beta.2-macos-atualizacao.zip|13617984|4f6b67d68b28b98c4d96962ab4326ebd602b9f0daa512a7450caebb981811ebc
+arquivo=linux-appimage|duck-sheets-1.0.0-beta.2-linux-x64.AppImage|8772088|cba98ea60c24a792a6b91350c31be16662b8b8a4c7c0878d53673827804bf34a
